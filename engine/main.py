@@ -8,10 +8,10 @@ from typing import Optional
 
 app = FastAPI(title="Virtual Data Scientist Engine")
 
-# Allow CORS for Next.js frontend
+# Allow CORS for Next.js frontend (localhost + production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # Allow all origins (Vercel, localhost, etc.)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
