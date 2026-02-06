@@ -1,0 +1,5 @@
+{
+  "name": "InsightStream: AI Data Analyst",
+  "description": "An intelligent data analysis platform that transforms raw datasets into interactive visual insights and human-readable stories using Gemini AI.",
+  "requestFramePermissions": []
+}
