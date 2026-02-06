@@ -14,7 +14,7 @@ import {
     BarChart
 } from "lucide-react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface ModelResult {
     model_name: string;
@@ -150,8 +150,8 @@ export default function ModelingPage() {
                                     <button
                                         onClick={() => setGoal("predict")}
                                         className={`flex-1 px-4 py-3 rounded-lg border transition-colors ${goal === "predict"
-                                                ? "bg-indigo-600 border-indigo-500 text-white"
-                                                : "bg-slate-800 border-white/10 text-slate-400 hover:bg-slate-700"
+                                            ? "bg-indigo-600 border-indigo-500 text-white"
+                                            : "bg-slate-800 border-white/10 text-slate-400 hover:bg-slate-700"
                                             }`}
                                     >
                                         <Target className="w-5 h-5 mx-auto mb-1" />
@@ -160,8 +160,8 @@ export default function ModelingPage() {
                                     <button
                                         onClick={() => setGoal("classify")}
                                         className={`flex-1 px-4 py-3 rounded-lg border transition-colors ${goal === "classify"
-                                                ? "bg-indigo-600 border-indigo-500 text-white"
-                                                : "bg-slate-800 border-white/10 text-slate-400 hover:bg-slate-700"
+                                            ? "bg-indigo-600 border-indigo-500 text-white"
+                                            : "bg-slate-800 border-white/10 text-slate-400 hover:bg-slate-700"
                                             }`}
                                     >
                                         <Zap className="w-5 h-5 mx-auto mb-1" />
@@ -222,8 +222,8 @@ export default function ModelingPage() {
                                     <div
                                         key={i}
                                         className={`p-5 rounded-xl border ${model.model_name === data.best_model
-                                                ? "bg-green-500/10 border-green-500/30"
-                                                : "bg-slate-900 border-white/10"
+                                            ? "bg-green-500/10 border-green-500/30"
+                                            : "bg-slate-900 border-white/10"
                                             }`}
                                     >
                                         <div className="flex items-center justify-between mb-3">

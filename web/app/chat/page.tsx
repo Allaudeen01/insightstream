@@ -16,7 +16,7 @@ import {
     BarChart3
 } from "lucide-react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface ChatMessage {
     role: "user" | "assistant";
@@ -214,8 +214,8 @@ export default function ChatPage() {
                             )}
                             <div
                                 className={`max-w-[80%] rounded-2xl p-4 ${msg.role === "user"
-                                        ? "bg-indigo-600 text-white"
-                                        : "bg-slate-800 text-white"
+                                    ? "bg-indigo-600 text-white"
+                                    : "bg-slate-800 text-white"
                                     }`}
                             >
                                 <p className="whitespace-pre-wrap">{msg.content}</p>

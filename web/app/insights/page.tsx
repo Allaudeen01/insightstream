@@ -14,7 +14,7 @@ import {
     CheckCircle
 } from "lucide-react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface InsightCard {
     title: string;
@@ -162,10 +162,10 @@ export default function InsightsPage() {
                                             <div className="flex items-start justify-between mb-2">
                                                 <h3 className="font-semibold text-white">{insight.title}</h3>
                                                 <span className={`text-xs px-2 py-0.5 rounded-full ${insight.importance === "high"
-                                                        ? "bg-red-500/20 text-red-400"
-                                                        : insight.importance === "medium"
-                                                            ? "bg-yellow-500/20 text-yellow-400"
-                                                            : "bg-blue-500/20 text-blue-400"
+                                                    ? "bg-red-500/20 text-red-400"
+                                                    : insight.importance === "medium"
+                                                        ? "bg-yellow-500/20 text-yellow-400"
+                                                        : "bg-blue-500/20 text-blue-400"
                                                     }`}>
                                                     {insight.importance}
                                                 </span>

@@ -3,18 +3,18 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { 
-  ArrowLeft, 
+import {
+  ArrowLeft,
   ArrowRight,
-  AlertTriangle, 
-  CheckCircle2, 
+  AlertTriangle,
+  CheckCircle2,
   XCircle,
   Loader2,
   Trash2,
   Sparkles
 } from "lucide-react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface IssueItem {
   column: string;
@@ -55,7 +55,7 @@ export default function HealthCheckPage() {
       router.push("/upload");
       return;
     }
-    
+
     const session = JSON.parse(stored);
     setSessionData(session);
     fetchHealthCheck(session.session_id);
@@ -77,32 +77,32 @@ export default function HealthCheckPage() {
   const handleAutoClean = async () => {
     if (!healthData) return;
     setCleaning(true);
-    
+
     try {
       // Build cleaning actions based on issues
       const actions: { action: string; column?: string }[] = [];
-      
+
       // Add drop duplicates if there are duplicates
       if (healthData.duplicate_rows > 0) {
         actions.push({ action: "drop_duplicates" });
       }
-      
+
       // Add impute median for numeric columns with missing values
       healthData.issues
         .filter(i => i.issue_type === "missing")
         .forEach(issue => {
           actions.push({ action: "impute_median", column: issue.column });
         });
-      
+
       if (actions.length > 0) {
         const response = await fetch(`${API_BASE}/clean/${healthData.session_id}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(actions)
         });
-        
+
         if (!response.ok) throw new Error("Cleaning failed");
-        
+
         // Refresh health check
         await fetchHealthCheck(healthData.session_id);
       }

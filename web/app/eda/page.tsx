@@ -14,7 +14,7 @@ import {
     Download
 } from "lucide-react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface ColumnStats {
     column: string;
@@ -151,8 +151,8 @@ export default function EDAPage() {
                                     key={tab}
                                     onClick={() => setActiveTab(tab)}
                                     className={`px-4 py-2 rounded-lg font-medium transition-colors ${activeTab === tab
-                                            ? "bg-indigo-600 text-white"
-                                            : "bg-white/5 text-slate-400 hover:bg-white/10"
+                                        ? "bg-indigo-600 text-white"
+                                        : "bg-white/5 text-slate-400 hover:bg-white/10"
                                         }`}
                                 >
                                     {tab.charAt(0).toUpperCase() + tab.slice(1)}
