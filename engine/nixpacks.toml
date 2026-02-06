@@ -1,8 +1,9 @@
+# Nixpacks configuration for Python
 [phases.setup]
-nixPkgs = ["python311", "gcc"]
+nixPkgs = ["python311", "python311Packages.pip"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
