@@ -28,7 +28,7 @@ export default function UploadPage() {
     const router = useRouter();
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
     const handleDragOver = (e: React.DragEvent) => {
         e.preventDefault();
@@ -52,13 +52,19 @@ export default function UploadPage() {
     const handleFileUpload = async (file: File) => {
         setIsUploading(true);
         setError(null);
+        setErrorDetail(null);
 
         const formData = new FormData();
         formData.append("file", file);
 
         // Check for misconfiguration in production
-        if (process.env.NODE_ENV === "production" && API_BASE.includes("localhost")) {
-            setError("Configuration Error: API URL is pointing to localhost. Please set NEXT_PUBLIC_API_URL in Vercel settings.");
+        if (
+            API_BASE.includes("localhost") &&
+            typeof window !== "undefined" &&
+            !["localhost", "127.0.0.1"].includes(window.location.hostname)
+        ) {
+            setError("Backend URL is not configured.");
+            setErrorDetail("Set NEXT_PUBLIC_API_URL to your deployed API before uploading.");
             setIsUploading(false);
             return;
         }
@@ -84,6 +90,13 @@ export default function UploadPage() {
 
         } catch (err) {
             setError(err instanceof Error ? err.message : "An error occurred");
+            if (err instanceof TypeError && err.message.toLowerCase().includes("fetch")) {
+                setError("Unable to reach the API server.");
+                setErrorDetail(`Check that ${API_BASE} is online and allows requests from this site.`);
+            } else {
+                setError(err instanceof Error ? err.message : "An error occurred");
+                setErrorDetail(null);
+            }
             setIsUploading(false);
         }
     };
@@ -92,6 +105,7 @@ export default function UploadPage() {
         // Download a sample CSV from a public source
         setIsUploading(true);
         setError(null);
+        setErrorDetail(null);
 
         try {
             // Using the classic Titanic dataset
@@ -139,7 +153,17 @@ export default function UploadPage() {
 
                     {error && (
                         <div className="mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400">
-                            {error}
+                            <p className="font-medium">{error}</p>
+                            {errorDetail && (
+                                <p className="text-sm text-red-300">
+                                    {errorDetail}
+                                </p>
+                            )}
+                            {errorDetail && (
+                                <p className="text-xs text-red-200/80 mt-1">
+                                    API base: {API_BASE}
+                                </p>
+                            )}
                         </div>
                     )}
 
