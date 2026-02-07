@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Upload, FileSpreadsheet, ArrowLeft, Loader2 } from "lucide-react";
 
+// Robustly determine API_BASE
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface ColumnInfo {
@@ -30,6 +31,31 @@ export default function UploadPage() {
     const [isUploading, setIsUploading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [errorDetail, setErrorDetail] = useState<string | null>(null);
+    const [apiStatus, setApiStatus] = useState<"checking" | "online" | "offline">("checking");
+
+    // Check API health on mount
+    useEffect(() => {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 5000);
+
+        const checkHealth = async () => {
+            try {
+                const response = await fetch(`${API_BASE}/health`, { signal: controller.signal });
+                setApiStatus(response.ok ? "online" : "offline");
+            } catch (err) {
+                setApiStatus("offline");
+            } finally {
+                window.clearTimeout(timeoutId);
+            }
+        };
+
+        checkHealth();
+
+        return () => {
+            controller.abort();
+            window.clearTimeout(timeoutId);
+        };
+    }, []);
 
     const handleDragOver = (e: React.DragEvent) => {
         e.preventDefault();
@@ -55,10 +81,7 @@ export default function UploadPage() {
         setError(null);
         setErrorDetail(null);
 
-        const formData = new FormData();
-        formData.append("file", file);
-
-        // Check for misconfiguration in production
+        // Client-side configuration check
         if (
             API_BASE.includes("localhost") &&
             typeof window !== "undefined" &&
@@ -69,6 +92,9 @@ export default function UploadPage() {
             setIsUploading(false);
             return;
         }
+
+        const formData = new FormData();
+        formData.append("file", file);
 
         try {
             const response = await fetch(`${API_BASE}/upload`, {
@@ -90,7 +116,6 @@ export default function UploadPage() {
             router.push("/health-check");
 
         } catch (err) {
-            setError(err instanceof Error ? err.message : "An error occurred");
             if (err instanceof TypeError && err.message.toLowerCase().includes("fetch")) {
                 setError("Unable to reach the API server.");
                 setErrorDetail(`Check that ${API_BASE} is online and allows requests from this site.`);
@@ -103,13 +128,11 @@ export default function UploadPage() {
     };
 
     const handleSampleData = async () => {
-        // Download a sample CSV from a public source
         setIsUploading(true);
         setError(null);
         setErrorDetail(null);
 
         try {
-            // Using the classic Titanic dataset
             const response = await fetch("https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv");
             const csvText = await response.text();
             const blob = new Blob([csvText], { type: "text/csv" });
@@ -118,6 +141,7 @@ export default function UploadPage() {
             await handleFileUpload(file);
         } catch (err) {
             setError("Failed to load sample dataset");
+            setErrorDetail(null);
             setIsUploading(false);
         }
     };
@@ -137,7 +161,6 @@ export default function UploadPage() {
                         </div>
                         <span className="font-bold text-lg tracking-tight">VirtualScientist</span>
                     </div>
-                    <div className="w-20" /> {/* Spacer for centering */}
                 </div>
             </header>
 
@@ -152,8 +175,18 @@ export default function UploadPage() {
                         We will automatically detect columns and data types.
                     </p>
 
+                    {apiStatus !== "checking" && (
+                        <div className="mb-4 text-sm text-slate-400">
+                            API status:{" "}
+                            <span className={apiStatus === "online" ? "text-emerald-400" : "text-amber-400"}>
+                                {apiStatus === "online" ? "online" : "unreachable"}
+                            </span>{" "}
+                            ({API_BASE})
+                        </div>
+                    )}
+
                     {error && (
-                        <div className="mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400">
+                        <div className="mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 space-y-2">
                             <p className="font-medium">{error}</p>
                             {errorDetail && (
                                 <p className="text-sm text-red-300">
@@ -161,7 +194,7 @@ export default function UploadPage() {
                                 </p>
                             )}
                             {errorDetail && (
-                                <p className="text-xs text-red-200/80 mt-1">
+                                <p className="text-xs text-red-200/80">
                                     API base: {API_BASE}
                                 </p>
                             )}
