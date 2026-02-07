@@ -12,5 +12,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run the application directly with Python
-# main.py handles the PORT environment variable logic
-CMD ["python", "main.py"]
+# Run uvicorn using shell form to ensure $PORT expansion works
+CMD uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers
