@@ -17,8 +17,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session store (replace with Redis/DB in production)
-sessions: dict = {}
+# ============== FILE-BASED SESSION STORAGE ==============
+# Sessions are stored in /tmp/sessions/ as JSON (metadata) + Parquet (dataframe)
+# This survives within a container's lifetime, unlike in-memory dicts
+
+import os
+import json
+from pathlib import Path
+
+SESSION_DIR = Path("/tmp/sessions")
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+def save_session(session_id: str, filename: str, df: pl.DataFrame) -> None:
+    """Save session to disk."""
+    session_path = SESSION_DIR / session_id
+    session_path.mkdir(parents=True, exist_ok=True)
+    
+    # Save metadata
+    metadata = {"filename": filename}
+    with open(session_path / "metadata.json", "w") as f:
+        json.dump(metadata, f)
+    
+    # Save DataFrame as Parquet (fast and efficient)
+    df.write_parquet(session_path / "data.parquet")
+
+def load_session(session_id: str) -> tuple[str, pl.DataFrame]:
+    """Load session from disk. Raises FileNotFoundError if not found."""
+    session_path = SESSION_DIR / session_id
+    
+    if not session_path.exists():
+        raise FileNotFoundError(f"Session {session_id} not found")
+    
+    # Load metadata
+    with open(session_path / "metadata.json", "r") as f:
+        metadata = json.load(f)
+    
+    # Load DataFrame
+    df = pl.read_parquet(session_path / "data.parquet")
+    
+    return metadata["filename"], df
+
+def session_exists(session_id: str) -> bool:
+    """Check if a session exists."""
+    return (SESSION_DIR / session_id / "data.parquet").exists()
 
 class ColumnInfo(BaseModel):
     name: str
@@ -75,11 +116,8 @@ async def upload_dataset(file: UploadFile = File(...)):
         # Generate session ID
         session_id = str(uuid.uuid4())
         
-        # Store dataframe in session
-        sessions[session_id] = {
-            "df": df,
-            "filename": file.filename
-        }
+        # Store dataframe in session (file-based for production)
+        save_session(session_id, file.filename, df)
         
         # Build schema response
         columns_info = []
@@ -112,15 +150,14 @@ async def upload_dataset(file: UploadFile = File(...)):
 @app.get("/session/{session_id}")
 def get_session(session_id: str):
     """Get info about an existing session."""
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    session = sessions[session_id]
-    df = session["df"]
     
     return {
         "session_id": session_id,
-        "filename": session["filename"],
+        "filename": filename,
         "row_count": len(df),
         "column_count": len(df.columns)
     }
@@ -149,11 +186,11 @@ def get_health_check(session_id: str):
     Analyze dataset for data quality issues.
     This is the "Data Health Check" step - what a real Data Scientist does first.
     """
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    session = sessions[session_id]
-    df = session["df"]
     issues = []
     
     # 1. Check for duplicate rows
@@ -240,10 +277,10 @@ def apply_cleaning(session_id: str, actions: list[CleanAction]):
     """
     Apply cleaning actions to the dataset.
     """
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    df = sessions[session_id]["df"]
     
     for action in actions:
         if action.action == "drop_duplicates":
@@ -263,7 +300,8 @@ def apply_cleaning(session_id: str, actions: list[CleanAction]):
             if mode_val is not None:
                 df = df.with_columns(pl.col(action.column).fill_null(mode_val))
     
-    sessions[session_id]["df"] = df
+    # Save the cleaned DataFrame back to disk
+    save_session(session_id, filename, df)
     
     return {"status": "ok", "row_count": len(df), "column_count": len(df.columns)}
 
@@ -293,10 +331,10 @@ def get_eda(session_id: str):
     Perform Exploratory Data Analysis.
     This is the "Auto EDA" step - auto-generated statistics and insights.
     """
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    df = sessions[session_id]["df"]
     
     # Categorize columns
     numeric_cols = []
@@ -407,10 +445,11 @@ def get_insights(session_id: str):
     Generate business insights in plain English.
     This is the 'What is happening?' answer - real Data Scientist work.
     """
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    df = sessions[session_id]["df"]
     insights = []
     recommendations = []
     
@@ -541,10 +580,11 @@ def chat_with_data(session_id: str, request: ChatRequest):
     Natural language interface to query data.
     This is the 'Talk to Your Data' feature - converts questions to analysis.
     """
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    df = sessions[session_id]["df"]
     question = request.question.lower()
     
     # Simple NL parsing (in production, use LLM)
@@ -686,10 +726,10 @@ def train_models(session_id: str, config: ModelConfig):
     AutoML Pipeline: Train and compare multiple models.
     This is the 'Smart Modeling' feature - what a Data Scientist does for predictions.
     """
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    df = sessions[session_id]["df"]
     
     if config.target_column not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{config.target_column}' not found")
@@ -853,12 +893,10 @@ def generate_report(session_id: str):
     """
     from datetime import datetime
     
-    if session_id not in sessions:
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    session = sessions[session_id]
-    df = session["df"]
-    filename = session["filename"]
     
     sections = []
     
