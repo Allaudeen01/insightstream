@@ -26,10 +26,21 @@ import json
 from pathlib import Path
 
 SESSION_DIR = Path("/tmp/sessions")
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+@app.on_event("startup")
+async def startup_event():
+    """Create session directory on startup."""
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Session directory created: {SESSION_DIR}")
+    except Exception as e:
+        print(f"Warning: Could not create session directory: {e}")
 
 def save_session(session_id: str, filename: str, df: pl.DataFrame) -> None:
     """Save session to disk."""
+    # Ensure base directory exists (fallback in case startup event didn't run)
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    
     session_path = SESSION_DIR / session_id
     session_path.mkdir(parents=True, exist_ok=True)
     
