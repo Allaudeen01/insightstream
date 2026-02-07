@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -13,7 +13,11 @@ import {
   Trash2,
   Sparkles,
   Table2,
-  X
+  X,
+  Settings2,
+  RotateCcw,
+  Eye,
+  Check
 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -53,6 +57,26 @@ interface RawDataResponse {
   total_pages: number;
 }
 
+interface CleaningAction {
+  action: string;
+  column?: string;
+  enabled: boolean;
+  label: string;
+  recommended: boolean;
+}
+
+interface PreviewData {
+  before_rows: number;
+  before_columns: number;
+  before_score: string;
+  after_rows: number;
+  after_columns: number;
+  after_score: string;
+  row_delta: number;
+  column_delta: number;
+  changes: string[];
+}
+
 export default function HealthCheckPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -63,6 +87,15 @@ export default function HealthCheckPage() {
   const [showRawData, setShowRawData] = useState(false);
   const [rawData, setRawData] = useState<RawDataResponse | null>(null);
   const [loadingRawData, setLoadingRawData] = useState(false);
+
+  // Cleaning Modal State
+  const [showCleanModal, setShowCleanModal] = useState(false);
+  const [cleaningActions, setCleaningActions] = useState<CleaningAction[]>([]);
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
 
   useEffect(() => {
     const stored = localStorage.getItem("analysis_session");
@@ -89,44 +122,137 @@ export default function HealthCheckPage() {
     }
   };
 
-  const handleAutoClean = async () => {
+  const openCleanModal = () => {
+    if (!healthData) return;
+
+    // Build cleaning actions from detected issues
+    const actions: CleaningAction[] = [];
+
+    // Add drop duplicates if there are duplicates
+    if (healthData.duplicate_rows > 0) {
+      actions.push({
+        action: "drop_duplicates",
+        enabled: true,
+        label: `Remove ${healthData.duplicate_rows} duplicate rows`,
+        recommended: true
+      });
+    }
+
+    // Add actions for each issue
+    healthData.issues.forEach(issue => {
+      if (issue.issue_type === "missing") {
+        const isHighMissing = issue.percentage > 70;
+        actions.push({
+          action: isHighMissing ? "drop_column" : "impute_median",
+          column: issue.column,
+          enabled: !isHighMissing, // Don't enable drop by default
+          label: isHighMissing
+            ? `Drop column '${issue.column}' (${issue.percentage.toFixed(1)}% missing)`
+            : `Impute ${issue.count} missing '${issue.column}' with median`,
+          recommended: !isHighMissing
+        });
+      } else if (issue.issue_type === "outlier") {
+        actions.push({
+          action: "cap_outliers",
+          column: issue.column,
+          enabled: false, // Don't enable outlier capping by default
+          label: `Cap outliers in '${issue.column}' (${issue.count} detected)`,
+          recommended: false
+        });
+      }
+    });
+
+    setCleaningActions(actions);
+    setPreviewData(null);
+    setShowCleanModal(true);
+  };
+
+  const fetchPreview = async () => {
+    if (!healthData) return;
+    setLoadingPreview(true);
+
+    try {
+      const enabledActions = cleaningActions
+        .filter(a => a.enabled)
+        .map(a => ({ action: a.action, column: a.column, enabled: true }));
+
+      const response = await fetch(`${API_BASE}/preview-clean/${healthData.session_id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(enabledActions)
+      });
+
+      if (!response.ok) throw new Error("Preview failed");
+      const data = await response.json();
+      setPreviewData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Preview failed");
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  const applyCleaning = async () => {
     if (!healthData) return;
     setCleaning(true);
 
     try {
-      // Build cleaning actions based on issues
-      const actions: { action: string; column?: string }[] = [];
+      const enabledActions = cleaningActions
+        .filter(a => a.enabled)
+        .map(a => ({ action: a.action, column: a.column, enabled: true }));
 
-      // Add drop duplicates if there are duplicates
-      if (healthData.duplicate_rows > 0) {
-        actions.push({ action: "drop_duplicates" });
-      }
+      const response = await fetch(`${API_BASE}/clean/${healthData.session_id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(enabledActions)
+      });
 
-      // Add impute median for numeric columns with missing values
-      healthData.issues
-        .filter(i => i.issue_type === "missing")
-        .forEach(issue => {
-          actions.push({ action: "impute_median", column: issue.column });
-        });
+      if (!response.ok) throw new Error("Cleaning failed");
+      const data = await response.json();
 
-      if (actions.length > 0) {
-        const response = await fetch(`${API_BASE}/clean/${healthData.session_id}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(actions)
-        });
+      setCanUndo(data.can_undo);
+      setShowCleanModal(false);
+      setSuccessMessage(`Data cleaned successfully! ${data.changes?.length || 0} changes applied.`);
 
-        if (!response.ok) throw new Error("Cleaning failed");
+      // Auto-hide success message after 10 seconds
+      setTimeout(() => setSuccessMessage(null), 10000);
 
-        // Refresh health check
-        await fetchHealthCheck(healthData.session_id);
-      }
+      // Refresh health check
+      await fetchHealthCheck(healthData.session_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Cleaning failed");
     } finally {
       setCleaning(false);
     }
   };
+
+  const undoClean = async () => {
+    if (!healthData) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/undo-clean/${healthData.session_id}`, {
+        method: "POST"
+      });
+
+      if (!response.ok) throw new Error("Undo failed");
+
+      setCanUndo(false);
+      setSuccessMessage("Data restored to original state!");
+      setTimeout(() => setSuccessMessage(null), 5000);
+
+      await fetchHealthCheck(healthData.session_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Undo failed");
+    }
+  };
+
+  const toggleAction = (index: number) => {
+    setCleaningActions(prev =>
+      prev.map((a, i) => i === index ? { ...a, enabled: !a.enabled } : a)
+    );
+    setPreviewData(null); // Clear preview when actions change
+  };
+
 
   const handleViewRawData = async () => {
     if (!sessionData) return;
@@ -240,18 +366,22 @@ export default function HealthCheckPage() {
                     <Table2 className="w-4 h-4" />
                     View Raw Data
                   </button>
-                  {healthData.issues.length > 0 && (
+                  {(healthData.issues.length > 0 || healthData.duplicate_rows > 0) && (
                     <button
-                      onClick={handleAutoClean}
-                      disabled={cleaning}
-                      className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-medium transition-colors disabled:opacity-50"
+                      onClick={openCleanModal}
+                      className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-medium transition-colors"
                     >
-                      {cleaning ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Sparkles className="w-4 h-4" />
-                      )}
-                      Auto Clean Data
+                      <Settings2 className="w-4 h-4" />
+                      Clean Data
+                    </button>
+                  )}
+                  {canUndo && (
+                    <button
+                      onClick={undoClean}
+                      className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-500 rounded-lg font-medium transition-colors"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      Undo
                     </button>
                   )}
                 </div>
@@ -372,9 +502,160 @@ export default function HealthCheckPage() {
           </div>
         </div>
       )}
+
+      {/* Success Toast */}
+      {successMessage && (
+        <div className="fixed bottom-6 right-6 bg-green-600 text-white px-6 py-4 rounded-xl shadow-lg flex items-center gap-3 z-50 animate-slide-up">
+          <CheckCircle2 className="w-5 h-5" />
+          <span>{successMessage}</span>
+          <button onClick={() => setSuccessMessage(null)} className="p-1 hover:bg-white/20 rounded">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Cleaning Options Modal */}
+      {showCleanModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 rounded-2xl border border-white/10 w-full max-w-2xl max-h-[90vh] flex flex-col">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-4 border-b border-white/10">
+              <div className="flex items-center gap-3">
+                <Settings2 className="w-6 h-6 text-indigo-400" />
+                <h3 className="text-xl font-semibold">Data Cleaning Options</h3>
+              </div>
+              <button
+                onClick={() => setShowCleanModal(false)}
+                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="flex-1 overflow-auto p-4 space-y-4">
+              {cleaningActions.length === 0 ? (
+                <p className="text-center text-slate-400 py-8">No cleaning actions available.</p>
+              ) : (
+                <>
+                  <p className="text-slate-400 text-sm">Select the cleaning actions to apply:</p>
+                  <div className="space-y-3">
+                    {cleaningActions.map((action, i) => (
+                      <div
+                        key={i}
+                        className={`p-4 rounded-xl border transition-colors cursor-pointer ${action.enabled
+                            ? 'bg-indigo-500/10 border-indigo-500/30'
+                            : 'bg-slate-800 border-white/10 hover:border-white/20'
+                          }`}
+                        onClick={() => toggleAction(i)}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${action.enabled ? 'bg-indigo-500 border-indigo-500' : 'border-white/30'
+                            }`}>
+                            {action.enabled && <Check className="w-3 h-3" />}
+                          </div>
+                          <span className="flex-1">{action.label}</span>
+                          {action.recommended && (
+                            <span className="text-xs px-2 py-1 bg-green-500/20 text-green-400 rounded">
+                              Recommended
+                            </span>
+                          )}
+                          {!action.recommended && action.action === "drop_column" && (
+                            <span className="text-xs px-2 py-1 bg-amber-500/20 text-amber-400 rounded">
+                              ⚠️ Caution
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Preview Section */}
+                  <div className="pt-4 border-t border-white/10">
+                    <button
+                      onClick={fetchPreview}
+                      disabled={loadingPreview || cleaningActions.filter(a => a.enabled).length === 0}
+                      className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg font-medium transition-colors disabled:opacity-50"
+                    >
+                      {loadingPreview ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                      Preview Changes
+                    </button>
+
+                    {previewData && (
+                      <div className="mt-4 p-4 rounded-xl bg-slate-800 border border-white/10">
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                          <div>
+                            <p className="text-slate-400 text-sm">Before</p>
+                            <p className="text-lg">
+                              {previewData.before_rows.toLocaleString()} rows, {previewData.before_columns} cols
+                              <span className={`ml-2 text-sm px-2 py-0.5 rounded ${getScoreColor(previewData.before_score)}`}>
+                                {previewData.before_score}
+                              </span>
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-slate-400 text-sm">After</p>
+                            <p className="text-lg">
+                              {previewData.after_rows.toLocaleString()} rows, {previewData.after_columns} cols
+                              <span className={`ml-2 text-sm px-2 py-0.5 rounded ${getScoreColor(previewData.after_score)}`}>
+                                {previewData.after_score}
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-4 text-sm mb-4">
+                          <span className={previewData.row_delta < 0 ? 'text-red-400' : 'text-green-400'}>
+                            Rows: {previewData.row_delta >= 0 ? '+' : ''}{previewData.row_delta}
+                          </span>
+                          <span className={previewData.column_delta < 0 ? 'text-red-400' : 'text-green-400'}>
+                            Columns: {previewData.column_delta >= 0 ? '+' : ''}{previewData.column_delta}
+                          </span>
+                        </div>
+
+                        {previewData.changes.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-slate-400 text-sm">Changes:</p>
+                            {previewData.changes.map((change, i) => (
+                              <p key={i} className="text-sm text-slate-300">• {change}</p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-white/10 flex justify-end gap-3">
+              <button
+                onClick={() => setShowCleanModal(false)}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={applyCleaning}
+                disabled={cleaning || cleaningActions.filter(a => a.enabled).length === 0}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-medium transition-colors disabled:opacity-50"
+              >
+                {cleaning ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+                Apply Cleaning
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
-/ /   F o r c e   r e b u i l d  
- 

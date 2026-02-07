@@ -315,39 +315,195 @@ def get_health_check(session_id: str):
 class CleanAction(BaseModel):
     action: str  # "drop_duplicates" | "drop_column" | "impute_mean" | "impute_median" | "impute_mode" | "drop_nulls"
     column: Optional[str] = None
+    enabled: bool = True  # Allow toggling actions
 
-@app.post("/clean/{session_id}")
-def apply_cleaning(session_id: str, actions: list[CleanAction]):
+class CleaningPreview(BaseModel):
+    before_rows: int
+    before_columns: int
+    before_score: str
+    after_rows: int
+    after_columns: int
+    after_score: str
+    changes: list[str]
+    sample_affected: list[dict]
+
+def calculate_quality_score(df: pl.DataFrame) -> str:
+    """Calculate quality score for a DataFrame."""
+    total_cells = len(df) * len(df.columns)
+    if total_cells == 0:
+        return "A"
+    
+    null_count = sum(df[col].null_count() for col in df.columns)
+    null_pct = (null_count / total_cells) * 100
+    
+    duplicate_count = len(df) - len(df.unique())
+    dup_pct = (duplicate_count / len(df)) * 100 if len(df) > 0 else 0
+    
+    if null_pct > 20 or dup_pct > 10:
+        return "D"
+    elif null_pct > 10 or dup_pct > 5:
+        return "C"
+    elif null_pct > 5 or dup_pct > 2:
+        return "B"
+    return "A"
+
+def apply_actions_to_df(df: pl.DataFrame, actions: list[CleanAction]) -> tuple[pl.DataFrame, list[str]]:
+    """Apply cleaning actions and return cleaned df with changelog."""
+    changelog = []
+    
+    for action in actions:
+        if not action.enabled:
+            continue
+            
+        if action.action == "drop_duplicates":
+            before = len(df)
+            df = df.unique()
+            removed = before - len(df)
+            if removed > 0:
+                changelog.append(f"Removed {removed} duplicate rows")
+        elif action.action == "drop_column" and action.column:
+            if action.column in df.columns:
+                df = df.drop(action.column)
+                changelog.append(f"Dropped column '{action.column}'")
+        elif action.action == "drop_nulls" and action.column:
+            before = len(df)
+            df = df.filter(pl.col(action.column).is_not_null())
+            removed = before - len(df)
+            if removed > 0:
+                changelog.append(f"Dropped {removed} rows with null '{action.column}'")
+        elif action.action == "impute_mean" and action.column:
+            null_count = df[action.column].null_count()
+            if null_count > 0:
+                mean_val = df[action.column].mean()
+                df = df.with_columns(pl.col(action.column).fill_null(mean_val))
+                changelog.append(f"Imputed {null_count} missing '{action.column}' with mean ({mean_val:.2f})")
+        elif action.action == "impute_median" and action.column:
+            null_count = df[action.column].null_count()
+            if null_count > 0:
+                median_val = df[action.column].median()
+                df = df.with_columns(pl.col(action.column).fill_null(median_val))
+                changelog.append(f"Imputed {null_count} missing '{action.column}' with median ({median_val:.2f})")
+        elif action.action == "impute_mode" and action.column:
+            null_count = df[action.column].null_count()
+            if null_count > 0:
+                mode_list = df[action.column].mode().to_list()
+                mode_val = mode_list[0] if len(mode_list) > 0 else None
+                if mode_val is not None:
+                    df = df.with_columns(pl.col(action.column).fill_null(mode_val))
+                    changelog.append(f"Imputed {null_count} missing '{action.column}' with mode ('{mode_val}')")
+    
+    return df, changelog
+
+@app.post("/preview-clean/{session_id}")
+def preview_cleaning(session_id: str, actions: list[CleanAction]):
     """
-    Apply cleaning actions to the dataset.
+    Preview cleaning actions without applying them.
+    Returns before/after stats and sample of affected rows.
     """
     try:
         filename, df = load_session(session_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    for action in actions:
-        if action.action == "drop_duplicates":
-            df = df.unique()
-        elif action.action == "drop_column" and action.column:
-            df = df.drop(action.column)
-        elif action.action == "drop_nulls" and action.column:
-            df = df.filter(pl.col(action.column).is_not_null())
-        elif action.action == "impute_mean" and action.column:
-            mean_val = df[action.column].mean()
-            df = df.with_columns(pl.col(action.column).fill_null(mean_val))
-        elif action.action == "impute_median" and action.column:
-            median_val = df[action.column].median()
-            df = df.with_columns(pl.col(action.column).fill_null(median_val))
-        elif action.action == "impute_mode" and action.column:
-            mode_val = df[action.column].mode().to_list()[0] if len(df[action.column].mode()) > 0 else None
-            if mode_val is not None:
-                df = df.with_columns(pl.col(action.column).fill_null(mode_val))
+    # Before stats
+    before_rows = len(df)
+    before_columns = len(df.columns)
+    before_score = calculate_quality_score(df)
+    
+    # Apply to a copy
+    df_copy = df.clone()
+    cleaned_df, changelog = apply_actions_to_df(df_copy, actions)
+    
+    # After stats
+    after_rows = len(cleaned_df)
+    after_columns = len(cleaned_df.columns)
+    after_score = calculate_quality_score(cleaned_df)
+    
+    # Get sample of affected rows (first 5)
+    sample_affected = []
+    try:
+        sample_affected = cleaned_df.head(5).to_dicts()
+    except Exception:
+        pass
+    
+    return {
+        "before_rows": before_rows,
+        "before_columns": before_columns,
+        "before_score": before_score,
+        "after_rows": after_rows,
+        "after_columns": after_columns, 
+        "after_score": after_score,
+        "row_delta": after_rows - before_rows,
+        "column_delta": after_columns - before_columns,
+        "changes": changelog,
+        "sample_affected": sample_affected
+    }
+
+@app.post("/clean/{session_id}")
+def apply_cleaning(session_id: str, actions: list[CleanAction]):
+    """
+    Apply cleaning actions to the dataset.
+    Saves backup of original data for undo capability.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Save backup before cleaning
+    backup_path = SESSION_DIR / session_id / "backup.parquet"
+    try:
+        df.write_parquet(backup_path)
+    except Exception as e:
+        print(f"Warning: Could not save backup: {e}")
+    
+    # Apply cleaning actions
+    cleaned_df, changelog = apply_actions_to_df(df, actions)
     
     # Save the cleaned DataFrame back to disk
-    save_session(session_id, filename, df)
+    save_session(session_id, filename, cleaned_df)
     
-    return {"status": "ok", "row_count": len(df), "column_count": len(df.columns)}
+    return {
+        "status": "ok", 
+        "row_count": len(cleaned_df), 
+        "column_count": len(cleaned_df.columns),
+        "changes": changelog,
+        "can_undo": backup_path.exists()
+    }
+
+@app.post("/undo-clean/{session_id}")
+def undo_cleaning(session_id: str):
+    """
+    Restore the original data from backup.
+    """
+    try:
+        filename, _ = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    backup_path = SESSION_DIR / session_id / "backup.parquet"
+    
+    if not backup_path.exists():
+        raise HTTPException(status_code=404, detail="No backup available to restore")
+    
+    try:
+        # Restore from backup
+        df = pl.read_parquet(backup_path)
+        save_session(session_id, filename, df)
+        
+        # Remove backup after restore
+        backup_path.unlink()
+        
+        return {
+            "status": "ok",
+            "message": "Data restored to original state",
+            "row_count": len(df),
+            "column_count": len(df.columns)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore backup: {str(e)}")
+
+
 
 class EDAColumnStats(BaseModel):
     column: str
