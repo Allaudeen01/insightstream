@@ -6,7 +6,7 @@ import { Dataset, ColumnStats, ColumnType } from '../types';
 export const parseFile = async (file: File): Promise<Dataset> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    
+
     reader.onload = (e) => {
       const data = e.target?.result;
       if (!data) return reject("No data read");
@@ -37,12 +37,12 @@ export const parseFile = async (file: File): Promise<Dataset> => {
 
 const processRawData = (name: string, rawData: any[]): Dataset => {
   if (rawData.length === 0) throw new Error("Dataset is empty");
-  
+
   const headers = Object.keys(rawData[0]);
   const columns: ColumnStats[] = headers.map(header => {
     const values = rawData.map(row => row[header]).filter(v => v !== null && v !== undefined && v !== '');
     const type = detectType(values);
-    
+
     const stats: ColumnStats = {
       name: header,
       type,
@@ -72,7 +72,7 @@ const processRawData = (name: string, rawData: any[]): Dataset => {
 const detectType = (values: any[]): ColumnType => {
   if (values.length === 0) return 'string';
   const sample = values.slice(0, 10);
-  
+
   const isDate = sample.every(v => !isNaN(Date.parse(v)) && String(v).length > 5);
   if (isDate) return 'date';
 

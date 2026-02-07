@@ -11,8 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose default port (Railway will map the internal port)
+# Expose default port (Railway metadata)
 EXPOSE 8000
 
-# Run using python directly - main.py logic will handle PORT env var
-CMD ["python", "main.py"]
+# Use shell form to expand PORT variable correctly
+# This runs: /bin/sh -c "uvicorn ..."
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
