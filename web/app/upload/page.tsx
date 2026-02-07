@@ -56,6 +56,13 @@ export default function UploadPage() {
         const formData = new FormData();
         formData.append("file", file);
 
+        // Check for misconfiguration in production
+        if (process.env.NODE_ENV === "production" && API_BASE.includes("localhost")) {
+            setError("Configuration Error: API URL is pointing to localhost. Please set NEXT_PUBLIC_API_URL in Vercel settings.");
+            setIsUploading(false);
+            return;
+        }
+
         try {
             const response = await fetch(`${API_BASE}/upload`, {
                 method: "POST",
