@@ -11,7 +11,9 @@ import {
   XCircle,
   Loader2,
   Trash2,
-  Sparkles
+  Sparkles,
+  Table2,
+  X
 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -41,6 +43,16 @@ interface SessionData {
   column_count: number;
 }
 
+interface RawDataResponse {
+  session_id: string;
+  columns: string[];
+  data: Record<string, unknown>[];
+  page: number;
+  page_size: number;
+  total_rows: number;
+  total_pages: number;
+}
+
 export default function HealthCheckPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -48,6 +60,9 @@ export default function HealthCheckPage() {
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
+  const [showRawData, setShowRawData] = useState(false);
+  const [rawData, setRawData] = useState<RawDataResponse | null>(null);
+  const [loadingRawData, setLoadingRawData] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem("analysis_session");
@@ -110,6 +125,23 @@ export default function HealthCheckPage() {
       setError(err instanceof Error ? err.message : "Cleaning failed");
     } finally {
       setCleaning(false);
+    }
+  };
+
+  const handleViewRawData = async () => {
+    if (!sessionData) return;
+    setShowRawData(true);
+    setLoadingRawData(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/data/${sessionData.session_id}?page_size=100`);
+      if (!response.ok) throw new Error("Failed to fetch raw data");
+      const data = await response.json();
+      setRawData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load data");
+    } finally {
+      setLoadingRawData(false);
     }
   };
 
@@ -200,21 +232,31 @@ export default function HealthCheckPage() {
             <div className="mb-8">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold">Issues Detected</h2>
-                {healthData.issues.length > 0 && (
+                <div className="flex gap-2">
                   <button
-                    onClick={handleAutoClean}
-                    disabled={cleaning}
-                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-medium transition-colors disabled:opacity-50"
+                    onClick={handleViewRawData}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg font-medium transition-colors"
                   >
-                    {cleaning ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Sparkles className="w-4 h-4" />
-                    )}
-                    Auto Clean Data
+                    <Table2 className="w-4 h-4" />
+                    View Raw Data
                   </button>
-                )}
+                  {healthData.issues.length > 0 && (
+                    <button
+                      onClick={handleAutoClean}
+                      disabled={cleaning}
+                      className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-medium transition-colors disabled:opacity-50"
+                    >
+                      {cleaning ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4" />
+                      )}
+                      Auto Clean Data
+                    </button>
+                  )}
+                </div>
               </div>
+
 
               {healthData.issues.length === 0 ? (
                 <div className="p-8 rounded-2xl bg-green-500/10 border border-green-500/20 text-center">
@@ -267,6 +309,70 @@ export default function HealthCheckPage() {
           </>
         )}
       </main>
+
+      {/* Raw Data Modal */}
+      {showRawData && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 rounded-2xl border border-white/10 w-full max-w-6xl max-h-[90vh] flex flex-col">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-4 border-b border-white/10">
+              <h3 className="text-xl font-semibold">Raw Data Preview</h3>
+              <button
+                onClick={() => setShowRawData(false)}
+                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="flex-1 overflow-auto p-4">
+              {loadingRawData ? (
+                <div className="flex items-center justify-center h-64">
+                  <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+                </div>
+              ) : rawData ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-800 sticky top-0">
+                      <tr>
+                        {rawData.columns.map((col) => (
+                          <th key={col} className="px-4 py-3 text-left font-medium text-slate-300 whitespace-nowrap">
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {rawData.data.map((row, i) => (
+                        <tr key={i} className="hover:bg-white/5">
+                          {rawData.columns.map((col) => (
+                            <td key={col} className="px-4 py-2 whitespace-nowrap text-slate-400">
+                              {row[col] !== null && row[col] !== undefined
+                                ? String(row[col])
+                                : <span className="text-slate-600 italic">null</span>}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-center text-slate-400">No data available</p>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            {rawData && (
+              <div className="p-4 border-t border-white/10 text-center text-sm text-slate-400">
+                Showing {rawData.data.length} of {rawData.total_rows.toLocaleString()} rows
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

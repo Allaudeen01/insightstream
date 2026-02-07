@@ -173,7 +173,40 @@ def get_session(session_id: str):
         "column_count": len(df.columns)
     }
 
+@app.get("/data/{session_id}")
+def get_raw_data(session_id: str, page: int = 1, page_size: int = 100):
+    """Get paginated raw data for a session."""
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Limit page_size for performance
+    page_size = min(page_size, 1000)
+    page = max(1, page)
+    
+    total_rows = len(df)
+    total_pages = (total_rows + page_size - 1) // page_size
+    
+    # Calculate slice indices
+    start_idx = (page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_rows)
+    
+    # Get the slice of data
+    data_slice = df.slice(start_idx, page_size).to_dicts()
+    
+    return {
+        "session_id": session_id,
+        "columns": df.columns,
+        "data": data_slice,
+        "page": page,
+        "page_size": page_size,
+        "total_rows": total_rows,
+        "total_pages": total_pages
+    }
+
 # ============== PHASE 3: HEALTH CHECK & EDA ==============
+
 
 class IssueItem(BaseModel):
     column: str
