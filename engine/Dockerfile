@@ -11,6 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Run the application directly with Python
-# main.py handles the PORT environment variable logic
-CMD ["python", "main.py"]
+# Run uvicorn directly with proxy headers enabled (Crucial for Railway)
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers"]
