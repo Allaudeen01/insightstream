@@ -28,6 +28,7 @@ export default function UploadPage() {
     const router = useRouter();
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
     const handleDragOver = (e: React.DragEvent) => {
