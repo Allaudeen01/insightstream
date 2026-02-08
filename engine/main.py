@@ -777,7 +777,7 @@ class VizResponse(BaseModel):
     total_generated: int
 
 @app.get("/generate-viz/{session_id}", response_model=VizResponse)
-def generate_visualizations(session_id: str, max_charts: int = 6):
+def generate_visualizations(session_id: str, max_charts: int = 10):
     """
     Auto-generate advanced interactive charts based on dataset characteristics.
     Returns Plotly JSON for frontend rendering with react-plotly.js.
@@ -795,7 +795,107 @@ def generate_visualizations(session_id: str, max_charts: int = 6):
     numeric_cols = [c for c in pdf.columns if pdf[c].dtype in ['int64', 'float64', 'int32', 'float32']]
     categorical_cols = [c for c in pdf.columns if pdf[c].dtype == 'object' or pdf[c].nunique() < 10]
     
-    # 1. VIOLIN PLOT: Numeric + Categorical (distribution comparison)
+    # ============== PHASE 0: CORE BASICS ==============
+    
+    # 0.1 HISTOGRAM: Distribution of numeric columns
+    for col in numeric_cols[:2]:  # Limit to first 2 numeric columns
+        if pdf[col].nunique() > 5 and len(charts) < max_charts:
+            try:
+                fig = px.histogram(
+                    pdf, x=col, nbins=30,
+                    title=f"Distribution of {col}",
+                    marginal="rug"
+                )
+                fig.update_layout(template="plotly_dark", showlegend=False)
+                fig.update_traces(marker_color='#6366f1')
+                charts.append(ChartData(
+                    chart_id=f"histogram_{col}",
+                    chart_type="histogram",
+                    title=f"{col} Distribution",
+                    description=f"Frequency distribution showing how {col} values are spread",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[col]
+                ))
+            except:
+                pass
+    
+    # 0.2 BAR CHART: Categorical vs Numeric aggregation
+    if len(categorical_cols) >= 1 and len(numeric_cols) >= 1 and len(charts) < max_charts:
+        cat_col = categorical_cols[0]
+        num_col = numeric_cols[0]
+        if pdf[cat_col].nunique() <= 10 and cat_col != num_col:
+            try:
+                # Group by categorical and get mean of numeric
+                agg_df = pdf.groupby(cat_col)[num_col].mean().reset_index()
+                agg_df.columns = [cat_col, f'Mean {num_col}']
+                fig = px.bar(
+                    agg_df, x=cat_col, y=f'Mean {num_col}',
+                    title=f"Average {num_col} by {cat_col}",
+                    text_auto='.2f',
+                    color=cat_col
+                )
+                fig.update_layout(template="plotly_dark", showlegend=False)
+                charts.append(ChartData(
+                    chart_id=f"bar_{num_col}_{cat_col}",
+                    chart_type="bar",
+                    title=f"{num_col} by {cat_col}",
+                    description=f"Comparison of average {num_col} across {cat_col} categories",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[cat_col, num_col]
+                ))
+            except:
+                pass
+    
+    # 0.3 PIE CHART: Proportions of categorical column
+    if len(categorical_cols) >= 1 and len(charts) < max_charts:
+        cat_col = categorical_cols[0]
+        if pdf[cat_col].nunique() <= 8:
+            try:
+                counts = pdf[cat_col].value_counts().reset_index()
+                counts.columns = [cat_col, 'count']
+                fig = px.pie(
+                    counts, names=cat_col, values='count',
+                    title=f"Proportion of {cat_col}",
+                    hole=0.35  # Donut style
+                )
+                fig.update_layout(template="plotly_dark")
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                charts.append(ChartData(
+                    chart_id=f"pie_{cat_col}",
+                    chart_type="pie",
+                    title=f"{cat_col} Breakdown",
+                    description=f"Percentage distribution of {cat_col} categories",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[cat_col]
+                ))
+            except:
+                pass
+    
+    # 0.4 COUNT BAR: Categorical frequency
+    if len(categorical_cols) >= 2 and len(charts) < max_charts:
+        cat1, cat2 = categorical_cols[0], categorical_cols[1]
+        if cat1 != cat2 and pdf[cat1].nunique() <= 8 and pdf[cat2].nunique() <= 6:
+            try:
+                fig = px.histogram(
+                    pdf, x=cat1, color=cat2,
+                    title=f"{cat1} Counts by {cat2}",
+                    barmode="group"
+                )
+                fig.update_layout(template="plotly_dark")
+                charts.append(ChartData(
+                    chart_id=f"countbar_{cat1}_{cat2}",
+                    chart_type="count_bar",
+                    title=f"{cat1} by {cat2}",
+                    description=f"Frequency counts of {cat1} grouped by {cat2}",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[cat1, cat2]
+                ))
+            except:
+                pass
+    
+    # ============== PHASE 1: STATISTICAL & DISTRIBUTION ==============
+    
+    # 1.1 VIOLIN PLOT: Numeric + Categorical (distribution comparison)
     if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
         for num_col in numeric_cols[:2]:
             for cat_col in categorical_cols[:2]:
