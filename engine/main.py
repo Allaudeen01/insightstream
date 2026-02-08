@@ -4,7 +4,9 @@ from pydantic import BaseModel
 import polars as pl
 import io
 import uuid
-from typing import Optional
+from typing import Optional, List
+import plotly.express as px
+import plotly.graph_objects as go
 
 app = FastAPI(title="Virtual Data Scientist Engine")
 
@@ -756,6 +758,249 @@ def get_insights(session_id: str):
         executive_summary=exec_summary,
         insights=insights[:8],  # Limit to 8 insights
         recommendations=recommendations[:5]  # Limit to 5 recommendations
+    )
+
+
+# ============== PHASE 5: ADVANCED VISUALIZATIONS ==============
+
+class ChartData(BaseModel):
+    chart_id: str
+    chart_type: str
+    title: str
+    description: str
+    plotly_json: dict
+    columns_used: List[str]
+
+class VizResponse(BaseModel):
+    session_id: str
+    charts: List[ChartData]
+    total_generated: int
+
+@app.get("/generate-viz/{session_id}", response_model=VizResponse)
+def generate_visualizations(session_id: str, max_charts: int = 6):
+    """
+    Auto-generate advanced interactive charts based on dataset characteristics.
+    Returns Plotly JSON for frontend rendering with react-plotly.js.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Convert to pandas for Plotly
+    pdf = df.to_pandas()
+    charts = []
+    
+    # Categorize columns
+    numeric_cols = [c for c in pdf.columns if pdf[c].dtype in ['int64', 'float64', 'int32', 'float32']]
+    categorical_cols = [c for c in pdf.columns if pdf[c].dtype == 'object' or pdf[c].nunique() < 10]
+    
+    # 1. VIOLIN PLOT: Numeric + Categorical (distribution comparison)
+    if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
+        for num_col in numeric_cols[:2]:
+            for cat_col in categorical_cols[:2]:
+                if cat_col != num_col and pdf[cat_col].nunique() <= 6:
+                    try:
+                        fig = px.violin(
+                            pdf, x=cat_col, y=num_col, 
+                            box=True, points="all",
+                            title=f"{num_col} Distribution by {cat_col}",
+                            color=cat_col
+                        )
+                        fig.update_layout(template="plotly_dark", showlegend=False)
+                        charts.append(ChartData(
+                            chart_id=f"violin_{num_col}_{cat_col}",
+                            chart_type="violin",
+                            title=f"{num_col} by {cat_col}",
+                            description=f"Distribution comparison of {num_col} across {cat_col} categories",
+                            plotly_json=fig.to_dict(),
+                            columns_used=[num_col, cat_col]
+                        ))
+                        if len(charts) >= max_charts:
+                            break
+                    except:
+                        pass
+            if len(charts) >= max_charts:
+                break
+    
+    # 2. SCATTER + MARGINALS: 2 Numeric columns (bivariate analysis)
+    if len(numeric_cols) >= 2 and len(charts) < max_charts:
+        col1, col2 = numeric_cols[0], numeric_cols[1]
+        color_col = categorical_cols[0] if categorical_cols else None
+        try:
+            fig = px.scatter(
+                pdf, x=col1, y=col2, color=color_col,
+                marginal_x="histogram", marginal_y="violin",
+                title=f"{col1} vs {col2} with Distributions"
+            )
+            fig.update_layout(template="plotly_dark")
+            charts.append(ChartData(
+                chart_id=f"scatter_marginal_{col1}_{col2}",
+                chart_type="scatter_marginal",
+                title=f"{col1} vs {col2}",
+                description=f"Bivariate analysis with marginal distributions",
+                plotly_json=fig.to_dict(),
+                columns_used=[col1, col2] + ([color_col] if color_col else [])
+            ))
+        except:
+            pass
+    
+    # 3. DENSITY HEATMAP: Dense numeric pairs
+    if len(numeric_cols) >= 2 and len(charts) < max_charts:
+        col1, col2 = numeric_cols[0], numeric_cols[1]
+        try:
+            fig = px.density_heatmap(
+                pdf, x=col1, y=col2,
+                title=f"Density: {col1} vs {col2}",
+                color_continuous_scale="Viridis"
+            )
+            fig.update_layout(template="plotly_dark")
+            charts.append(ChartData(
+                chart_id=f"density_{col1}_{col2}",
+                chart_type="density_heatmap",
+                title=f"Joint Distribution",
+                description=f"Density heatmap showing concentration patterns",
+                plotly_json=fig.to_dict(),
+                columns_used=[col1, col2]
+            ))
+        except:
+            pass
+    
+    # 4. TREEMAP: Hierarchical categories
+    if len(categorical_cols) >= 2 and len(numeric_cols) >= 1 and len(charts) < max_charts:
+        cat1, cat2 = categorical_cols[0], categorical_cols[1]
+        val_col = numeric_cols[0]
+        if cat1 != cat2 and pdf[cat1].nunique() <= 10 and pdf[cat2].nunique() <= 10:
+            try:
+                fig = px.treemap(
+                    pdf.dropna(subset=[cat1, cat2, val_col]),
+                    path=[cat1, cat2],
+                    values=val_col,
+                    title=f"{val_col} by {cat1} → {cat2}"
+                )
+                fig.update_layout(template="plotly_dark")
+                charts.append(ChartData(
+                    chart_id=f"treemap_{cat1}_{cat2}",
+                    chart_type="treemap",
+                    title=f"Hierarchical {val_col}",
+                    description=f"Part-to-whole breakdown by {cat1} and {cat2}",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[cat1, cat2, val_col]
+                ))
+            except:
+                pass
+    
+    # 5. SUNBURST: Radial hierarchy
+    if len(categorical_cols) >= 2 and len(numeric_cols) >= 1 and len(charts) < max_charts:
+        cat1, cat2 = categorical_cols[0], categorical_cols[1]
+        val_col = numeric_cols[0]
+        if cat1 != cat2:
+            try:
+                fig = px.sunburst(
+                    pdf.dropna(subset=[cat1, cat2]),
+                    path=[cat1, cat2],
+                    values=val_col if val_col else None,
+                    title=f"Sunburst: {cat1} → {cat2}"
+                )
+                fig.update_layout(template="plotly_dark")
+                charts.append(ChartData(
+                    chart_id=f"sunburst_{cat1}_{cat2}",
+                    chart_type="sunburst",
+                    title=f"Radial Hierarchy",
+                    description=f"Sunburst showing nested breakdown",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[cat1, cat2]
+                ))
+            except:
+                pass
+    
+    # 6. PARALLEL COORDINATES: Multi-numeric exploration
+    if len(numeric_cols) >= 3 and len(charts) < max_charts:
+        dims = numeric_cols[:5]  # Limit to 5 dimensions
+        color_col = categorical_cols[0] if categorical_cols else None
+        try:
+            # Encode categorical for color
+            if color_col:
+                pdf_temp = pdf.copy()
+                pdf_temp[f"{color_col}_encoded"] = pdf_temp[color_col].astype('category').cat.codes
+                fig = px.parallel_coordinates(
+                    pdf_temp, dimensions=dims,
+                    color=f"{color_col}_encoded",
+                    title="Multi-Dimensional Analysis"
+                )
+            else:
+                fig = px.parallel_coordinates(
+                    pdf, dimensions=dims,
+                    title="Multi-Dimensional Analysis"
+                )
+            fig.update_layout(template="plotly_dark")
+            charts.append(ChartData(
+                chart_id="parallel_coords",
+                chart_type="parallel_coordinates",
+                title="Parallel Coordinates",
+                description="High-dimensional data exploration",
+                plotly_json=fig.to_dict(),
+                columns_used=dims
+            ))
+        except:
+            pass
+    
+    # 7. BOX PLOT with points
+    if len(numeric_cols) >= 1 and len(categorical_cols) >= 1 and len(charts) < max_charts:
+        num_col = numeric_cols[0]
+        cat_col = categorical_cols[0]
+        if pdf[cat_col].nunique() <= 8:
+            try:
+                fig = px.box(
+                    pdf, x=cat_col, y=num_col,
+                    points="all", notched=True,
+                    title=f"{num_col} Box Plot by {cat_col}"
+                )
+                fig.update_layout(template="plotly_dark")
+                charts.append(ChartData(
+                    chart_id=f"box_{num_col}_{cat_col}",
+                    chart_type="box",
+                    title=f"Box Plot",
+                    description=f"Statistical summary with outlier points",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[num_col, cat_col]
+                ))
+            except:
+                pass
+    
+    # 8. CORRELATION HEATMAP
+    if len(numeric_cols) >= 3 and len(charts) < max_charts:
+        try:
+            corr_matrix = pdf[numeric_cols].corr()
+            fig = go.Figure(data=go.Heatmap(
+                z=corr_matrix.values,
+                x=corr_matrix.columns.tolist(),
+                y=corr_matrix.columns.tolist(),
+                colorscale='RdBu_r',
+                zmin=-1, zmax=1,
+                text=corr_matrix.round(2).values,
+                texttemplate="%{text}",
+                textfont={"size": 10}
+            ))
+            fig.update_layout(
+                title="Correlation Matrix",
+                template="plotly_dark"
+            )
+            charts.append(ChartData(
+                chart_id="correlation_heatmap",
+                chart_type="heatmap",
+                title="Correlation Matrix",
+                description="Pairwise correlations between numeric columns",
+                plotly_json=fig.to_dict(),
+                columns_used=numeric_cols
+            ))
+        except:
+            pass
+    
+    return VizResponse(
+        session_id=session_id,
+        charts=charts[:max_charts],
+        total_generated=len(charts)
     )
 
 

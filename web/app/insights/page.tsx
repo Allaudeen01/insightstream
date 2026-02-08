@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import {
     ArrowLeft,
     ArrowRight,
@@ -11,8 +12,12 @@ import {
     Loader2,
     BarChart3,
     MessageSquare,
-    CheckCircle
+    CheckCircle,
+    TrendingUp
 } from "lucide-react";
+
+// Dynamic import for Plotly (no SSR)
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -31,11 +36,32 @@ interface InsightsData {
     recommendations: string[];
 }
 
+interface ChartData {
+    chart_id: string;
+    chart_type: string;
+    title: string;
+    description: string;
+    plotly_json: {
+        data: Plotly.Data[];
+        layout: Partial<Plotly.Layout>;
+    };
+    columns_used: string[];
+}
+
+interface VizResponse {
+    session_id: string;
+    charts: ChartData[];
+    total_generated: number;
+}
+
 export default function InsightsPage() {
     const router = useRouter();
     const [loading, setLoading] = useState(true);
     const [data, setData] = useState<InsightsData | null>(null);
+    const [vizData, setVizData] = useState<VizResponse | null>(null);
+    const [loadingViz, setLoadingViz] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [activeTab, setActiveTab] = useState<"insights" | "charts">("charts");
 
     useEffect(() => {
         const stored = localStorage.getItem("analysis_session");
@@ -46,6 +72,7 @@ export default function InsightsPage() {
 
         const session = JSON.parse(stored);
         fetchInsights(session.session_id);
+        fetchVisualizations(session.session_id);
     }, [router]);
 
     const fetchInsights = async (sessionId: string) => {
@@ -58,6 +85,19 @@ export default function InsightsPage() {
             setError(err instanceof Error ? err.message : "An error occurred");
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchVisualizations = async (sessionId: string) => {
+        try {
+            const response = await fetch(`${API_BASE}/generate-viz/${sessionId}?max_charts=8`);
+            if (!response.ok) throw new Error("Failed to fetch visualizations");
+            const result = await response.json();
+            setVizData(result);
+        } catch (err) {
+            console.error("Viz error:", err);
+        } finally {
+            setLoadingViz(false);
         }
     };
 
@@ -124,7 +164,7 @@ export default function InsightsPage() {
                 </div>
             </header>
 
-            <main className="container mx-auto px-4 py-10 max-w-5xl">
+            <main className="container mx-auto px-4 py-10 max-w-6xl">
                 {error && (
                     <div className="mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400">
                         {error}
@@ -134,49 +174,129 @@ export default function InsightsPage() {
                 {data && (
                     <>
                         {/* Executive Summary */}
-                        <div className="mb-10 p-6 rounded-2xl bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20">
+                        <div className="mb-8 p-6 rounded-2xl bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20">
                             <h2 className="text-sm font-medium text-indigo-400 uppercase tracking-wider mb-2">Executive Summary</h2>
                             <p className="text-lg text-white leading-relaxed">{data.executive_summary}</p>
                         </div>
 
-                        {/* Insights Grid */}
-                        <div className="mb-10">
-                            <div className="flex items-center gap-2 mb-6">
-                                <BarChart3 className="w-5 h-5 text-indigo-400" />
-                                <h2 className="text-xl font-semibold">Key Insights</h2>
-                                <span className="text-sm text-slate-500">({data.insights.length} found)</span>
-                            </div>
-
-                            {data.insights.length === 0 ? (
-                                <div className="p-8 rounded-2xl bg-slate-900 border border-white/10 text-center">
-                                    <Lightbulb className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                                    <p className="text-slate-400">No significant insights detected. Try uploading a larger dataset.</p>
-                                </div>
-                            ) : (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {data.insights.map((insight, i) => (
-                                        <div
-                                            key={i}
-                                            className={`p-5 rounded-xl border ${getImportanceColor(insight.importance)}`}
-                                        >
-                                            <div className="flex items-start justify-between mb-2">
-                                                <h3 className="font-semibold text-white">{insight.title}</h3>
-                                                <span className={`text-xs px-2 py-0.5 rounded-full ${insight.importance === "high"
-                                                    ? "bg-red-500/20 text-red-400"
-                                                    : insight.importance === "medium"
-                                                        ? "bg-yellow-500/20 text-yellow-400"
-                                                        : "bg-blue-500/20 text-blue-400"
-                                                    }`}>
-                                                    {insight.importance}
-                                                </span>
-                                            </div>
-                                            <p className="text-slate-300 text-sm leading-relaxed">{insight.description}</p>
-                                            {renderMiniChart(insight)}
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
+                        {/* Tab Selector */}
+                        <div className="flex gap-2 mb-6">
+                            <button
+                                onClick={() => setActiveTab("charts")}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${activeTab === "charts"
+                                        ? "bg-indigo-600 text-white"
+                                        : "bg-slate-800 text-slate-400 hover:bg-slate-700"
+                                    }`}
+                            >
+                                <TrendingUp className="w-4 h-4" />
+                                Advanced Charts
+                                {vizData && <span className="text-xs opacity-70">({vizData.charts.length})</span>}
+                            </button>
+                            <button
+                                onClick={() => setActiveTab("insights")}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${activeTab === "insights"
+                                        ? "bg-indigo-600 text-white"
+                                        : "bg-slate-800 text-slate-400 hover:bg-slate-700"
+                                    }`}
+                            >
+                                <BarChart3 className="w-4 h-4" />
+                                Key Insights
+                                <span className="text-xs opacity-70">({data.insights.length})</span>
+                            </button>
                         </div>
+
+                        {/* Advanced Charts Tab */}
+                        {activeTab === "charts" && (
+                            <div className="mb-10">
+                                {loadingViz ? (
+                                    <div className="flex items-center justify-center py-20">
+                                        <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+                                        <span className="ml-3 text-slate-400">Generating visualizations...</span>
+                                    </div>
+                                ) : vizData && vizData.charts.length > 0 ? (
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                        {vizData.charts.map((chart) => (
+                                            <div
+                                                key={chart.chart_id}
+                                                className="p-4 rounded-2xl bg-slate-900 border border-white/10"
+                                            >
+                                                <div className="mb-2">
+                                                    <h3 className="font-semibold text-white">{chart.title}</h3>
+                                                    <p className="text-sm text-slate-400">{chart.description}</p>
+                                                </div>
+                                                <div className="rounded-xl overflow-hidden bg-slate-800">
+                                                    <Plot
+                                                        data={chart.plotly_json.data}
+                                                        layout={{
+                                                            ...chart.plotly_json.layout,
+                                                            autosize: true,
+                                                            height: 350,
+                                                            margin: { l: 50, r: 30, t: 40, b: 50 },
+                                                            paper_bgcolor: 'transparent',
+                                                            plot_bgcolor: 'rgba(30,41,59,0.5)',
+                                                            font: { color: '#94a3b8' }
+                                                        }}
+                                                        config={{
+                                                            displayModeBar: true,
+                                                            responsive: true,
+                                                            displaylogo: false
+                                                        }}
+                                                        style={{ width: '100%' }}
+                                                    />
+                                                </div>
+                                                <div className="mt-2 flex flex-wrap gap-1">
+                                                    {chart.columns_used.map((col) => (
+                                                        <span key={col} className="text-xs px-2 py-0.5 bg-slate-700 rounded text-slate-300">
+                                                            {col}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="p-8 rounded-2xl bg-slate-900 border border-white/10 text-center">
+                                        <TrendingUp className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                                        <p className="text-slate-400">No visualizations available for this dataset.</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Insights Tab */}
+                        {activeTab === "insights" && (
+                            <div className="mb-10">
+                                {data.insights.length === 0 ? (
+                                    <div className="p-8 rounded-2xl bg-slate-900 border border-white/10 text-center">
+                                        <Lightbulb className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                                        <p className="text-slate-400">No significant insights detected. Try uploading a larger dataset.</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {data.insights.map((insight, i) => (
+                                            <div
+                                                key={i}
+                                                className={`p-5 rounded-xl border ${getImportanceColor(insight.importance)}`}
+                                            >
+                                                <div className="flex items-start justify-between mb-2">
+                                                    <h3 className="font-semibold text-white">{insight.title}</h3>
+                                                    <span className={`text-xs px-2 py-0.5 rounded-full ${insight.importance === "high"
+                                                        ? "bg-red-500/20 text-red-400"
+                                                        : insight.importance === "medium"
+                                                            ? "bg-yellow-500/20 text-yellow-400"
+                                                            : "bg-blue-500/20 text-blue-400"
+                                                        }`}>
+                                                        {insight.importance}
+                                                    </span>
+                                                </div>
+                                                <p className="text-slate-300 text-sm leading-relaxed">{insight.description}</p>
+                                                {renderMiniChart(insight)}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Recommendations */}
                         {data.recommendations.length > 0 && (
