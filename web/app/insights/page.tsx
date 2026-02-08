@@ -227,17 +227,21 @@ export default function InsightsPage() {
                                                     <div className="flex items-start justify-between gap-2">
                                                         <h3 className="font-semibold text-white">{chart.title}</h3>
                                                         {chart.interest_level && chart.interest_level !== "standard" && (
-                                                            <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap flex items-center gap-1 ${chart.interest_level === "high"
-                                                                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                                                                : "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                                                                }`}>
+                                                            <span
+                                                                aria-label={`${chart.interest_level === "high" ? "High Insight" : "Smart Pick"} chart – ${chart.insight_reason || "Prioritized visualization"}`}
+                                                                className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap flex items-center gap-1 cursor-default
+                                                                    transition-all duration-150 ease-out hover:scale-105
+                                                                    ${chart.interest_level === "high"
+                                                                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:shadow-[0_0_8px_rgba(16,185,129,0.3)]"
+                                                                        : "bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]"
+                                                                    }`}>
                                                                 {chart.interest_level === "high" ? "✨ High Insight" : "💡 Smart Pick"}
                                                             </span>
                                                         )}
                                                     </div>
                                                     <p className="text-sm text-slate-400">{chart.description}</p>
                                                     {chart.insight_reason && (
-                                                        <div className="mt-2 p-2 rounded-lg bg-slate-800/50 border border-slate-700/50">
+                                                        <div className="mt-2 p-2 rounded-lg bg-slate-800/50 border border-slate-700/50 animate-fade-in">
                                                             <p className="text-xs text-slate-500 font-medium mb-1">Why prioritized:</p>
                                                             <ul className="text-xs text-slate-400 space-y-0.5">
                                                                 {chart.insight_reason.split(" • ").map((reason, i) => (
