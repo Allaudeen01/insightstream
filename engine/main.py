@@ -1381,19 +1381,21 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
         except:
             pass
     
-    # 6. PARALLEL COORDINATES: Multi-numeric exploration
-    if len(numeric_cols) >= 3 and len(charts) < max_charts:
-        dims = numeric_cols[:5]  # Limit to 5 dimensions
-        color_col = categorical_cols[0] if categorical_cols else None
+    # ============== PHASE 3: ADVANCED CHARTS ==============
+    
+    # 3.1 PARALLEL COORDINATES: Multi-numeric exploration (enhanced)
+    if len(numeric_cols) >= 4 and len(charts) < max_charts:
+        dims = numeric_cols[:6]  # Limit to 6 dimensions
+        color_col = best_cat if best_cat else (categorical_cols[0] if categorical_cols else None)
         try:
-            # Encode categorical for color
-            if color_col:
+            if color_col and pdf[color_col].nunique() <= 8:
                 pdf_temp = pdf.copy()
                 pdf_temp[f"{color_col}_encoded"] = pdf_temp[color_col].astype('category').cat.codes
                 fig = px.parallel_coordinates(
                     pdf_temp, dimensions=dims,
                     color=f"{color_col}_encoded",
-                    title="Multi-Dimensional Analysis"
+                    title=f"Multi-Dimensional Comparison (colored by {color_col})",
+                    color_continuous_scale="Viridis"
                 )
             else:
                 fig = px.parallel_coordinates(
@@ -1401,41 +1403,184 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     title="Multi-Dimensional Analysis"
                 )
             fig.update_layout(template="plotly_dark")
+            score = 50 + len(dims) * 8  # More dimensions = more interesting
             charts.append(ChartData(
                 chart_id="parallel_coords",
                 chart_type="parallel_coordinates",
                 title="Parallel Coordinates",
-                description="High-dimensional data exploration",
+                description=f"Compare {len(dims)} numeric dimensions simultaneously",
                 plotly_json=fig.to_dict(),
-                columns_used=dims
+                columns_used=dims,
+                priority_score=score,
+                insight_reason=f"{len(dims)} numeric columns suitable for parallel comparison",
+                interest_level=get_interest_level(score)
             ))
         except:
             pass
     
-    # 7. BOX PLOT with points
-    if len(numeric_cols) >= 1 and len(categorical_cols) >= 1 and len(charts) < max_charts:
-        num_col = numeric_cols[0]
-        cat_col = categorical_cols[0]
-        if pdf[cat_col].nunique() <= 8:
+    # 3.2 SANKEY DIAGRAM: Flow between categorical columns
+    if len(categorical_cols) >= 2 and len(charts) < max_charts:
+        # Find best source-target pair with good cardinality
+        source_col = None
+        target_col = None
+        best_flow_score = 0
+        
+        for i, col1 in enumerate(categorical_cols[:4]):
+            for col2 in categorical_cols[i+1:4]:
+                n1, n2 = pdf[col1].nunique(), pdf[col2].nunique()
+                if 2 <= n1 <= 10 and 2 <= n2 <= 10:
+                    # Score based on cardinality balance and distinct values
+                    flow_score = min(n1, n2) * max(n1, n2) / (abs(n1 - n2) + 1)
+                    if flow_score > best_flow_score:
+                        best_flow_score = flow_score
+                        source_col, target_col = col1, col2
+        
+        if source_col and target_col:
             try:
-                fig = px.box(
-                    pdf, x=cat_col, y=num_col,
-                    points="all", notched=True,
-                    title=f"{num_col} Box Plot by {cat_col}"
-                )
-                fig.update_layout(template="plotly_dark")
+                # Create source-target-value aggregation
+                flow_df = pdf.groupby([source_col, target_col]).size().reset_index(name='count')
+                
+                # Create node labels
+                sources = flow_df[source_col].unique().tolist()
+                targets = flow_df[target_col].unique().tolist()
+                # Prefix targets to avoid overlap with sources
+                all_nodes = sources + [f"{t}_target" for t in targets]
+                
+                # Create link indices
+                source_idx = [sources.index(s) for s in flow_df[source_col]]
+                target_idx = [len(sources) + targets.index(t) for t in flow_df[target_col]]
+                
+                fig = go.Figure(go.Sankey(
+                    node=dict(
+                        pad=15,
+                        thickness=20,
+                        label=[str(n).replace('_target', '') for n in all_nodes],
+                        color='#6366f1'
+                    ),
+                    link=dict(
+                        source=source_idx,
+                        target=target_idx,
+                        value=flow_df['count'].tolist(),
+                        color='rgba(99, 102, 241, 0.4)'
+                    )
+                ))
+                fig.update_layout(title=f"Flow: {source_col} → {target_col}", template="plotly_dark")
+                score = 70 + min(best_flow_score, 20)  # High boost for Sankey
                 charts.append(ChartData(
-                    chart_id=f"box_{num_col}_{cat_col}",
-                    chart_type="box",
-                    title=f"Box Plot",
-                    description=f"Statistical summary with outlier points",
+                    chart_id=f"sankey_{source_col}_{target_col}",
+                    chart_type="sankey",
+                    title=f"Flow Diagram",
+                    description=f"Flow relationships between {source_col} and {target_col}",
                     plotly_json=fig.to_dict(),
-                    columns_used=[num_col, cat_col]
+                    columns_used=[source_col, target_col],
+                    priority_score=score,
+                    insight_reason=f"Flow structure detected between {source_col} and {target_col}",
+                    interest_level=get_interest_level(score)
                 ))
             except:
                 pass
     
-    # 8. CORRELATION HEATMAP
+    # 3.3 RADAR / POLAR CHART: Multi-attribute comparison
+    if len(numeric_cols) >= 4 and len(numeric_cols) <= 8 and len(charts) < max_charts:
+        radar_cols = numeric_cols[:8]
+        try:
+            # Normalize values for radar (0-1 scale)
+            radar_df = pdf[radar_cols].copy()
+            for col in radar_cols:
+                min_val, max_val = radar_df[col].min(), radar_df[col].max()
+                if max_val > min_val:
+                    radar_df[col] = (radar_df[col] - min_val) / (max_val - min_val)
+            
+            # Use median values for the radar
+            median_values = radar_df.median().tolist()
+            median_values.append(median_values[0])  # Close the polygon
+            radar_cols_closed = radar_cols + [radar_cols[0]]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=median_values,
+                theta=radar_cols_closed,
+                fill='toself',
+                fillcolor='rgba(99, 102, 241, 0.3)',
+                line=dict(color='#6366f1', width=2),
+                name='Median'
+            ))
+            fig.update_layout(
+                title=f"Attribute Comparison Radar ({len(radar_cols)} dimensions)",
+                template="plotly_dark",
+                polar=dict(
+                    radialaxis=dict(visible=True, range=[0, 1]),
+                    bgcolor='rgba(0,0,0,0)'
+                )
+            )
+            score = 55 + len(radar_cols) * 5
+            charts.append(ChartData(
+                chart_id="radar_attributes",
+                chart_type="radar",
+                title=f"Attribute Radar",
+                description=f"Multi-attribute comparison across {len(radar_cols)} dimensions",
+                plotly_json=fig.to_dict(),
+                columns_used=radar_cols,
+                priority_score=score,
+                insight_reason=f"{len(radar_cols)} numeric attributes suitable for radar comparison",
+                interest_level=get_interest_level(score)
+            ))
+        except:
+            pass
+    
+    # 3.4 WATERFALL CHART: For numeric with positive/negative values
+    waterfall_col = None
+    waterfall_score = 0
+    for col in numeric_cols:
+        try:
+            values = pdf[col].dropna()
+            has_positive = (values > 0).any()
+            has_negative = (values < 0).any()
+            if has_positive and has_negative:
+                # Good candidate - has both positive and negative
+                ratio = min(abs(values[values > 0].sum()), abs(values[values < 0].sum())) / max(abs(values.sum()), 1)
+                if ratio > 0.1:  # At least 10% contribution from both sides
+                    col_score = 80 + ratio * 20
+                    if col_score > waterfall_score:
+                        waterfall_score = col_score
+                        waterfall_col = col
+        except:
+            pass
+    
+    if waterfall_col and len(charts) < max_charts:
+        try:
+            # Create waterfall from top values
+            cat_col = best_cat if best_cat else (categorical_cols[0] if categorical_cols else None)
+            if cat_col and pdf[cat_col].nunique() <= 10:
+                waterfall_data = pdf.groupby(cat_col)[waterfall_col].sum().sort_values(ascending=False).head(10)
+                
+                fig = go.Figure(go.Waterfall(
+                    x=waterfall_data.index.tolist(),
+                    y=waterfall_data.values.tolist(),
+                    connector=dict(line=dict(color='#6366f1')),
+                    increasing=dict(marker=dict(color='#10b981')),
+                    decreasing=dict(marker=dict(color='#ef4444')),
+                    totals=dict(marker=dict(color='#6366f1'))
+                ))
+                fig.update_layout(
+                    title=f"Waterfall: {waterfall_col} by {cat_col}",
+                    template="plotly_dark"
+                )
+                charts.append(ChartData(
+                    chart_id=f"waterfall_{waterfall_col}",
+                    chart_type="waterfall",
+                    title=f"Waterfall Chart",
+                    description=f"Cumulative {waterfall_col} changes by {cat_col}",
+                    plotly_json=fig.to_dict(),
+                    columns_used=[waterfall_col, cat_col],
+                    priority_score=waterfall_score,
+                    insight_reason="Clear positive/negative value pattern detected",
+                    interest_level=get_interest_level(waterfall_score)
+                ))
+        except:
+            pass
+    
+    # 3.5 CORRELATION HEATMAP (enhanced with priority)
     if len(numeric_cols) >= 3 and len(charts) < max_charts:
         try:
             corr_matrix = pdf[numeric_cols].corr()
@@ -1453,13 +1598,19 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 title="Correlation Matrix",
                 template="plotly_dark"
             )
+            # Score based on how many strong correlations exist
+            strong_corr_count = ((corr_matrix.abs() > 0.5) & (corr_matrix.abs() < 1)).sum().sum() / 2
+            score = 50 + min(strong_corr_count * 5, 30)
             charts.append(ChartData(
                 chart_id="correlation_heatmap",
                 chart_type="heatmap",
                 title="Correlation Matrix",
                 description="Pairwise correlations between numeric columns",
                 plotly_json=fig.to_dict(),
-                columns_used=numeric_cols
+                columns_used=numeric_cols,
+                priority_score=score,
+                insight_reason=f"{int(strong_corr_count)} strong correlations found" if strong_corr_count > 0 else "Overview of variable relationships",
+                interest_level=get_interest_level(score)
             ))
         except:
             pass
