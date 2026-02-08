@@ -771,6 +771,7 @@ class ChartData(BaseModel):
     description: str
     plotly_json: dict
     columns_used: List[str]
+    priority_score: float = 50.0  # Higher = more interesting (0-100)
 
 class VizResponse(BaseModel):
     session_id: str
@@ -795,6 +796,53 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
     # Categorize columns
     numeric_cols = [c for c in pdf.columns if pdf[c].dtype in ['int64', 'float64', 'int32', 'float32']]
     categorical_cols = [c for c in pdf.columns if pdf[c].dtype == 'object' or pdf[c].nunique() < 10]
+    
+    # ============== SMART COLUMN SCORING ==============
+    # Analyze data patterns to prioritize most interesting visualizations
+    
+    column_scores = {}
+    
+    # Score numeric columns by: variance, missing %, unique ratio
+    for col in numeric_cols:
+        score = 50
+        missing_pct = pdf[col].isna().sum() / len(pdf) * 100
+        if missing_pct > 10:
+            score += 15  # High missing = interesting distribution question
+        if pdf[col].std() / (pdf[col].mean() + 0.001) > 0.5:
+            score += 10  # High coefficient of variation = spread worth showing
+        column_scores[col] = min(score, 100)
+    
+    # Score categorical columns by: cardinality (3-8 ideal), balance
+    for col in categorical_cols:
+        score = 50
+        n_unique = pdf[col].nunique()
+        if 3 <= n_unique <= 8:
+            score += 20  # Ideal for pie/bar
+        elif n_unique <= 2:
+            score -= 10  # Binary less interesting
+        # Check balance (entropy-like)
+        value_counts = pdf[col].value_counts(normalize=True)
+        if value_counts.max() < 0.7:  # Not dominated by one value
+            score += 10
+        column_scores[col] = min(score, 100)
+    
+    # Find strong correlations for scatter prioritization
+    strong_correlations = []
+    if len(numeric_cols) >= 2:
+        try:
+            corr_matrix = pdf[numeric_cols].corr()
+            for i, col1 in enumerate(numeric_cols):
+                for col2 in numeric_cols[i+1:]:
+                    corr = abs(corr_matrix.loc[col1, col2])
+                    if corr > 0.5:
+                        strong_correlations.append((col1, col2, corr))
+            strong_correlations.sort(key=lambda x: x[2], reverse=True)
+        except:
+            pass
+    
+    # Sort columns by interest score for chart generation
+    numeric_cols = sorted(numeric_cols, key=lambda c: column_scores.get(c, 50), reverse=True)
+    categorical_cols = sorted(categorical_cols, key=lambda c: column_scores.get(c, 50), reverse=True)
     
     # ============== PHASE 0: CORE BASICS ==============
     
@@ -824,7 +872,8 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     title=f"{col} Distribution",
                     description=f"Frequency distribution" + (f" colored by {color_col}" if color_col else ""),
                     plotly_json=fig.to_dict(),
-                    columns_used=[col] + ([color_col] if color_col else [])
+                    columns_used=[col] + ([color_col] if color_col else []),
+                    priority_score=column_scores.get(col, 50) + (10 if color_col else 0)
                 ))
             except:
                 pass
@@ -861,7 +910,8 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     title=f"{num_col} by {cat_col}",
                     description=f"Median {num_col} comparison (robust to outliers)",
                     plotly_json=fig.to_dict(),
-                    columns_used=[cat_col, num_col]
+                    columns_used=[cat_col, num_col],
+                    priority_score=(column_scores.get(cat_col, 50) + column_scores.get(num_col, 50)) / 2
                 ))
             except:
                 pass
@@ -909,7 +959,8 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     title=f"{cat_col} Breakdown",
                     description=f"Percentage distribution (small slices grouped as 'Other')",
                     plotly_json=fig.to_dict(),
-                    columns_used=[cat_col]
+                    columns_used=[cat_col],
+                    priority_score=column_scores.get(cat_col, 50) + 5  # Pie charts popular
                 ))
             except:
                 pass
@@ -1139,6 +1190,9 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             ))
         except:
             pass
+    
+    # Sort charts by priority score (most interesting first)
+    charts.sort(key=lambda c: c.priority_score, reverse=True)
     
     return VizResponse(
         session_id=session_id,
