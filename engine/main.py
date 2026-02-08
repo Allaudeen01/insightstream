@@ -7,6 +7,7 @@ import uuid
 from typing import Optional, List
 import plotly.express as px
 import plotly.graph_objects as go
+import pandas as pd
 
 app = FastAPI(title="Virtual Data Scientist Engine")
 
@@ -797,81 +798,123 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
     
     # ============== PHASE 0: CORE BASICS ==============
     
-    # 0.1 HISTOGRAM: Distribution of numeric columns
+    # 0.1 HISTOGRAM: Distribution of numeric columns (with optional color grouping)
     for col in numeric_cols[:2]:  # Limit to first 2 numeric columns
         if pdf[col].nunique() > 5 and len(charts) < max_charts:
             try:
+                # Add color grouping if good categorical exists
+                color_col = None
+                if categorical_cols and pdf[categorical_cols[0]].nunique() <= 4:
+                    color_col = categorical_cols[0]
+                
                 fig = px.histogram(
-                    pdf, x=col, nbins=30,
-                    title=f"Distribution of {col}",
-                    marginal="rug"
+                    pdf, x=col,
+                    color=color_col,
+                    title=f"Distribution of {col}" + (f" by {color_col}" if color_col else ""),
+                    marginal="rug",
+                    barmode="overlay" if color_col else "relative",
+                    opacity=0.7 if color_col else 1.0
                 )
-                fig.update_layout(template="plotly_dark", showlegend=False)
-                fig.update_traces(marker_color='#6366f1')
+                fig.update_layout(template="plotly_dark", showlegend=bool(color_col))
+                if not color_col:
+                    fig.update_traces(marker_color='#6366f1')
                 charts.append(ChartData(
                     chart_id=f"histogram_{col}",
                     chart_type="histogram",
                     title=f"{col} Distribution",
-                    description=f"Frequency distribution showing how {col} values are spread",
+                    description=f"Frequency distribution" + (f" colored by {color_col}" if color_col else ""),
                     plotly_json=fig.to_dict(),
-                    columns_used=[col]
+                    columns_used=[col] + ([color_col] if color_col else [])
                 ))
             except:
                 pass
     
-    # 0.2 BAR CHART: Categorical vs Numeric aggregation
+    # 0.2 BAR CHART: Categorical vs Numeric (median for robustness, horizontal for long labels)
     if len(categorical_cols) >= 1 and len(numeric_cols) >= 1 and len(charts) < max_charts:
         cat_col = categorical_cols[0]
         num_col = numeric_cols[0]
-        if pdf[cat_col].nunique() <= 10 and cat_col != num_col:
+        n_categories = pdf[cat_col].nunique()
+        if n_categories <= 12 and cat_col != num_col:
             try:
-                # Group by categorical and get mean of numeric
-                agg_df = pdf.groupby(cat_col)[num_col].mean().reset_index()
-                agg_df.columns = [cat_col, f'Mean {num_col}']
+                # Use median for robustness against outliers
+                agg_df = pdf.groupby(cat_col)[num_col].median().reset_index()
+                agg_df.columns = [cat_col, f'Median {num_col}']
+                agg_df = agg_df.sort_values(f'Median {num_col}', ascending=True)
+                
+                # Use horizontal for many categories or long labels
+                use_horizontal = n_categories > 6 or pdf[cat_col].astype(str).str.len().max() > 10
+                
                 fig = px.bar(
-                    agg_df, x=cat_col, y=f'Mean {num_col}',
-                    title=f"Average {num_col} by {cat_col}",
-                    text_auto='.2f',
-                    color=cat_col
+                    agg_df, 
+                    x=f'Median {num_col}' if use_horizontal else cat_col,
+                    y=cat_col if use_horizontal else f'Median {num_col}',
+                    orientation='h' if use_horizontal else 'v',
+                    title=f"Median {num_col} by {cat_col}",
+                    text_auto='.1f',
+                    color=f'Median {num_col}',
+                    color_continuous_scale='Viridis'
                 )
-                fig.update_layout(template="plotly_dark", showlegend=False)
+                fig.update_layout(template="plotly_dark", showlegend=False, coloraxis_showscale=False)
                 charts.append(ChartData(
                     chart_id=f"bar_{num_col}_{cat_col}",
                     chart_type="bar",
                     title=f"{num_col} by {cat_col}",
-                    description=f"Comparison of average {num_col} across {cat_col} categories",
+                    description=f"Median {num_col} comparison (robust to outliers)",
                     plotly_json=fig.to_dict(),
                     columns_used=[cat_col, num_col]
                 ))
             except:
                 pass
     
-    # 0.3 PIE CHART: Proportions of categorical column
+    # 0.3 PIE CHART: With auto-collapse small slices into "Other"
     if len(categorical_cols) >= 1 and len(charts) < max_charts:
         cat_col = categorical_cols[0]
-        if pdf[cat_col].nunique() <= 8:
+        n_unique = pdf[cat_col].nunique()
+        if n_unique <= 15:  # Allow more but collapse
             try:
                 counts = pdf[cat_col].value_counts().reset_index()
                 counts.columns = [cat_col, 'count']
+                
+                # Auto-collapse slices < 4% into "Other"
+                total = counts['count'].sum()
+                threshold = 0.04 * total
+                
+                # Mark small categories as "Other"
+                counts['category'] = counts.apply(
+                    lambda row: row[cat_col] if row['count'] >= threshold else 'Other',
+                    axis=1
+                )
+                counts = counts.groupby('category')['count'].sum().reset_index()
+                counts = counts.sort_values('count', ascending=False)
+                
+                # Limit to 8 slices max
+                if len(counts) > 8:
+                    top_7 = counts.head(7)
+                    other_sum = counts.iloc[7:]['count'].sum()
+                    other_row = pd.DataFrame({'category': ['Other'], 'count': [other_sum]})
+                    counts = pd.concat([top_7, other_row], ignore_index=True)
+                
                 fig = px.pie(
-                    counts, names=cat_col, values='count',
+                    counts, names='category', values='count',
                     title=f"Proportion of {cat_col}",
-                    hole=0.35  # Donut style
+                    hole=0.4,  # Slightly larger hole for modern look
+                    color_discrete_sequence=px.colors.qualitative.Set2
                 )
                 fig.update_layout(template="plotly_dark")
-                fig.update_traces(textposition='inside', textinfo='percent+label')
+                fig.update_traces(textposition='inside', textinfo='percent+label', 
+                                  pull=[0.02] * len(counts))  # Slight pull for emphasis
                 charts.append(ChartData(
                     chart_id=f"pie_{cat_col}",
                     chart_type="pie",
                     title=f"{cat_col} Breakdown",
-                    description=f"Percentage distribution of {cat_col} categories",
+                    description=f"Percentage distribution (small slices grouped as 'Other')",
                     plotly_json=fig.to_dict(),
                     columns_used=[cat_col]
                 ))
             except:
                 pass
     
-    # 0.4 COUNT BAR: Categorical frequency
+    # 0.4 COUNT BAR: Stacked categorical frequency
     if len(categorical_cols) >= 2 and len(charts) < max_charts:
         cat1, cat2 = categorical_cols[0], categorical_cols[1]
         if cat1 != cat2 and pdf[cat1].nunique() <= 8 and pdf[cat2].nunique() <= 6:
@@ -879,7 +922,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 fig = px.histogram(
                     pdf, x=cat1, color=cat2,
                     title=f"{cat1} Counts by {cat2}",
-                    barmode="group"
+                    barmode="stack"  # Stacked shows proportions better
                 )
                 fig.update_layout(template="plotly_dark")
                 charts.append(ChartData(
