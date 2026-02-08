@@ -1440,11 +1440,18 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 # Create source-target-value aggregation
                 flow_df = pdf.groupby([source_col, target_col]).size().reset_index(name='count')
                 
-                # Create node labels
+                # Create node labels (truncate long names with ellipsis)
+                def truncate_label(name, max_len=12):
+                    s = str(name).replace('_target', '')
+                    return s[:max_len-1] + '…' if len(s) > max_len else s
+                
                 sources = flow_df[source_col].unique().tolist()
                 targets = flow_df[target_col].unique().tolist()
-                # Prefix targets to avoid overlap with sources
                 all_nodes = sources + [f"{t}_target" for t in targets]
+                
+                # Generate gradient colors for nodes
+                n_nodes = len(all_nodes)
+                node_colors = [f'hsl({i * 360 // n_nodes}, 70%, 50%)' for i in range(n_nodes)]
                 
                 # Create link indices
                 source_idx = [sources.index(s) for s in flow_df[source_col]]
@@ -1454,17 +1461,24 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     node=dict(
                         pad=15,
                         thickness=20,
-                        label=[str(n).replace('_target', '') for n in all_nodes],
-                        color='#6366f1'
+                        line=dict(color="rgba(255,255,255,0.3)", width=0.5),
+                        label=[truncate_label(n) for n in all_nodes],
+                        color=node_colors,
+                        hovertemplate='%{label}<br>Total: %{value}<extra></extra>'
                     ),
                     link=dict(
                         source=source_idx,
                         target=target_idx,
                         value=flow_df['count'].tolist(),
-                        color='rgba(99, 102, 241, 0.4)'
+                        color='rgba(99, 102, 241, 0.6)',
+                        hovertemplate='%{source.label} → %{target.label}<br>Count: %{value}<extra></extra>'
                     )
                 ))
-                fig.update_layout(title=f"Flow: {source_col} → {target_col}", template="plotly_dark")
+                fig.update_layout(
+                    title=f"Flow: {source_col} → {target_col}",
+                    template="plotly_dark",
+                    hovermode="closest"
+                )
                 score = 70 + min(best_flow_score, 20)  # High boost for Sankey
                 charts.append(ChartData(
                     chart_id=f"sankey_{source_col}_{target_col}",
@@ -1557,14 +1571,23 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 fig = go.Figure(go.Waterfall(
                     x=waterfall_data.index.tolist(),
                     y=waterfall_data.values.tolist(),
-                    connector=dict(line=dict(color='#6366f1')),
-                    increasing=dict(marker=dict(color='#10b981')),
-                    decreasing=dict(marker=dict(color='#ef4444')),
-                    totals=dict(marker=dict(color='#6366f1'))
+                    connector=dict(line=dict(color='rgba(99, 102, 241, 0.5)', width=1.5, dash='dash')),
+                    increasing=dict(marker=dict(color='#10b981', line=dict(color='#059669', width=1))),
+                    decreasing=dict(marker=dict(color='#ef4444', line=dict(color='#dc2626', width=1))),
+                    totals=dict(marker=dict(color='#6366f1', line=dict(color='#4f46e5', width=1))),
+                    textposition="outside",
+                    hovertemplate='%{x}<br>%{y:+,.0f}<extra></extra>'
                 ))
+                net_value = waterfall_data.sum()
                 fig.update_layout(
                     title=f"Waterfall: {waterfall_col} by {cat_col}",
-                    template="plotly_dark"
+                    template="plotly_dark",
+                    annotations=[dict(
+                        x=1, y=1.1, xref="paper", yref="paper",
+                        text=f"Net: {net_value:+,.0f}",
+                        showarrow=False,
+                        font=dict(size=14, color='#10b981' if net_value >= 0 else '#ef4444')
+                    )]
                 )
                 charts.append(ChartData(
                     chart_id=f"waterfall_{waterfall_col}",
