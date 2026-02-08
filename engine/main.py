@@ -1090,10 +1090,13 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 color=color_col,
                 marginal_x="histogram", marginal_y="violin",
                 title=f"{col1} vs {col2} (r = {corr_val:.2f})",
-                opacity=0.7
+                opacity=0.7,
+                trendline="ols" if not color_col else None  # Add OLS trendline when no color grouping
             )
             fig.update_layout(template="plotly_dark")
-            fig.update_traces(marker=dict(size=6))
+            fig.update_traces(marker=dict(size=6), selector=dict(mode="markers"))
+            # Style the trendline (if present)
+            fig.update_traces(line=dict(color="#ef4444", dash="dash", width=2), selector=dict(mode="lines"))
             score = 60 + corr_val * 40  # Strong boost for high correlation
             charts.append(ChartData(
                 chart_id=f"scatter_corr_{col1}_{col2}",
