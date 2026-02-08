@@ -1022,73 +1022,167 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
     
     # ============== PHASE 1: STATISTICAL & DISTRIBUTION ==============
     
-    # 1.1 VIOLIN PLOT: Numeric + Categorical (distribution comparison)
-    if len(numeric_cols) >= 1 and len(categorical_cols) >= 1:
-        for num_col in numeric_cols[:2]:
-            for cat_col in categorical_cols[:2]:
-                if cat_col != num_col and pdf[cat_col].nunique() <= 6:
-                    try:
-                        fig = px.violin(
-                            pdf, x=cat_col, y=num_col, 
-                            box=True, points="all",
-                            title=f"{num_col} Distribution by {cat_col}",
-                            color=cat_col
-                        )
-                        fig.update_layout(template="plotly_dark", showlegend=False)
-                        charts.append(ChartData(
-                            chart_id=f"violin_{num_col}_{cat_col}",
-                            chart_type="violin",
-                            title=f"{num_col} by {cat_col}",
-                            description=f"Distribution comparison of {num_col} across {cat_col} categories",
-                            plotly_json=fig.to_dict(),
-                            columns_used=[num_col, cat_col]
-                        ))
-                        if len(charts) >= max_charts:
-                            break
-                    except:
-                        pass
-            if len(charts) >= max_charts:
-                break
+    # Find best numeric column (highest variance or missing %)
+    best_num = None
+    best_num_score = 0
+    for col in numeric_cols:
+        try:
+            variance = pdf[col].var() or 0
+            missing = pdf[col].isna().sum() / len(pdf)
+            score = variance / (pdf[col].mean()**2 + 0.001) + missing * 50  # CV + missing bonus
+            if score > best_num_score:
+                best_num_score = score
+                best_num = col
+        except:
+            pass
+    if not best_num and numeric_cols:
+        best_num = numeric_cols[0]
     
-    # 2. SCATTER + MARGINALS: 2 Numeric columns (bivariate analysis)
-    if len(numeric_cols) >= 2 and len(charts) < max_charts:
-        col1, col2 = numeric_cols[0], numeric_cols[1]
-        color_col = categorical_cols[0] if categorical_cols else None
+    # Find best categorical (3-8 unique values, balanced)
+    best_cat = None
+    best_cat_score = 0
+    for col in categorical_cols:
+        n_unique = pdf[col].nunique()
+        if 3 <= n_unique <= 8:
+            balance = 1 - pdf[col].value_counts(normalize=True).max()
+            score = balance * 100 + (8 - abs(n_unique - 5)) * 5
+            if score > best_cat_score:
+                best_cat_score = score
+                best_cat = col
+    if not best_cat and categorical_cols:
+        best_cat = categorical_cols[0]
+    
+    # 1.1 VIOLIN PLOT: Best numeric by best categorical
+    if best_num and best_cat and len(charts) < max_charts:
+        try:
+            fig = px.violin(
+                pdf, x=best_cat, y=best_num,
+                box=True, points="all",
+                color=best_cat,
+                title=f"Distribution of {best_num} by {best_cat}",
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            fig.update_layout(template="plotly_dark", showlegend=False)
+            score = column_scores.get(best_num, 50) + 25  # Violin boost
+            reasons = column_insights.get(best_num, []) + ["Shows distribution shape + outliers"]
+            charts.append(ChartData(
+                chart_id=f"violin_{best_num}_{best_cat}",
+                chart_type="violin",
+                title=f"{best_num} by {best_cat}",
+                description=f"Full distribution with box stats and individual points",
+                plotly_json=fig.to_dict(),
+                columns_used=[best_num, best_cat],
+                priority_score=score,
+                insight_reason=" • ".join(reasons[:3]),
+                interest_level=get_interest_level(score)
+            ))
+        except:
+            pass
+    
+    # 1.2 SCATTER + MARGINALS: Strongest correlation pair
+    if len(strong_correlations) > 0 and len(charts) < max_charts:
+        # Use the strongest correlation pair
+        col1, col2, corr_val = strong_correlations[0]
+        color_col = best_cat if best_cat and pdf[best_cat].nunique() <= 4 else None
         try:
             fig = px.scatter(
-                pdf, x=col1, y=col2, color=color_col,
+                pdf, x=col1, y=col2,
+                color=color_col,
+                marginal_x="histogram", marginal_y="violin",
+                title=f"{col1} vs {col2} (r = {corr_val:.2f})",
+                opacity=0.7
+            )
+            fig.update_layout(template="plotly_dark")
+            fig.update_traces(marker=dict(size=6))
+            score = 60 + corr_val * 40  # Strong boost for high correlation
+            charts.append(ChartData(
+                chart_id=f"scatter_corr_{col1}_{col2}",
+                chart_type="scatter_marginals",
+                title=f"{col1} vs {col2}",
+                description=f"Bivariate relationship with marginal distributions",
+                plotly_json=fig.to_dict(),
+                columns_used=[col1, col2] + ([color_col] if color_col else []),
+                priority_score=score,
+                insight_reason=f"Strongest correlation (r = {corr_val:.2f})",
+                interest_level=get_interest_level(score)
+            ))
+        except:
+            pass
+    elif len(numeric_cols) >= 2 and len(charts) < max_charts:
+        # Fallback: first two numerics
+        col1, col2 = numeric_cols[0], numeric_cols[1]
+        try:
+            fig = px.scatter(
+                pdf, x=col1, y=col2,
                 marginal_x="histogram", marginal_y="violin",
                 title=f"{col1} vs {col2} with Distributions"
             )
             fig.update_layout(template="plotly_dark")
             charts.append(ChartData(
                 chart_id=f"scatter_marginal_{col1}_{col2}",
-                chart_type="scatter_marginal",
+                chart_type="scatter_marginals",
                 title=f"{col1} vs {col2}",
                 description=f"Bivariate analysis with marginal distributions",
                 plotly_json=fig.to_dict(),
-                columns_used=[col1, col2] + ([color_col] if color_col else [])
+                columns_used=[col1, col2],
+                priority_score=55,
+                insight_reason="Numeric relationship exploration",
+                interest_level="recommended"
             ))
         except:
             pass
     
-    # 3. DENSITY HEATMAP: Dense numeric pairs
+    # 1.3 BOX PLOT: With notches and points
+    if best_num and best_cat and len(charts) < max_charts:
+        try:
+            fig = px.box(
+                pdf, x=best_cat, y=best_num,
+                notched=True, points="all",
+                color=best_cat,
+                title=f"Box Summary of {best_num} by {best_cat}",
+                color_discrete_sequence=px.colors.qualitative.Pastel
+            )
+            fig.update_layout(template="plotly_dark", showlegend=False)
+            score = column_scores.get(best_num, 50) + 15  # Box plot boost
+            charts.append(ChartData(
+                chart_id=f"box_{best_num}_{best_cat}",
+                chart_type="box",
+                title=f"{best_num} Summary",
+                description=f"Quartiles, median, and confidence intervals with data points",
+                plotly_json=fig.to_dict(),
+                columns_used=[best_num, best_cat],
+                priority_score=score,
+                insight_reason="Statistical summary with confidence notches",
+                interest_level=get_interest_level(score)
+            ))
+        except:
+            pass
+    
+    # 1.4 DENSITY HEATMAP: Joint distribution of top correlation pair
     if len(numeric_cols) >= 2 and len(charts) < max_charts:
-        col1, col2 = numeric_cols[0], numeric_cols[1]
+        # Use correlation pair if available, else first two
+        if strong_correlations:
+            col1, col2, _ = strong_correlations[0]
+        else:
+            col1, col2 = numeric_cols[0], numeric_cols[1]
         try:
             fig = px.density_heatmap(
                 pdf, x=col1, y=col2,
                 title=f"Density: {col1} vs {col2}",
-                color_continuous_scale="Viridis"
+                color_continuous_scale="Viridis",
+                marginal_x="histogram", marginal_y="histogram"
             )
             fig.update_layout(template="plotly_dark")
             charts.append(ChartData(
                 chart_id=f"density_{col1}_{col2}",
                 chart_type="density_heatmap",
                 title=f"Joint Distribution",
-                description=f"Density heatmap showing concentration patterns",
+                description=f"Density concentration showing where data clusters",
                 plotly_json=fig.to_dict(),
-                columns_used=[col1, col2]
+                columns_used=[col1, col2],
+                priority_score=58,
+                insight_reason="Shows concentration patterns in joint distribution",
+                interest_level="recommended"
             ))
         except:
             pass
