@@ -1190,53 +1190,196 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
         except:
             pass
     
-    # 4. TREEMAP: Hierarchical categories
-    if len(categorical_cols) >= 2 and len(numeric_cols) >= 1 and len(charts) < max_charts:
-        cat1, cat2 = categorical_cols[0], categorical_cols[1]
-        val_col = numeric_cols[0]
-        if cat1 != cat2 and pdf[cat1].nunique() <= 10 and pdf[cat2].nunique() <= 10:
+    # ============== PHASE 2: HIERARCHICAL & SPECIALIZED ==============
+    
+    # Smart path detection for hierarchical charts
+    path_candidates = []
+    for col in categorical_cols:
+        n_unique = pdf[col].nunique()
+        if 3 <= n_unique <= 12:
+            balance = 1 - pdf[col].value_counts(normalize=True).max()
+            avg_label_len = pdf[col].astype(str).str.len().mean()
+            score = balance * 50 + (12 - abs(n_unique - 6)) * 5
+            path_candidates.append((col, n_unique, balance, avg_label_len, score))
+    
+    # Sort by score (best first)
+    path_candidates.sort(key=lambda x: x[4], reverse=True)
+    
+    # 2.1 TREEMAP: Hierarchical categories (prefer when labels are long)
+    if len(path_candidates) >= 2 and len(charts) < max_charts:
+        path_cols = [p[0] for p in path_candidates[:3]]  # Top 2-3 columns
+        val_col = best_num if best_num else None
+        avg_label_len = sum(p[3] for p in path_candidates[:2]) / 2
+        
+        # Use treemap when labels are longer
+        if avg_label_len > 6:
             try:
-                fig = px.treemap(
-                    pdf.dropna(subset=[cat1, cat2, val_col]),
-                    path=[cat1, cat2],
-                    values=val_col,
-                    title=f"{val_col} by {cat1} → {cat2}"
-                )
+                if val_col:
+                    treemap_df = pdf.dropna(subset=path_cols + [val_col])
+                    fig = px.treemap(
+                        treemap_df,
+                        path=path_cols[:2],
+                        values=val_col,
+                        title=f"Breakdown of {val_col} by {' → '.join(path_cols[:2])}",
+                        color_continuous_scale="Viridis"
+                    )
+                else:
+                    treemap_df = pdf.dropna(subset=path_cols)
+                    treemap_df['_count'] = 1
+                    fig = px.treemap(
+                        treemap_df,
+                        path=path_cols[:2],
+                        values='_count',
+                        title=f"Hierarchy: {' → '.join(path_cols[:2])}"
+                    )
                 fig.update_layout(template="plotly_dark")
+                depth = len(path_cols[:2])
+                score = 60 + (depth * 15)  # Boost for depth
                 charts.append(ChartData(
-                    chart_id=f"treemap_{cat1}_{cat2}",
+                    chart_id=f"treemap_{'_'.join(path_cols[:2])}",
                     chart_type="treemap",
-                    title=f"Hierarchical {val_col}",
-                    description=f"Part-to-whole breakdown by {cat1} and {cat2}",
+                    title=f"Hierarchical Breakdown",
+                    description=f"Part-to-whole analysis across {depth} levels",
                     plotly_json=fig.to_dict(),
-                    columns_used=[cat1, cat2, val_col]
+                    columns_used=path_cols[:2] + ([val_col] if val_col else []),
+                    priority_score=score,
+                    insight_reason=f"{depth}-level hierarchy detected • Good cardinality",
+                    interest_level=get_interest_level(score)
                 ))
             except:
                 pass
     
-    # 5. SUNBURST: Radial hierarchy
-    if len(categorical_cols) >= 2 and len(numeric_cols) >= 1 and len(charts) < max_charts:
-        cat1, cat2 = categorical_cols[0], categorical_cols[1]
-        val_col = numeric_cols[0]
-        if cat1 != cat2:
+    # 2.2 SUNBURST: Radial hierarchy (prefer when labels are short)
+    if len(path_candidates) >= 2 and len(charts) < max_charts:
+        path_cols = [p[0] for p in path_candidates[:3]]
+        val_col = best_num if best_num else None
+        avg_label_len = sum(p[3] for p in path_candidates[:2]) / 2
+        
+        # Use sunburst when labels are shorter (fits better radially)
+        if avg_label_len <= 10:
             try:
-                fig = px.sunburst(
-                    pdf.dropna(subset=[cat1, cat2]),
-                    path=[cat1, cat2],
-                    values=val_col if val_col else None,
-                    title=f"Sunburst: {cat1} → {cat2}"
-                )
+                if val_col:
+                    sunburst_df = pdf.dropna(subset=path_cols[:2] + [val_col])
+                    fig = px.sunburst(
+                        sunburst_df,
+                        path=path_cols[:2],
+                        values=val_col,
+                        title=f"Sunburst: {' → '.join(path_cols[:2])}",
+                        color_continuous_scale="Viridis"
+                    )
+                else:
+                    sunburst_df = pdf.dropna(subset=path_cols[:2])
+                    sunburst_df['_count'] = 1
+                    fig = px.sunburst(
+                        sunburst_df,
+                        path=path_cols[:2],
+                        values='_count',
+                        title=f"Sunburst: {' → '.join(path_cols[:2])}"
+                    )
                 fig.update_layout(template="plotly_dark")
+                score = 58 + (len(path_cols[:2]) * 12)
                 charts.append(ChartData(
-                    chart_id=f"sunburst_{cat1}_{cat2}",
+                    chart_id=f"sunburst_{'_'.join(path_cols[:2])}",
                     chart_type="sunburst",
                     title=f"Radial Hierarchy",
-                    description=f"Sunburst showing nested breakdown",
+                    description=f"Nested breakdown in radial format",
                     plotly_json=fig.to_dict(),
-                    columns_used=[cat1, cat2]
+                    columns_used=path_cols[:2] + ([val_col] if val_col else []),
+                    priority_score=score,
+                    insight_reason="Compact labels suit radial display",
+                    interest_level=get_interest_level(score)
                 ))
             except:
                 pass
+    
+    # 2.3 FUNNEL CHART: Detect stage-like columns
+    stage_keywords = ['stage', 'step', 'phase', 'funnel', 'conversion', 'status', 'level', 'tier']
+    ordinal_patterns = ['low', 'medium', 'high', 'small', 'large', 'start', 'end', 'begin', 'complete']
+    
+    funnel_col = None
+    funnel_score = 0
+    for col in categorical_cols:
+        col_lower = col.lower()
+        # Check if column name matches stage keywords
+        if any(kw in col_lower for kw in stage_keywords):
+            funnel_col = col
+            funnel_score = 85  # High priority for explicit stage columns
+            break
+        # Check if values look ordinal
+        values = pdf[col].dropna().astype(str).str.lower().unique()
+        if len(values) >= 2 and len(values) <= 8:
+            if any(p in ' '.join(values) for p in ordinal_patterns):
+                funnel_col = col
+                funnel_score = 70
+    
+    if funnel_col and len(charts) < max_charts:
+        try:
+            funnel_data = pdf[funnel_col].value_counts().reset_index()
+            funnel_data.columns = [funnel_col, 'count']
+            # Sort by count descending for proper funnel shape
+            funnel_data = funnel_data.sort_values('count', ascending=False)
+            
+            fig = px.funnel(
+                funnel_data,
+                x='count',
+                y=funnel_col,
+                title=f"Funnel: {funnel_col}",
+                color_discrete_sequence=['#6366f1']
+            )
+            fig.update_layout(template="plotly_dark")
+            charts.append(ChartData(
+                chart_id=f"funnel_{funnel_col}",
+                chart_type="funnel",
+                title=f"{funnel_col} Funnel",
+                description="Stage-by-stage breakdown showing progression",
+                plotly_json=fig.to_dict(),
+                columns_used=[funnel_col],
+                priority_score=funnel_score,
+                insight_reason="Stage-like column detected" if funnel_score > 75 else "Ordinal values suggest progression",
+                interest_level=get_interest_level(funnel_score)
+            ))
+        except:
+            pass
+    
+    # 2.4 ICICLE: For deep hierarchies (3+ levels)
+    if len(path_candidates) >= 3 and len(charts) < max_charts:
+        path_cols = [p[0] for p in path_candidates[:3]]
+        val_col = best_num if best_num else None
+        
+        try:
+            if val_col:
+                icicle_df = pdf.dropna(subset=path_cols + [val_col])
+                fig = px.icicle(
+                    icicle_df,
+                    path=path_cols,
+                    values=val_col,
+                    title=f"Deep Hierarchy: {' → '.join(path_cols)}",
+                    color_continuous_scale="Blues"
+                )
+            else:
+                icicle_df = pdf.dropna(subset=path_cols)
+                icicle_df['_count'] = 1
+                fig = px.icicle(
+                    icicle_df,
+                    path=path_cols,
+                    values='_count',
+                    title=f"Deep Hierarchy: {' → '.join(path_cols)}"
+                )
+            fig.update_layout(template="plotly_dark")
+            score = 55 + (len(path_cols) * 10)
+            charts.append(ChartData(
+                chart_id=f"icicle_{'_'.join(path_cols)}",
+                chart_type="icicle",
+                title=f"Icicle Chart",
+                description=f"Deep {len(path_cols)}-level hierarchical breakdown",
+                plotly_json=fig.to_dict(),
+                columns_used=path_cols + ([val_col] if val_col else []),
+                priority_score=score,
+                insight_reason=f"{len(path_cols)}-level deep hierarchy",
+                interest_level=get_interest_level(score)
+            ))
+        except:
+            pass
     
     # 6. PARALLEL COORDINATES: Multi-numeric exploration
     if len(numeric_cols) >= 3 and len(charts) < max_charts:
