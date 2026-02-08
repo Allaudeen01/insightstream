@@ -772,6 +772,8 @@ class ChartData(BaseModel):
     plotly_json: dict
     columns_used: List[str]
     priority_score: float = 50.0  # Higher = more interesting (0-100)
+    insight_reason: str = ""  # Why this chart was prioritized (for tooltip)
+    interest_level: str = "standard"  # "high", "recommended", or "standard"
 
 class VizResponse(BaseModel):
     session_id: str
@@ -801,30 +803,53 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
     # Analyze data patterns to prioritize most interesting visualizations
     
     column_scores = {}
+    column_insights = {}  # Track why each column is interesting
+    
+    def get_interest_level(score: float) -> str:
+        """Convert priority score to interest level label."""
+        if score >= 70:
+            return "high"
+        elif score >= 55:
+            return "recommended"
+        return "standard"
     
     # Score numeric columns by: variance, missing %, unique ratio
     for col in numeric_cols:
         score = 50
+        reasons = []
         missing_pct = pdf[col].isna().sum() / len(pdf) * 100
         if missing_pct > 10:
             score += 15  # High missing = interesting distribution question
-        if pdf[col].std() / (pdf[col].mean() + 0.001) > 0.5:
-            score += 10  # High coefficient of variation = spread worth showing
+            reasons.append(f"{missing_pct:.0f}% missing values")
+        try:
+            cv = pdf[col].std() / (abs(pdf[col].mean()) + 0.001)
+            if cv > 0.5:
+                score += 10  # High coefficient of variation = spread worth showing
+                reasons.append("High variance")
+        except:
+            pass
         column_scores[col] = min(score, 100)
+        column_insights[col] = reasons if reasons else ["Standard distribution"]
     
     # Score categorical columns by: cardinality (3-8 ideal), balance
     for col in categorical_cols:
         score = 50
+        reasons = []
         n_unique = pdf[col].nunique()
         if 3 <= n_unique <= 8:
             score += 20  # Ideal for pie/bar
+            reasons.append(f"{n_unique} categories (ideal)")
         elif n_unique <= 2:
             score -= 10  # Binary less interesting
+        else:
+            reasons.append(f"{n_unique} categories")
         # Check balance (entropy-like)
         value_counts = pdf[col].value_counts(normalize=True)
         if value_counts.max() < 0.7:  # Not dominated by one value
             score += 10
+            reasons.append("Balanced distribution")
         column_scores[col] = min(score, 100)
+        column_insights[col] = reasons if reasons else ["Categorical variable"]
     
     # Find strong correlations for scatter prioritization
     strong_correlations = []
@@ -866,6 +891,8 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 fig.update_layout(template="plotly_dark", showlegend=bool(color_col))
                 if not color_col:
                     fig.update_traces(marker_color='#6366f1')
+                score = column_scores.get(col, 50) + (10 if color_col else 0)
+                reasons = column_insights.get(col, [])
                 charts.append(ChartData(
                     chart_id=f"histogram_{col}",
                     chart_type="histogram",
@@ -873,7 +900,9 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     description=f"Frequency distribution" + (f" colored by {color_col}" if color_col else ""),
                     plotly_json=fig.to_dict(),
                     columns_used=[col] + ([color_col] if color_col else []),
-                    priority_score=column_scores.get(col, 50) + (10 if color_col else 0)
+                    priority_score=score,
+                    insight_reason=" • ".join(reasons) if reasons else "Distribution analysis",
+                    interest_level=get_interest_level(score)
                 ))
             except:
                 pass
@@ -904,6 +933,8 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     color_continuous_scale='Viridis'
                 )
                 fig.update_layout(template="plotly_dark", showlegend=False, coloraxis_showscale=False)
+                score = (column_scores.get(cat_col, 50) + column_scores.get(num_col, 50)) / 2
+                reasons = column_insights.get(cat_col, []) + column_insights.get(num_col, [])
                 charts.append(ChartData(
                     chart_id=f"bar_{num_col}_{cat_col}",
                     chart_type="bar",
@@ -911,7 +942,9 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     description=f"Median {num_col} comparison (robust to outliers)",
                     plotly_json=fig.to_dict(),
                     columns_used=[cat_col, num_col],
-                    priority_score=(column_scores.get(cat_col, 50) + column_scores.get(num_col, 50)) / 2
+                    priority_score=score,
+                    insight_reason=" • ".join(reasons[:2]) if reasons else "Category comparison",
+                    interest_level=get_interest_level(score)
                 ))
             except:
                 pass
