@@ -19,6 +19,9 @@ export default function LandingPage() {
             <Link href="#" className="hover:text-white transition-colors">Pricing</Link>
           </nav>
           <div className="flex items-center gap-4">
+            <Link href="/projects" className="text-sm font-medium text-slate-400 hover:text-white transition-colors">
+              My Projects
+            </Link>
             <Link href="/login" className="text-sm font-medium text-slate-400 hover:text-white transition-colors">
               Log in
             </Link>
@@ -36,7 +39,7 @@ export default function LandingPage() {
       <main className="relative pt-32 pb-20 overflow-hidden">
         {/* Background Gradients */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-[500px] bg-indigo-500/20 blur-[120px] rounded-full pointer-events-none" />
-        
+
         <div className="container mx-auto px-4 relative z-10 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-sm font-medium mb-8 animate-fade-in-up">
             <span className="relative flex h-2 w-2">
@@ -45,17 +48,17 @@ export default function LandingPage() {
             </span>
             AI Data Scientist v1.0 Live
           </div>
-          
+
           <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-6 bg-clip-text text-transparent bg-gradient-to-b from-white to-white/60">
             Upload your data.<br />
             Get insights like a <span className="text-indigo-400">Data Scientist</span>.
           </h1>
-          
+
           <p className="text-lg md:text-xl text-slate-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-            Stop struggling with Python scripts. The Virtual Scientist automatically cleans, explores, 
+            Stop struggling with Python scripts. The Virtual Scientist automatically cleans, explores,
             and models your data to answer "What", "Why", and "What Next".
           </p>
-          
+
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Link
               href="/upload"
@@ -72,20 +75,20 @@ export default function LandingPage() {
           {/* Feature Grid Mini */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto mt-20 text-left">
             {[
-              { 
-                icon: Database, 
-                title: "Auto-Cleaning", 
-                desc: "Fixes missing values, duplicates, and outliers instantly." 
+              {
+                icon: Database,
+                title: "Auto-Cleaning",
+                desc: "Fixes missing values, duplicates, and outliers instantly."
               },
-              { 
-                icon: BarChart3, 
-                title: "Automated EDA", 
-                desc: "Generates distribution plots and correlation heatmaps." 
+              {
+                icon: BarChart3,
+                title: "Automated EDA",
+                desc: "Generates distribution plots and correlation heatmaps."
               },
-              { 
-                icon: Zap, 
-                title: "Instant Insights", 
-                desc: "Explains 'Why it happened' in plain English." 
+              {
+                icon: Zap,
+                title: "Instant Insights",
+                desc: "Explains 'Why it happened' in plain English."
               }
             ].map((feature, i) => (
               <div key={i} className="p-6 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-colors">

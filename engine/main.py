@@ -1,13 +1,22 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import polars as pl
 import io
+import json
 import uuid
-from typing import Optional, List
+from typing import Optional, List, Union
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, PatternFill, Alignment
+import google.generativeai as genai
+import os
+import database as db
 
 app = FastAPI(title="Virtual Data Scientist Engine")
 
@@ -26,18 +35,27 @@ app.add_middleware(
 
 import os
 import json
+import tempfile
 from pathlib import Path
 
-SESSION_DIR = Path("/tmp/sessions")
+SESSION_DIR = Path(tempfile.gettempdir()) / "insightstream_sessions"
 
 @app.on_event("startup")
 async def startup_event():
-    """Create session directory on startup."""
+    """Create session directory and initialize database on startup."""
     try:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
         print(f"Session directory created: {SESSION_DIR}")
     except Exception as e:
         print(f"Warning: Could not create session directory: {e}")
+    # Initialize SQLite database
+    db.init_db()
+    print("Database initialized.")
+
+# Configure Gemini
+GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GENAI_API_KEY:
+    genai.configure(api_key=GENAI_API_KEY)
 
 def save_session(session_id: str, filename: str, df: pl.DataFrame) -> None:
     """Save session to disk."""
@@ -83,12 +101,14 @@ class ColumnInfo(BaseModel):
     unique_count: int
 
 class DatasetSchema(BaseModel):
-    session_id: str
+    session_id: Optional[str] = None
     filename: str
-    row_count: int
-    column_count: int
-    columns: list[ColumnInfo]
-    preview: list[dict]  # First 10 rows
+    row_count: Optional[int] = None
+    column_count: Optional[int] = None
+    columns: Optional[list[ColumnInfo]] = None
+    preview: Optional[list[dict]] = None  # First 10 rows
+    sheets: Optional[List[str]] = None    # For multi-sheet Excel files
+    requires_selection: bool = False      # Flag to prompt user for sheet selection
 
 @app.get("/")
 def read_root():
@@ -98,11 +118,70 @@ def read_root():
 def health_check():
     return {"status": "ok"}
 
+# ─── Project CRUD Endpoints ─────────────────────────────────────
+
+class ProjectRename(BaseModel):
+    name: str
+
+@app.get("/projects")
+def list_all_projects():
+    """List all saved projects."""
+    return db.list_projects()
+
+@app.get("/projects/{project_id}")
+def get_project_detail(project_id: str):
+    """Get project details and history."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    history = db.get_history(project_id)
+    return {**project, "history": history}
+
+@app.put("/projects/{project_id}")
+def rename_project(project_id: str, body: ProjectRename):
+    """Rename a project."""
+    if not db.update_project(project_id, name=body.name):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"status": "ok", "name": body.name}
+
+@app.delete("/projects/{project_id}")
+def delete_project_endpoint(project_id: str):
+    """Delete a project and its data."""
+    if not db.delete_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"status": "ok", "deleted": project_id}
+
+# ─── Dashboard Endpoints ────────────────────────────────────────
+
+class DashboardSave(BaseModel):
+    layout: list
+    pinned_chart_ids: list[str]
+    text_blocks: Optional[list[dict]] = None
+
+@app.post("/dashboard/{project_id}")
+def save_dashboard_endpoint(project_id: str, body: DashboardSave):
+    """Save dashboard layout for a project."""
+    db.save_dashboard(project_id, body.layout, body.pinned_chart_ids, body.text_blocks)
+    return {"status": "ok"}
+
+@app.get("/dashboard/{project_id}")
+def load_dashboard_endpoint(project_id: str):
+    """Load dashboard layout for a project."""
+    dashboard = db.load_dashboard(project_id)
+    if not dashboard:
+        return {"project_id": project_id, "layout": [], "pinned_chart_ids": [], "text_blocks": []}
+    return dashboard
+
+# ─── Upload (creates project) ───────────────────────────────────
+
 @app.post("/upload", response_model=DatasetSchema)
-async def upload_dataset(file: UploadFile = File(...)):
+async def upload_dataset(
+    file: UploadFile = File(...),
+    sheet_name: Optional[str] = Form(None)
+):
     """
     Upload a dataset (CSV or Excel) and get back the schema.
-    This is the core "Data Collection" step.
+    Supports multi-sheet Excel files by returning a list of sheets for selection.
     """
     # Validate file type
     if not file.filename:
@@ -122,9 +201,27 @@ async def upload_dataset(file: UploadFile = File(...)):
         if extension == "csv":
             df = pl.read_csv(io.BytesIO(contents))
         else:
-            # For Excel, use Pandas as intermediary (Polars has limited Excel support)
+            # Excel Handling
             import pandas as pd
-            pandas_df = pd.read_excel(io.BytesIO(contents))
+            excel_file = pd.ExcelFile(io.BytesIO(contents))
+            sheet_names = excel_file.sheet_names
+            
+            # Case 1: Multiple sheets and no specific sheet selected
+            if len(sheet_names) > 1 and not sheet_name:
+                return DatasetSchema(
+                    filename=file.filename,
+                    sheets=sheet_names,
+                    requires_selection=True
+                )
+            
+            # Case 2: Specific sheet selected OR only one sheet exists
+            target_sheet = sheet_name if sheet_name else 0
+            
+            # Validate sheet choice
+            if sheet_name and sheet_name not in sheet_names:
+                 raise HTTPException(status_code=400, detail=f"Sheet '{sheet_name}' not found.")
+
+            pandas_df = pd.read_excel(excel_file, sheet_name=target_sheet)
             df = pl.from_pandas(pandas_df)
         
         # Generate session ID
@@ -132,6 +229,21 @@ async def upload_dataset(file: UploadFile = File(...)):
         
         # Store dataframe in session (file-based for production)
         save_session(session_id, file.filename, df)
+        
+        # Persist as a project in the database
+        data_path = str(SESSION_DIR / session_id)
+        try:
+            db.create_project(
+                project_id=session_id,
+                name=file.filename.rsplit('.', 1)[0],
+                filename=file.filename,
+                data_path=data_path,
+                row_count=len(df),
+                column_count=len(df.columns),
+            )
+            db.add_history(session_id, "upload", {"filename": file.filename, "rows": len(df), "cols": len(df.columns)}, f"Uploaded {file.filename}")
+        except Exception as e:
+            print(f"Warning: Could not persist project: {e}")
         
         # Build schema response
         columns_info = []
@@ -155,10 +267,14 @@ async def upload_dataset(file: UploadFile = File(...)):
             row_count=len(df),
             column_count=len(df.columns),
             columns=columns_info,
-            preview=preview
+            preview=preview,
+            requires_selection=False
         )
         
     except Exception as e:
+        # Re-raise HTTP exceptions to preserve status code
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
 @app.get("/session/{session_id}")
@@ -466,6 +582,17 @@ def apply_cleaning(session_id: str, actions: list[CleanAction]):
     # Save the cleaned DataFrame back to disk
     save_session(session_id, filename, cleaned_df)
     
+    # Track cleaning history
+    try:
+        db.add_history(
+            session_id, "clean",
+            {"actions": [a.dict() for a in actions]},
+            f"Applied {len(actions)} cleaning actions: {', '.join(changelog[:3])}"
+        )
+        db.update_project(session_id, row_count=len(cleaned_df), column_count=len(cleaned_df.columns))
+    except Exception:
+        pass
+    
     return {
         "status": "ok", 
         "row_count": len(cleaned_df), 
@@ -754,6 +881,14 @@ def get_insights(session_id: str):
     else:
         exec_summary = f"Dataset contains {len(df)} records with {len(numeric_cols)} numeric and {len(categorical_cols)} categorical columns. No critical anomalies detected."
     
+    # Cache insights in project
+    try:
+        recs_text = json.dumps(recommendations[:5])
+        db.update_project(session_id, executive_summary=exec_summary, recommendations=recs_text)
+        db.add_history(session_id, "insight", None, f"Generated {len(insights)} insights")
+    except Exception:
+        pass
+    
     return InsightsResponse(
         session_id=session_id,
         executive_summary=exec_summary,
@@ -761,6 +896,359 @@ def get_insights(session_id: str):
         recommendations=recommendations[:5]  # Limit to 5 recommendations
     )
 
+
+# ============== KPI ENGINE ==============
+
+KPI_KEYWORDS = ["revenue", "sales", "profit", "amount", "income", "price", "cost", "total", "quantity", "budget", "expense", "margin"]
+
+def _format_number(val: float) -> str:
+    """Format large numbers for display."""
+    abs_val = abs(val)
+    if abs_val >= 1_000_000_000:
+        return f"${val/1_000_000_000:.2f}B" if val >= 0 else f"-${abs_val/1_000_000_000:.2f}B"
+    if abs_val >= 1_000_000:
+        return f"${val/1_000_000:.2f}M" if val >= 0 else f"-${abs_val/1_000_000:.2f}M"
+    if abs_val >= 1_000:
+        return f"${val/1_000:.1f}K" if val >= 0 else f"-${abs_val/1_000:.1f}K"
+    return f"${val:,.2f}" if val >= 0 else f"-${abs_val:,.2f}"
+
+@app.get("/kpis/{session_id}")
+def get_kpis(session_id: str):
+    """Auto-detect and compute KPI metrics from the dataset."""
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    kpis = []
+    numeric_cols = [col for col in df.columns if df[col].dtype in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]]
+    categorical_cols = [col for col in df.columns if df[col].dtype == pl.Utf8]
+    date_cols = [col for col in df.columns if df[col].dtype in [pl.Date, pl.Datetime]]
+
+    # Detect KPI columns by keyword matching
+    kpi_cols = []
+    for col in numeric_cols:
+        col_lower = col.lower()
+        for keyword in KPI_KEYWORDS:
+            if keyword in col_lower:
+                kpi_cols.append(col)
+                break
+    
+    # If no keyword matches, use top numeric columns by variance
+    if not kpi_cols:
+        kpi_cols = numeric_cols[:3]
+
+    for col in kpi_cols[:5]:  # Limit to 5 KPIs
+        try:
+            col_data = df[col].drop_nulls()
+            if len(col_data) == 0:
+                continue
+
+            total = float(col_data.sum())
+            avg = float(col_data.mean())
+            min_val = float(col_data.min())
+            max_val = float(col_data.max())
+
+            kpi = {
+                "label": f"Total {col}",
+                "column": col,
+                "value": total,
+                "formatted": _format_number(total),
+                "avg": round(avg, 2),
+                "min": round(min_val, 2),
+                "max": round(max_val, 2),
+                "count": len(col_data),
+            }
+
+            # Growth % — if date column exists, compare last period to previous
+            if date_cols:
+                try:
+                    date_col = date_cols[0]
+                    sorted_df = df.sort(date_col)
+                    n = len(sorted_df)
+                    mid = n // 2
+                    if mid > 0:
+                        first_half = sorted_df[:mid][col].drop_nulls().sum()
+                        second_half = sorted_df[mid:][col].drop_nulls().sum()
+                        if first_half and first_half != 0:
+                            change_pct = round(((second_half - first_half) / abs(first_half)) * 100, 1)
+                            kpi["change_pct"] = change_pct
+                            kpi["trend"] = "up" if change_pct > 2 else ("down" if change_pct < -2 else "flat")
+                        else:
+                            kpi["change_pct"] = 0
+                            kpi["trend"] = "flat"
+                except Exception:
+                    kpi["trend"] = "flat"
+                    kpi["change_pct"] = 0
+            else:
+                kpi["trend"] = "flat"
+                kpi["change_pct"] = 0
+
+            # Best/worst category
+            if categorical_cols:
+                try:
+                    cat_col = categorical_cols[0]
+                    grouped = df.group_by(cat_col).agg(pl.sum(col).alias("total")).sort("total", descending=True)
+                    if len(grouped) >= 2:
+                        best = grouped.head(1)
+                        worst = grouped.tail(1)
+                        kpi["best_category"] = {
+                            "name": str(best[cat_col].item()),
+                            "value": float(best["total"].item())
+                        }
+                        kpi["worst_category"] = {
+                            "name": str(worst[cat_col].item()),
+                            "value": float(worst["total"].item())
+                        }
+                except Exception:
+                    pass
+
+            kpis.append(kpi)
+        except Exception:
+            continue
+
+    return {"session_id": session_id, "kpis": kpis}
+
+
+# ============== AI CHART EXPLANATION ==============
+
+class ExplainRequest(BaseModel):
+    chart_id: str
+    chart_type: str
+    chart_title: str
+    columns_used: List[str]
+    data_summary: Optional[str] = None
+
+@app.post("/explain-chart/{session_id}")
+def explain_chart(session_id: str, request: ExplainRequest):
+    """Use Gemini to explain patterns in a specific chart."""
+    if not GENAI_API_KEY:
+        return {
+            "pattern": "AI explanation requires a Gemini API key.",
+            "importance": "Configure GEMINI_API_KEY to enable chart explanations.",
+            "business_reason": "",
+            "risk_or_opportunity": ""
+        }
+
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Build context from the data
+    col_stats = []
+    for col in request.columns_used:
+        if col in df.columns:
+            if df[col].dtype in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
+                stats = df[col].drop_nulls()
+                col_stats.append(f"{col}: min={stats.min()}, max={stats.max()}, mean={round(float(stats.mean()), 2)}, median={round(float(stats.median()), 2)}")
+            elif df[col].dtype == pl.Utf8:
+                unique_count = df[col].n_unique()
+                top_vals = df[col].value_counts().head(3)
+                top_list = [str(row[col]) for row in top_vals.iter_rows(named=True)]
+                col_stats.append(f"{col}: {unique_count} unique values, top: {', '.join(top_list)}")
+
+    prompt = f"""You are a senior data analyst. Analyze this chart and provide insights.
+
+Chart Type: {request.chart_type}
+Chart Title: {request.chart_title}
+Columns Used: {', '.join(request.columns_used)}
+Dataset: {filename} ({len(df)} rows, {len(df.columns)} columns)
+Column Statistics:
+{chr(10).join(col_stats)}
+
+{f'Additional context: {request.data_summary}' if request.data_summary else ''}
+
+Provide a JSON response with exactly these 4 fields:
+{{
+    "pattern": "What pattern or trend does this chart reveal? Be specific with numbers.",
+    "importance": "Why is this insight important for the business?",
+    "business_reason": "What likely business factors explain this pattern?",
+    "risk_or_opportunity": "What specific risk or opportunity does this suggest?"
+}}
+
+Be concise (2-3 sentences each). Use real numbers from the statistics."""
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+
+        # Parse JSON from response
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+
+        result = json.loads(text)
+        return {
+            "pattern": result.get("pattern", ""),
+            "importance": result.get("importance", ""),
+            "business_reason": result.get("business_reason", ""),
+            "risk_or_opportunity": result.get("risk_or_opportunity", ""),
+        }
+    except Exception as e:
+        return {
+            "pattern": f"Unable to generate explanation: {str(e)}",
+            "importance": "",
+            "business_reason": "",
+            "risk_or_opportunity": ""
+        }
+
+
+# ============== PDF / HTML REPORT EXPORT ==============
+
+from fastapi.responses import HTMLResponse
+import base64
+
+@app.get("/export-report/{session_id}")
+def export_report(session_id: str):
+    """Generate a styled HTML report suitable for Print-to-PDF."""
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get insights
+    insights_response = get_insights(session_id)
+    exec_summary = insights_response.executive_summary
+    insights = insights_response.insights
+    recommendations = insights_response.recommendations
+
+    # Get KPIs
+    kpi_data = get_kpis(session_id)
+    kpis = kpi_data.get("kpis", [])
+
+    # Generate chart images as base64
+    chart_images = []
+    try:
+        viz_response = generate_visualizations(session_id, max_charts=6)
+        for chart in viz_response.get("charts", [])[:6]:
+            try:
+                fig_dict = chart.get("plotly_json", {})
+                fig = go.Figure(data=fig_dict.get("data", []), layout=fig_dict.get("layout", {}))
+                fig.update_layout(
+                    paper_bgcolor='white',
+                    plot_bgcolor='#f8fafc',
+                    font=dict(color='#1e293b'),
+                    width=550,
+                    height=350,
+                )
+                img_bytes = fig.to_image(format="png", engine="kaleido")
+                b64 = base64.b64encode(img_bytes).decode("utf-8")
+                chart_images.append({
+                    "title": chart.get("title", "Chart"),
+                    "description": chart.get("description", ""),
+                    "b64": b64,
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Build KPI HTML
+    kpi_html = ""
+    if kpis:
+        kpi_cards = ""
+        for kpi in kpis:
+            trend_icon = "↑" if kpi.get("trend") == "up" else ("↓" if kpi.get("trend") == "down" else "→")
+            trend_color = "#10b981" if kpi.get("trend") == "up" else ("#ef4444" if kpi.get("trend") == "down" else "#94a3b8")
+            change = kpi.get("change_pct", 0)
+            kpi_cards += f"""
+            <div class="kpi-card">
+                <div class="kpi-label">{kpi['label']}</div>
+                <div class="kpi-value">{kpi['formatted']}</div>
+                <div class="kpi-trend" style="color: {trend_color}">
+                    {trend_icon} {abs(change)}% {'growth' if change > 0 else 'decline' if change < 0 else 'stable'}
+                </div>
+            </div>"""
+        kpi_html = f'<div class="kpi-grid">{kpi_cards}</div>'
+
+    # Build insights HTML
+    insights_html = ""
+    for ins in insights[:6]:
+        insights_html += f"""
+        <div class="insight-card">
+            <div class="insight-title">{ins.title}</div>
+            <div class="insight-desc">{ins.description}</div>
+        </div>"""
+
+    # Build recommendations HTML
+    recs_html = ""
+    for i, rec in enumerate(recommendations[:5], 1):
+        recs_html += f'<div class="rec-item"><span class="rec-num">{i}</span> {rec}</div>'
+
+    # Build charts HTML
+    charts_html = ""
+    for ci in chart_images:
+        charts_html += f"""
+        <div class="chart-block">
+            <h3 class="chart-title">{ci['title']}</h3>
+            <p class="chart-desc">{ci['description']}</p>
+            <img src="data:image/png;base64,{ci['b64']}" alt="{ci['title']}" />
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>InsightStream Report — {filename}</title>
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{ font-family: 'Inter', sans-serif; color: #1e293b; background: #fff; padding: 40px; max-width: 900px; margin: 0 auto; }}
+    @media print {{
+        body {{ padding: 20px; }}
+        .chart-block {{ break-inside: avoid; }}
+        .insight-card {{ break-inside: avoid; }}
+    }}
+    .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 2px solid #e2e8f0; }}
+    .header h1 {{ font-size: 28px; color: #4f46e5; margin-bottom: 4px; }}
+    .header .subtitle {{ font-size: 14px; color: #64748b; }}
+    .section {{ margin-bottom: 32px; }}
+    .section-title {{ font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; }}
+    .summary-box {{ background: #f1f5f9; border-radius: 12px; padding: 20px; font-size: 15px; line-height: 1.7; color: #334155; }}
+    .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }}
+    .kpi-card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; text-align: center; }}
+    .kpi-label {{ font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; margin-bottom: 4px; }}
+    .kpi-value {{ font-size: 24px; font-weight: 700; color: #1e293b; }}
+    .kpi-trend {{ font-size: 12px; margin-top: 4px; }}
+    .insight-card {{ background: #f8fafc; border-left: 3px solid #4f46e5; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; }}
+    .insight-title {{ font-weight: 600; font-size: 14px; margin-bottom: 4px; }}
+    .insight-desc {{ font-size: 13px; color: #475569; line-height: 1.5; }}
+    .rec-item {{ display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f1f5f9; font-size: 14px; line-height: 1.5; }}
+    .rec-num {{ background: #4f46e5; color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0; }}
+    .chart-block {{ margin-bottom: 24px; text-align: center; }}
+    .chart-title {{ font-size: 16px; font-weight: 600; margin-bottom: 4px; }}
+    .chart-desc {{ font-size: 13px; color: #64748b; margin-bottom: 12px; }}
+    .chart-block img {{ max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; }}
+    .footer {{ margin-top: 40px; text-align: center; font-size: 12px; color: #94a3b8; padding-top: 20px; border-top: 1px solid #e2e8f0; }}
+</style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 InsightStream Report</h1>
+        <div class="subtitle">{filename} · {len(df)} rows · {len(df.columns)} columns</div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Executive Summary</div>
+        <div class="summary-box">{exec_summary}</div>
+    </div>
+
+    {f'<div class="section"><div class="section-title">Key Performance Indicators</div>{kpi_html}</div>' if kpi_html else ''}
+
+    {f'<div class="section"><div class="section-title">Insights</div>{insights_html}</div>' if insights_html else ''}
+
+    {f'<div class="section"><div class="section-title">Recommendations</div>{recs_html}</div>' if recs_html else ''}
+
+    {f'<div class="section"><div class="section-title">Visualizations</div>{charts_html}</div>' if charts_html else ''}
+
+    <div class="footer">Generated by InsightStream AI Data Analyst</div>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html, media_type="text/html")
 
 # ============== PHASE 5: ADVANCED VISUALIZATIONS ==============
 
@@ -780,20 +1268,78 @@ class VizResponse(BaseModel):
     charts: List[ChartData]
     total_generated: int
 
-@app.get("/generate-viz/{session_id}", response_model=VizResponse)
-def generate_visualizations(session_id: str, max_charts: int = 10):
+@app.get("/generate-viz/{session_id}")
+def generate_visualizations(
+    session_id: str, 
+    max_charts: int = 10,
+    groupby: Optional[str] = None,
+    chart_types: Optional[List[str]] = Query(None),
+    focus: Optional[str] = None,
+    exclude_types: Optional[List[str]] = Query(None)
+):
     """
     Auto-generate advanced interactive charts based on dataset characteristics.
     Returns Plotly JSON for frontend rendering with react-plotly.js.
     """
+    print("ENTERED generate_visualizations")
+    try:
+        print(f"Calling _internal_gen_viz with session_id={session_id}")
+        return _internal_gen_viz(
+            session_id=session_id,
+            max_charts=max_charts,
+            groupby=groupby,
+            chart_types=chart_types,
+            focus=focus,
+            exclude_types=exclude_types
+        )
+    except HTTPException as he:
+        raise he
+    except BaseException as e:
+        import traceback
+        trace = traceback.format_exc()
+        print(f"CRITICAL ERROR (BaseException): {e}")
+        print(trace)
+        return JSONResponse(status_code=500, content={"detail": f"Backend Error: {str(e)}", "trace": trace})
+
+def _internal_gen_viz(
+    session_id: str, 
+    max_charts: int = 10,
+    groupby: Optional[str] = None,
+    chart_types: Optional[List[str]] = None,
+    focus: Optional[str] = None,
+    exclude_types: Optional[List[str]] = None
+):
+    print("ENTERED _internal_gen_viz")
+    # Helper for type filtering
+    def is_chart_allowed(ctype):
+        if exclude_types and ctype in exclude_types: return False
+        if chart_types and ctype not in chart_types: return False
+        return True
+    
+
+    
+    # Limit max_charts to 20 for performance
+    if max_charts > 20: 
+        max_charts = 20
+        
     try:
         filename, df = load_session(session_id)
+        print(f"Loaded session {session_id} for viz generation.")
+        
+        # Convert to pandas for Plotly
+        pdf = df.to_pandas()
+        charts = []
+        
+
+        
     except FileNotFoundError:
+        print(f"Session {session_id} not found.")
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Convert to pandas for Plotly
-    pdf = df.to_pandas()
-    charts = []
+    except Exception as e:
+        import traceback
+        print(f"Error in generate_visualizations: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Backend Error: {str(e)}")
     
     # Categorize columns
     numeric_cols = [c for c in pdf.columns if pdf[c].dtype in ['int64', 'float64', 'int32', 'float32']]
@@ -869,51 +1415,65 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
     numeric_cols = sorted(numeric_cols, key=lambda c: column_scores.get(c, 50), reverse=True)
     categorical_cols = sorted(categorical_cols, key=lambda c: column_scores.get(c, 50), reverse=True)
     
+
+    
+    # Override best_cat if groupby provided
+    if groupby and groupby in categorical_cols:
+        best_cat = groupby
+        # Boost score of groupby column
+        column_scores[groupby] = 100
+
     # ============== PHASE 0: CORE BASICS ==============
     
     # 0.1 HISTOGRAM: Distribution of numeric columns (with optional color grouping)
-    for col in numeric_cols[:2]:  # Limit to first 2 numeric columns
-        if pdf[col].nunique() > 5 and len(charts) < max_charts:
-            try:
-                # Add color grouping if good categorical exists
-                color_col = None
-                if categorical_cols and pdf[categorical_cols[0]].nunique() <= 4:
-                    color_col = categorical_cols[0]
-                
-                fig = px.histogram(
-                    pdf, x=col,
-                    color=color_col,
-                    title=f"Distribution of {col}" + (f" by {color_col}" if color_col else ""),
-                    marginal="rug",
-                    barmode="overlay" if color_col else "relative",
-                    opacity=0.7 if color_col else 1.0
-                )
-                fig.update_layout(template="plotly_dark", showlegend=bool(color_col))
-                if not color_col:
-                    fig.update_traces(marker_color='#6366f1')
-                score = column_scores.get(col, 50) + (10 if color_col else 0)
-                reasons = column_insights.get(col, [])
-                charts.append(ChartData(
-                    chart_id=f"histogram_{col}",
-                    chart_type="histogram",
-                    title=f"{col} Distribution",
+    if is_chart_allowed("histogram"):
+        # If groupby exists, use it for color
+        force_color = groupby if groupby in categorical_cols else None
+        
+        for col in numeric_cols[:2]:  # Limit to first 2 numeric columns
+            if pdf[col].nunique() > 5 and len(charts) < max_charts:
+                try:
+                    # Add color grouping if good categorical exists
+                    color_col = None
+                    if categorical_cols and pdf[categorical_cols[0]].nunique() <= 4:
+                        color_col = categorical_cols[0]
+                    
+                    fig = px.histogram(
+                        pdf, x=col,
+                        color=color_col,
+                        title=f"Distribution of {col}" + (f" by {color_col}" if color_col else ""),
+                        marginal="rug",
+                        barmode="overlay" if color_col else "relative",
+                        opacity=0.7 if color_col else 1.0
+                    )
+                    fig.update_layout(template="plotly_dark", showlegend=bool(color_col))
+                    if not color_col:
+                        fig.update_traces(marker_color='#6366f1')
+                    score = column_scores.get(col, 50) + (10 if color_col else 0)
+                    reasons = column_insights.get(col, [])
+                    charts.append(ChartData(
+                        chart_id=f"histogram_{col}",
+                        chart_type="histogram",
+                        title=f"{col} Distribution",
                     description=f"Frequency distribution" + (f" colored by {color_col}" if color_col else ""),
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=[col] + ([color_col] if color_col else []),
                     priority_score=score,
                     insight_reason=" • ".join(reasons) if reasons else "Distribution analysis",
                     interest_level=get_interest_level(score)
                 ))
-            except:
-                pass
+                except:
+                    pass
     
+
+
     # 0.2 BAR CHART: Categorical vs Numeric (median for robustness, horizontal for long labels)
-    if len(categorical_cols) >= 1 and len(numeric_cols) >= 1 and len(charts) < max_charts:
-        cat_col = categorical_cols[0]
-        num_col = numeric_cols[0]
-        n_categories = pdf[cat_col].nunique()
-        if n_categories <= 12 and cat_col != num_col:
-            try:
+    if is_chart_allowed("bar") and len(categorical_cols) >= 1 and len(numeric_cols) >= 1 and len(charts) < max_charts:
+        try:
+            cat_col = categorical_cols[0]
+            num_col = numeric_cols[0]
+            n_categories = pdf[cat_col].nunique()
+            if n_categories <= 12 and cat_col != num_col:
                 # Use median for robustness against outliers
                 agg_df = pdf.groupby(cat_col)[num_col].median().reset_index()
                 agg_df.columns = [cat_col, f'Median {num_col}']
@@ -940,17 +1500,19 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="bar",
                     title=f"{num_col} by {cat_col}",
                     description=f"Median {num_col} comparison (robust to outliers)",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=[cat_col, num_col],
                     priority_score=score,
                     insight_reason=" • ".join(reasons[:2]) if reasons else "Category comparison",
                     interest_level=get_interest_level(score)
                 ))
-            except:
-                pass
+        except Exception as e:
+            print(f"Bar Chart Error: {e}")
     
+
+
     # 0.3 PIE CHART: With auto-collapse small slices into "Other"
-    if len(categorical_cols) >= 1 and len(charts) < max_charts:
+    if is_chart_allowed("pie") and len(categorical_cols) >= 1 and len(charts) < max_charts:
         cat_col = categorical_cols[0]
         n_unique = pdf[cat_col].nunique()
         if n_unique <= 15:  # Allow more but collapse
@@ -991,7 +1553,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="pie",
                     title=f"{cat_col} Breakdown",
                     description=f"Percentage distribution (small slices grouped as 'Other')",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=[cat_col],
                     priority_score=column_scores.get(cat_col, 50) + 5  # Pie charts popular
                 ))
@@ -999,10 +1561,10 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 pass
     
     # 0.4 COUNT BAR: Stacked categorical frequency
-    if len(categorical_cols) >= 2 and len(charts) < max_charts:
-        cat1, cat2 = categorical_cols[0], categorical_cols[1]
-        if cat1 != cat2 and pdf[cat1].nunique() <= 8 and pdf[cat2].nunique() <= 6:
-            try:
+    if is_chart_allowed("bar") and len(categorical_cols) >= 2 and len(charts) < max_charts:
+        try:
+            cat1, cat2 = categorical_cols[0], categorical_cols[1]
+            if cat1 != cat2 and pdf[cat1].nunique() <= 8 and pdf[cat2].nunique() <= 6:
                 fig = px.histogram(
                     pdf, x=cat1, color=cat2,
                     title=f"{cat1} Counts by {cat2}",
@@ -1014,11 +1576,11 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="count_bar",
                     title=f"{cat1} by {cat2}",
                     description=f"Frequency counts of {cat1} grouped by {cat2}",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=[cat1, cat2]
                 ))
-            except:
-                pass
+        except Exception as e:
+            print(f"Count Bar Error: {e}")
     
     # ============== PHASE 1: STATISTICAL & DISTRIBUTION ==============
     
@@ -1052,8 +1614,12 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
     if not best_cat and categorical_cols:
         best_cat = categorical_cols[0]
     
+    # Force override again just in case loop reset it (though we set it before)
+    if groupby and groupby in categorical_cols:
+        best_cat = groupby
+    
     # 1.1 VIOLIN PLOT: Best numeric by best categorical
-    if best_num and best_cat and len(charts) < max_charts:
+    if is_chart_allowed("violin") and best_num and best_cat and len(charts) < max_charts:
         try:
             fig = px.violin(
                 pdf, x=best_cat, y=best_num,
@@ -1070,7 +1636,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="violin",
                 title=f"{best_num} by {best_cat}",
                 description=f"Full distribution with box stats and individual points",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=[best_num, best_cat],
                 priority_score=score,
                 insight_reason=" • ".join(reasons[:3]),
@@ -1080,7 +1646,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             pass
     
     # 1.2 SCATTER + MARGINALS: Strongest correlation pair
-    if len(strong_correlations) > 0 and len(charts) < max_charts:
+    if is_chart_allowed("scatter") and len(strong_correlations) > 0 and len(charts) < max_charts:
         # Use the strongest correlation pair
         col1, col2, corr_val = strong_correlations[0]
         color_col = best_cat if best_cat and pdf[best_cat].nunique() <= 4 else None
@@ -1103,7 +1669,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="scatter_marginals",
                 title=f"{col1} vs {col2}",
                 description=f"Bivariate relationship with marginal distributions",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=[col1, col2] + ([color_col] if color_col else []),
                 priority_score=score,
                 insight_reason=f"Strongest correlation (r = {corr_val:.2f})",
@@ -1111,7 +1677,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             ))
         except:
             pass
-    elif len(numeric_cols) >= 2 and len(charts) < max_charts:
+    elif is_chart_allowed("scatter") and len(numeric_cols) >= 2 and len(charts) < max_charts:
         # Fallback: first two numerics
         col1, col2 = numeric_cols[0], numeric_cols[1]
         try:
@@ -1126,7 +1692,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="scatter_marginals",
                 title=f"{col1} vs {col2}",
                 description=f"Bivariate analysis with marginal distributions",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=[col1, col2],
                 priority_score=55,
                 insight_reason="Numeric relationship exploration",
@@ -1136,7 +1702,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             pass
     
     # 1.3 BOX PLOT: With notches and points
-    if best_num and best_cat and len(charts) < max_charts:
+    if is_chart_allowed("box") and best_num and best_cat and len(charts) < max_charts:
         try:
             fig = px.box(
                 pdf, x=best_cat, y=best_num,
@@ -1152,7 +1718,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="box",
                 title=f"{best_num} Summary",
                 description=f"Quartiles, median, and confidence intervals with data points",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=[best_num, best_cat],
                 priority_score=score,
                 insight_reason="Statistical summary with confidence notches",
@@ -1181,7 +1747,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="density_heatmap",
                 title=f"Joint Distribution",
                 description=f"Density concentration showing where data clusters",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=[col1, col2],
                 priority_score=58,
                 insight_reason="Shows concentration patterns in joint distribution",
@@ -1240,7 +1806,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="treemap",
                     title=f"Hierarchical Breakdown",
                     description=f"Part-to-whole analysis across {depth} levels",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=path_cols[:2] + ([val_col] if val_col else []),
                     priority_score=score,
                     insight_reason=f"{depth}-level hierarchy detected • Good cardinality",
@@ -1283,7 +1849,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="sunburst",
                     title=f"Radial Hierarchy",
                     description=f"Nested breakdown in radial format",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=path_cols[:2] + ([val_col] if val_col else []),
                     priority_score=score,
                     insight_reason="Compact labels suit radial display",
@@ -1332,7 +1898,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="funnel",
                 title=f"{funnel_col} Funnel",
                 description="Stage-by-stage breakdown showing progression",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=[funnel_col],
                 priority_score=funnel_score,
                 insight_reason="Stage-like column detected" if funnel_score > 75 else "Ordinal values suggest progression",
@@ -1372,7 +1938,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="icicle",
                 title=f"Icicle Chart",
                 description=f"Deep {len(path_cols)}-level hierarchical breakdown",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=path_cols + ([val_col] if val_col else []),
                 priority_score=score,
                 insight_reason=f"{len(path_cols)}-level deep hierarchy",
@@ -1409,7 +1975,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="parallel_coordinates",
                 title="Parallel Coordinates",
                 description=f"Compare {len(dims)} numeric dimensions simultaneously",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=dims,
                 priority_score=score,
                 insight_reason=f"{len(dims)} numeric columns suitable for parallel comparison",
@@ -1419,7 +1985,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             pass
     
     # 3.2 SANKEY DIAGRAM: Flow between categorical columns
-    if len(categorical_cols) >= 2 and len(charts) < max_charts:
+    if is_chart_allowed("sankey") and len(categorical_cols) >= 2 and len(charts) < max_charts:
         # Find best source-target pair with good cardinality
         source_col = None
         target_col = None
@@ -1485,7 +2051,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="sankey",
                     title=f"Flow Diagram",
                     description=f"Flow relationships between {source_col} and {target_col}",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=[source_col, target_col],
                     priority_score=score,
                     insight_reason=f"Flow structure detected between {source_col} and {target_col}",
@@ -1495,7 +2061,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 pass
     
     # 3.3 RADAR / POLAR CHART: Multi-attribute comparison
-    if len(numeric_cols) >= 4 and len(numeric_cols) <= 8 and len(charts) < max_charts:
+    if is_chart_allowed("radar") and len(numeric_cols) >= 4 and len(numeric_cols) <= 8 and len(charts) < max_charts:
         radar_cols = numeric_cols[:8]
         try:
             # Normalize values for radar (0-1 scale)
@@ -1533,7 +2099,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="radar",
                 title=f"Attribute Radar",
                 description=f"Multi-attribute comparison across {len(radar_cols)} dimensions",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=radar_cols,
                 priority_score=score,
                 insight_reason=f"{len(radar_cols)} numeric attributes suitable for radar comparison",
@@ -1543,25 +2109,26 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             pass
     
     # 3.4 WATERFALL CHART: For numeric with positive/negative values
-    waterfall_col = None
-    waterfall_score = 0
-    for col in numeric_cols:
-        try:
-            values = pdf[col].dropna()
-            has_positive = (values > 0).any()
-            has_negative = (values < 0).any()
-            if has_positive and has_negative:
-                # Good candidate - has both positive and negative
-                ratio = min(abs(values[values > 0].sum()), abs(values[values < 0].sum())) / max(abs(values.sum()), 1)
-                if ratio > 0.1:  # At least 10% contribution from both sides
-                    col_score = 80 + ratio * 20
-                    if col_score > waterfall_score:
-                        waterfall_score = col_score
-                        waterfall_col = col
-        except:
-            pass
+    if is_chart_allowed("waterfall"):
+        waterfall_col = None
+        waterfall_score = 0
+        for col in numeric_cols:
+            try:
+                values = pdf[col].dropna()
+                has_positive = (values > 0).any()
+                has_negative = (values < 0).any()
+                if has_positive and has_negative:
+                    # Good candidate - has both positive and negative
+                    ratio = min(abs(values[values > 0].sum()), abs(values[values < 0].sum())) / max(abs(values.sum()), 1)
+                    if ratio > 0.1:  # At least 10% contribution from both sides
+                        col_score = 80 + ratio * 20
+                        if col_score > waterfall_score:
+                            waterfall_score = col_score
+                            waterfall_col = col
+            except:
+                pass
     
-    if waterfall_col and len(charts) < max_charts:
+    if is_chart_allowed("waterfall") and waterfall_col and len(charts) < max_charts:
         try:
             # Create waterfall from top values
             cat_col = best_cat if best_cat else (categorical_cols[0] if categorical_cols else None)
@@ -1594,7 +2161,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                     chart_type="waterfall",
                     title=f"Waterfall Chart",
                     description=f"Cumulative {waterfall_col} changes by {cat_col}",
-                    plotly_json=fig.to_dict(),
+                    plotly_json=json.loads(fig.to_json()),
                     columns_used=[waterfall_col, cat_col],
                     priority_score=waterfall_score,
                     insight_reason="Clear positive/negative value pattern detected",
@@ -1604,7 +2171,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
             pass
     
     # 3.5 CORRELATION HEATMAP (enhanced with priority)
-    if len(numeric_cols) >= 3 and len(charts) < max_charts:
+    if is_chart_allowed("heatmap") and len(numeric_cols) >= 3 and len(charts) < max_charts:
         try:
             corr_matrix = pdf[numeric_cols].corr()
             fig = go.Figure(data=go.Heatmap(
@@ -1629,7 +2196,7 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
                 chart_type="heatmap",
                 title="Correlation Matrix",
                 description="Pairwise correlations between numeric columns",
-                plotly_json=fig.to_dict(),
+                plotly_json=json.loads(fig.to_json()),
                 columns_used=numeric_cols,
                 priority_score=score,
                 insight_reason=f"{int(strong_corr_count)} strong correlations found" if strong_corr_count > 0 else "Overview of variable relationships",
@@ -1638,9 +2205,14 @@ def generate_visualizations(session_id: str, max_charts: int = 10):
         except:
             pass
     
-    # Sort charts by priority score (most interesting first)
     charts.sort(key=lambda c: c.priority_score, reverse=True)
     
+    # Apply focus filter
+    if focus == "high_insight":
+        charts = [c for c in charts if c.priority_score >= 70]
+    elif focus == "smart_pick":
+         charts = [c for c in charts if c.interest_level in ["high", "recommended"]]
+
     return VizResponse(
         session_id=session_id,
         charts=charts[:max_charts],
@@ -1676,108 +2248,81 @@ def chat_with_data(session_id: str, request: ChatRequest):
     
     question = request.question.lower()
     
-    # Simple NL parsing (in production, use LLM)
-    numeric_cols = [col for col in df.columns if df[col].dtype in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]]
-    categorical_cols = [col for col in df.columns if df[col].dtype == pl.Utf8]
-    
-    answer = ""
-    chart_type = None
-    chart_data = None
-    sql_equivalent = None
-    
-    # Pattern: "total/sum of X"
-    if any(word in question for word in ["total", "sum", "overall"]):
-        for col in numeric_cols:
-            if col.lower() in question:
-                total = df[col].sum()
-                answer = f"The total {col} is {total:,.2f}."
-                sql_equivalent = f"SELECT SUM({col}) FROM dataset"
-                break
-        if not answer:
-            answer = f"I found these numeric columns you can sum: {', '.join(numeric_cols)}. Try asking about a specific one."
-    
-    # Pattern: "average/mean of X"
-    elif any(word in question for word in ["average", "mean", "avg"]):
-        for col in numeric_cols:
-            if col.lower() in question:
-                avg = df[col].mean()
-                answer = f"The average {col} is {avg:,.2f}."
-                sql_equivalent = f"SELECT AVG({col}) FROM dataset"
-                break
-        if not answer:
-            answer = f"I can calculate averages for: {', '.join(numeric_cols)}."
-    
-    # Pattern: "top/highest/best X"
-    elif any(word in question for word in ["top", "highest", "best", "most"]):
-        for cat_col in categorical_cols:
-            if cat_col.lower() in question:
-                for num_col in numeric_cols:
-                    top = df.group_by(cat_col).agg(pl.sum(num_col).alias("total")).sort("total", descending=True).head(5)
-                    labels = [str(x) for x in top[cat_col].to_list()]
-                    values = [float(x) for x in top["total"].to_list()]
-                    answer = f"Top 5 {cat_col} by {num_col}:\n" + "\n".join([f"  {i+1}. {labels[i]}: {values[i]:,.2f}" for i in range(len(labels))])
-                    chart_type = "bar"
-                    chart_data = {"labels": labels, "values": values}
-                    sql_equivalent = f"SELECT {cat_col}, SUM({num_col}) FROM dataset GROUP BY {cat_col} ORDER BY SUM({num_col}) DESC LIMIT 5"
-                    break
-            if answer:
-                break
-        if not answer:
-            answer = f"I can find top values by grouping these categories: {', '.join(categorical_cols)}."
-    
-    # Pattern: "how many/count"
-    elif any(word in question for word in ["how many", "count", "number of"]):
-        for col in categorical_cols:
-            if col.lower() in question:
-                counts = df[col].value_counts().head(10)
-                labels = [str(x) for x in counts[col].to_list()]
-                values = [int(x) for x in counts["count"].to_list()]
-                answer = f"Counts by {col}:\n" + "\n".join([f"  {labels[i]}: {values[i]}" for i in range(len(labels))])
-                chart_type = "pie"
-                chart_data = {"labels": labels, "values": values}
-                sql_equivalent = f"SELECT {col}, COUNT(*) FROM dataset GROUP BY {col}"
-                break
-        if not answer:
-            answer = f"Total number of records: {len(df):,}. Ask about specific categories: {', '.join(categorical_cols)}."
-    
-    # Pattern: "why" questions (correlation analysis)
-    elif "why" in question:
-        if len(numeric_cols) >= 2:
-            # Find strongest correlation
-            best_corr = 0
-            best_pair = None
-            for i, col1 in enumerate(numeric_cols[:5]):
-                for col2 in numeric_cols[i+1:6]:
-                    try:
-                        corr = df.select(pl.corr(col1, col2)).item()
-                        if corr and abs(corr) > abs(best_corr):
-                            best_corr = corr
-                            best_pair = (col1, col2)
-                    except:
-                        pass
-            if best_pair:
-                direction = "positively" if best_corr > 0 else "negatively"
-                answer = f"I found that {best_pair[0]} and {best_pair[1]} are {direction} correlated ({best_corr:.2f}). When {best_pair[0]} increases, {best_pair[1]} tends to {'increase' if best_corr > 0 else 'decrease'}. This might help explain patterns in your data."
+    # Use Gemini for intent detection
+    if GENAI_API_KEY:
+        try:
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            
+            prompt = f"""
+            You are a helpful chart refinement assistant. The user is asking to change how visualizations are displayed.
+
+            Current columns: {', '.join(numeric_cols)} (numeric), {', '.join(categorical_cols)} (categorical)
+            
+            User said: "{question}"
+
+            Parse the request and return ONLY valid JSON with these keys:
+            {{
+                "intent": "chart_refinement" | "none" | "other",
+                "params": {{
+                    "groupby": "ColumnName" | null,
+                    "chart_types": ["bar", "pie", ...] | null,
+                    "focus": "high_insight" | "smart_pick" | "all" | null,
+                    "exclude_types": ["pie", ...] | null,
+                    "specific_request": "description if unclear"
+                }},
+                "reply": "short friendly confirmation message to show user"
+            }}
+
+            If no chart-related request, return intent: "none" and reply with normal chat answer to the question based on data if possible (though you don't have row data here, just schema). If it's a general data question, just answer generally or ask them to be specific.
+            """
+            
+            response = model.generate_content(prompt)
+            result = json.loads(response.text.strip().replace('```json', '').replace('```', ''))
+            
+            intent = result.get("intent")
+            params = result.get("params", {})
+            reply = result.get("reply", "Done.")
+            
+            chart_response_data = None
+            
+            if intent == "chart_refinement":
+                # Call generate_visualizations with params
+                # Note: We need to adapt params to match function signature
+                viz_response = generate_visualizations(
+                    session_id=session_id,
+                    max_charts=10,
+                    groupby=params.get("groupby"),
+                    chart_types=params.get("chart_types"),
+                    focus=params.get("focus"),
+                    exclude_types=params.get("exclude_types")
+                )
+                chart_response_data = viz_response.dict()
+                answer = reply
+                # Track refinement history
+                try:
+                    db.add_history(session_id, "refine", params, f"Chat refinement: {question[:80]}")
+                except Exception:
+                    pass
             else:
-                answer = "I couldn't find strong correlations to explain patterns. Try asking about specific metrics."
-        else:
-            answer = "I need at least 2 numeric columns to find correlations and explain 'why' patterns occur."
-    
-    # Pattern: "predict/forecast"
-    elif any(word in question for word in ["predict", "forecast", "estimate", "next"]):
-        answer = "For predictions, go to the Smart Modeling screen (Screen 7) where you can build and train ML models. I can help you understand historical patterns here."
+                answer = reply
+
+            return ChatResponse(
+                session_id=session_id,
+                answer=answer,
+                chart_data=chart_response_data
+            )
+
+        except Exception as e:
+            print(f"Gemini Error: {e}")
+            # Fallback to simple logic or error message
+            pass
+
+    # Fallback legacy logic if Gemini fails or no key
+    answer = "I'm listening, but my AI brain (Gemini) isn't connected or had an error. I can't refine charts yet."
+    return ChatResponse(session_id=session_id, answer=answer)
     
     # Default: describe the dataset
-    else:
-        answer = f"Your dataset has {len(df):,} rows and {len(df.columns)} columns.\n\nNumeric columns: {', '.join(numeric_cols[:5])}\nCategorical columns: {', '.join(categorical_cols[:5])}\n\nTry asking:\n• 'What is the total [column]?'\n• 'Show me top 5 [category]'\n• 'Why did [metric] change?'"
-    
-    return ChatResponse(
-        session_id=session_id,
-        answer=answer,
-        chart_type=chart_type,
-        chart_data=chart_data,
-        sql_equivalent=sql_equivalent
-    )
+
 
 # ============== PHASE 5: MODELING & REPORTING ==============
 # NOTE: sklearn imports are deferred to function level to avoid slow startup
@@ -2076,6 +2621,140 @@ def generate_report(session_id: str):
         generated_at=datetime.now().isoformat(),
         sections=sections
     )
+
+@app.get("/export-excel/{session_id}")
+def export_excel_report(session_id: str):
+    """
+    Generate a comprehensive multi-sheet Excel report.
+    Sheet 1: Cleaned Data
+    Sheet 2: Executive Summary & Insights
+    Sheet 3: Visualizations (as images)
+    """
+    try:
+        # 1. Get Data
+        filename, df = load_session(session_id)
+        
+        # 2. Get Insights
+        insights_data = get_insights(session_id)
+        
+        # 3. Get Charts (limit to top 5 for performance)
+        viz_data = generate_visualizations(session_id, max_charts=5)
+        
+        # 4. Create Workbook
+        wb = Workbook()
+        
+        # Sheet 1: Cleaned Data
+        ws_data = wb.active
+        ws_data.title = "Cleaned Data"
+        
+        # Write header with style
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+        
+        # Write dataframe
+        pdf = df.to_pandas()
+        for r_idx, row in enumerate(dataframe_to_rows(pdf, index=False, header=True), 1):
+            for c_idx, value in enumerate(row, 1):
+                cell = ws_data.cell(row=r_idx, column=c_idx, value=value)
+                if r_idx == 1:
+                    cell.font = header_font
+                    cell.fill = header_fill
+        
+        # Auto-adjust column widths (simple estimation)
+        for col in ws_data.columns:
+            max_length = 0
+            column = col[0].column_letter # Get the column name
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = (max_length + 2)
+            ws_data.column_dimensions[column].width = min(adjusted_width, 50) # Cap width
+
+        # Sheet 2: Insights
+        ws_insights = wb.create_sheet("Insights")
+        ws_insights.column_dimensions['A'].width = 100
+        
+        ws_insights['A1'] = "Executive Summary"
+        ws_insights['A1'].font = Font(size=14, bold=True, color="4F46E5")
+        
+        ws_insights['A2'] = insights_data.executive_summary
+        ws_insights['A2'].alignment = Alignment(wrap_text=True)
+        
+        ws_insights['A4'] = "Key Findings"
+        ws_insights['A4'].font = Font(size=12, bold=True)
+        
+        row = 5
+        for insight in insights_data.insights:
+            ws_insights[f'A{row}'] = f"• {insight.title}: {insight.description}"
+            ws_insights[f'A{row}'].alignment = Alignment(wrap_text=True)
+            row += 1
+            
+        row += 1
+        ws_insights[f'A{row}'] = "Recommendations"
+        ws_insights[f'A{row}'].font = Font(size=12, bold=True)
+        row += 1
+        
+        for rec in insights_data.recommendations:
+            ws_insights[f'A{row}'] = f"• {rec}"
+            row += 1
+
+        # Sheet 3: Visualizations
+        ws_viz = wb.create_sheet("Visualizations")
+        ws_viz.column_dimensions['A'].width = 100
+        
+        current_row = 1
+        for chart in viz_data.charts:
+            # Title
+            ws_viz[f'A{current_row}'] = chart.title
+            ws_viz[f'A{current_row}'].font = Font(size=14, bold=True)
+            current_row += 1
+            
+            try:
+                # Generate static image
+                # chart.plotly_json is a dict, modify layout for static export
+                fig = go.Figure(chart.plotly_json)
+                fig.update_layout(template="plotly_white") # Better for printing/Excel
+                
+                # Kaleido static image generation
+                img_bytes = fig.to_image(format="png", width=800, height=500, scale=2)
+                
+                img = Image(io.BytesIO(img_bytes))
+                ws_viz.add_image(img, f'A{current_row}')
+                current_row += 26  # Space for image (approx 500px height + margin)
+                
+                # Insight reason
+                ws_viz[f'A{current_row}'] = f"Insight: {chart.insight_reason}"
+                ws_viz[f'A{current_row}'].font = Font(italic=True, color="555555")
+                current_row += 3
+                
+                # Separator
+                ws_viz[f'A{current_row}'] = "" 
+                current_row += 1
+                
+            except Exception as e:
+                # Fallback if image generation fails
+                ws_viz[f'A{current_row}'] = f"[Image could not be generated: {str(e)}]"
+                current_row += 2
+
+        # Save to buffer
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        export_filename = f"InsightStream_Report_{session_id[:8]}.xlsx"
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={export_filename}"}
+        )
+
+    except Exception as e:
+         print(f"Export Error: {e}")
+         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 if __name__ == '__main__':
     import uvicorn

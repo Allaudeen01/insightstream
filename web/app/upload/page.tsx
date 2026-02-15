@@ -32,6 +32,9 @@ export default function UploadPage() {
     const [error, setError] = useState<string | null>(null);
     const [errorDetail, setErrorDetail] = useState<string | null>(null);
     const [apiStatus, setApiStatus] = useState<"checking" | "online" | "offline">("checking");
+    const [showSheetModal, setShowSheetModal] = useState(false);
+    const [availableSheets, setAvailableSheets] = useState<string[]>([]);
+    const [pendingFile, setPendingFile] = useState<File | null>(null);
 
     // Check API health on mount
     useEffect(() => {
@@ -76,10 +79,16 @@ export default function UploadPage() {
         }
     };
 
-    const handleFileUpload = async (file: File) => {
+    const handleFileUpload = async (file: File, sheetName?: string) => {
         setIsUploading(true);
         setError(null);
         setErrorDetail(null);
+
+        // If this is a fresh upload, clear pending state
+        if (!sheetName) {
+            setPendingFile(null);
+            setShowSheetModal(false);
+        }
 
         // Client-side configuration check
         if (
@@ -95,6 +104,9 @@ export default function UploadPage() {
 
         const formData = new FormData();
         formData.append("file", file);
+        if (sheetName) {
+            formData.append("sheet_name", sheetName);
+        }
 
         try {
             const response = await fetch(`${API_BASE}/upload`, {
@@ -107,9 +119,18 @@ export default function UploadPage() {
                 throw new Error(errData.detail || "Upload failed");
             }
 
-            const data: DatasetSchema = await response.json();
+            const data = await response.json();
 
-            // Store session in localStorage for now
+            // Handle multi-sheet detection
+            if (data.requires_selection && data.sheets) {
+                setPendingFile(file);
+                setAvailableSheets(data.sheets);
+                setShowSheetModal(true);
+                setIsUploading(false);
+                return;
+            }
+
+            // Store session in localStorage
             localStorage.setItem("analysis_session", JSON.stringify(data));
 
             // Navigate to Health Check (Screen 3)
@@ -124,6 +145,12 @@ export default function UploadPage() {
                 setErrorDetail(null);
             }
             setIsUploading(false);
+        }
+    };
+
+    const handleSheetSelect = (sheetName: string) => {
+        if (pendingFile) {
+            handleFileUpload(pendingFile, sheetName);
         }
     };
 
@@ -147,7 +174,7 @@ export default function UploadPage() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 text-white selection:bg-indigo-500/30">
+        <div className="min-h-screen bg-slate-950 text-white selection:bg-indigo-500/30 relative">
             {/* Navbar */}
             <header className="border-b border-white/10 bg-slate-950/50 backdrop-blur-xl">
                 <div className="container mx-auto px-4 h-16 flex items-center justify-between">
@@ -161,6 +188,9 @@ export default function UploadPage() {
                         </div>
                         <span className="font-bold text-lg tracking-tight">VirtualScientist</span>
                     </div>
+                    <Link href="/projects" className="text-sm font-medium text-slate-400 hover:text-white transition-colors">
+                        My Projects
+                    </Link>
                 </div>
             </header>
 
@@ -258,6 +288,41 @@ export default function UploadPage() {
                     </button>
                 </div>
             </main>
+
+            {/* Sheet Selection Modal */}
+            {showSheetModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+                        <h2 className="text-xl font-bold mb-2">Select a Sheet</h2>
+                        <p className="text-slate-400 mb-6 text-sm">
+                            This Excel file contains multiple sheets. Please choose which one you would like to analyze.
+                        </p>
+
+                        <div className="space-y-2 max-h-60 overflow-y-auto mb-6 pr-2">
+                            {availableSheets.map((sheet) => (
+                                <button
+                                    key={sheet}
+                                    onClick={() => handleSheetSelect(sheet)}
+                                    className="w-full text-left px-4 py-3 rounded-xl bg-slate-800 hover:bg-indigo-600/20 hover:text-indigo-400 hover:border-indigo-500/50 border border-transparent transition-all"
+                                >
+                                    {sheet}
+                                </button>
+                            ))}
+                        </div>
+
+                        <button
+                            onClick={() => {
+                                setShowSheetModal(false);
+                                setPendingFile(null);
+                                setIsUploading(false);
+                            }}
+                            className="w-full py-2.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                        >
+                            Cancel Upload
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

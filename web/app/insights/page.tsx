@@ -13,7 +13,17 @@ import {
     BarChart3,
     MessageSquare,
     CheckCircle,
-    TrendingUp
+    TrendingUp,
+    TrendingDown,
+    Minus,
+    Download,
+    X,
+    Send,
+    RefreshCw,
+    Pin,
+    LayoutDashboard,
+    Sparkles,
+    FileText
 } from "lucide-react";
 
 // Dynamic import for Plotly (no SSR)
@@ -57,6 +67,26 @@ interface VizResponse {
     total_generated: number;
 }
 
+interface ChatMsg {
+    role: "user" | "assistant";
+    content: string;
+}
+
+interface KPIItem {
+    label: string;
+    column: string;
+    value: number;
+    formatted: string;
+    avg: number;
+    min: number;
+    max: number;
+    count: number;
+    change_pct?: number;
+    trend?: "up" | "down" | "flat";
+    best_category?: { name: string; value: number };
+    worst_category?: { name: string; value: number };
+}
+
 export default function InsightsPage() {
     const router = useRouter();
     const [loading, setLoading] = useState(true);
@@ -65,6 +95,28 @@ export default function InsightsPage() {
     const [loadingViz, setLoadingViz] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<"insights" | "charts">("charts");
+    const [isExporting, setIsExporting] = useState(false);
+
+    // Chat State
+    const [chatOpen, setChatOpen] = useState(false);
+    const [messages, setMessages] = useState<ChatMsg[]>([
+        { role: "assistant", content: "Hi! I can help you refine these charts. Try saying 'Show only bar charts' or 'Group by Region'." }
+    ]);
+    const [input, setInput] = useState("");
+    const [chatLoading, setChatLoading] = useState(false);
+
+    // Dashboard pinning
+    const [pinnedCharts, setPinnedCharts] = useState<Set<string>>(new Set());
+
+    // KPI state
+    const [kpis, setKpis] = useState<KPIItem[]>([]);
+
+    // Chart explanation state
+    const [explaining, setExplaining] = useState<string | null>(null);
+    const [explanation, setExplanation] = useState<{
+        pattern: string; importance: string; business_reason: string; risk_or_opportunity: string;
+    } | null>(null);
+    const [explainOpen, setExplainOpen] = useState(false);
 
     useEffect(() => {
         const stored = localStorage.getItem("analysis_session");
@@ -76,7 +128,26 @@ export default function InsightsPage() {
         const session = JSON.parse(stored);
         fetchInsights(session.session_id);
         fetchVisualizations(session.session_id);
+        fetchKpis(session.session_id);
+
+        // Load pinned charts from localStorage
+        const pinned = localStorage.getItem(`pinned_${session.session_id}`);
+        if (pinned) setPinnedCharts(new Set(JSON.parse(pinned)));
     }, [router]);
+
+    const togglePin = (chartId: string) => {
+        setPinnedCharts(prev => {
+            const next = new Set(prev);
+            if (next.has(chartId)) next.delete(chartId);
+            else next.add(chartId);
+            const stored = localStorage.getItem("analysis_session");
+            if (stored) {
+                const session = JSON.parse(stored);
+                localStorage.setItem(`pinned_${session.session_id}`, JSON.stringify([...next]));
+            }
+            return next;
+        });
+    };
 
     const fetchInsights = async (sessionId: string) => {
         try {
@@ -101,6 +172,120 @@ export default function InsightsPage() {
             console.error("Viz error:", err);
         } finally {
             setLoadingViz(false);
+        }
+    };
+
+    const fetchKpis = async (sessionId: string) => {
+        try {
+            const response = await fetch(`${API_BASE}/kpis/${sessionId}`);
+            if (response.ok) {
+                const result = await response.json();
+                setKpis(result.kpis || []);
+            }
+        } catch (err) {
+            console.error("KPI fetch error:", err);
+        }
+    };
+
+    const explainChart = async (chart: any) => {
+        setExplaining(chart.chart_id);
+        setExplanation(null);
+        setExplainOpen(true);
+        try {
+            const stored = localStorage.getItem("analysis_session");
+            if (!stored) return;
+            const session = JSON.parse(stored);
+            const response = await fetch(`${API_BASE}/explain-chart/${session.session_id}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    chart_id: chart.chart_id,
+                    chart_type: chart.chart_type,
+                    chart_title: chart.title,
+                    columns_used: chart.columns_used,
+                    data_summary: chart.insight_reason || chart.description,
+                }),
+            });
+            if (response.ok) {
+                const result = await response.json();
+                setExplanation(result);
+            }
+        } catch (err) {
+            console.error("Explain error:", err);
+        } finally {
+            setExplaining(null);
+        }
+    };
+
+    const handleExport = async () => {
+        setIsExporting(true);
+        try {
+            const stored = localStorage.getItem("analysis_session");
+            if (!stored) return;
+            const session = JSON.parse(stored);
+
+            const response = await fetch(`${API_BASE}/export-excel/${session.session_id}`);
+            if (!response.ok) throw new Error("Export failed");
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `InsightStream_Report_${session.session_id.slice(0, 8)}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        } catch (err) {
+            setError("Failed to export Excel report");
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
+    const handleChatSubmit = async (e?: React.FormEvent) => {
+        if (e) e.preventDefault();
+        if (!input.trim() || chatLoading) return;
+
+        const userMsg = input.trim();
+        setInput("");
+        setMessages(prev => [...prev, { role: "user", content: userMsg }]);
+        setChatLoading(true);
+
+        try {
+            const stored = localStorage.getItem("analysis_session");
+            if (!stored) return;
+            const session = JSON.parse(stored);
+
+            const response = await fetch(`${API_BASE}/chat/${session.session_id}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ question: userMsg })
+            });
+
+            if (!response.ok) throw new Error("Chat failed");
+            const data = await response.json();
+
+            setMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+
+            // Update charts if refinements were made
+            if (data.chart_data && data.chart_data.charts) {
+                setVizData(data.chart_data);
+                setActiveTab("charts"); // Switch to charts tab to show changes
+            }
+        } catch (err) {
+            setMessages(prev => [...prev, { role: "assistant", content: "Sorry, I encountered an error processing your request." }]);
+        } finally {
+            setChatLoading(false);
+        }
+    };
+
+    const resetView = () => {
+        const stored = localStorage.getItem("analysis_session");
+        if (stored) {
+            const session = JSON.parse(stored);
+            fetchVisualizations(session.session_id);
+            setMessages(prev => [...prev, { role: "assistant", content: "I've reset the view to the default analysis." }]);
         }
     };
 
@@ -163,7 +348,39 @@ export default function InsightsPage() {
                         </div>
                         <span className="font-bold text-lg tracking-tight">Insights Engine</span>
                     </div>
-                    <div className="w-20" />
+                    <div className="flex items-center gap-2">
+                        <Link
+                            href="/dashboard"
+                            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm font-medium transition-colors"
+                        >
+                            <LayoutDashboard className="w-4 h-4" />
+                            Dashboard
+                            {pinnedCharts.size > 0 && (
+                                <span className="ml-1 px-1.5 py-0.5 text-xs bg-indigo-500 rounded-full">{pinnedCharts.size}</span>
+                            )}
+                        </Link>
+                        <button
+                            onClick={() => {
+                                const stored = localStorage.getItem("analysis_session");
+                                if (stored) {
+                                    const session = JSON.parse(stored);
+                                    window.open(`${API_BASE}/export-report/${session.session_id}`, '_blank');
+                                }
+                            }}
+                            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm font-medium transition-colors"
+                        >
+                            <FileText className="w-4 h-4" />
+                            Export Report
+                        </button>
+                        <button
+                            onClick={handleExport}
+                            disabled={isExporting}
+                            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                            Export Excel
+                        </button>
+                    </div>
                 </div>
             </header>
 
@@ -181,6 +398,36 @@ export default function InsightsPage() {
                             <h2 className="text-sm font-medium text-indigo-400 uppercase tracking-wider mb-2">Executive Summary</h2>
                             <p className="text-lg text-white leading-relaxed">{data.executive_summary}</p>
                         </div>
+
+                        {/* KPI Cards */}
+                        {kpis.length > 0 && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-8">
+                                {kpis.map((kpi) => (
+                                    <div
+                                        key={kpi.column}
+                                        className="p-4 rounded-2xl bg-slate-900 border border-white/10 hover:border-indigo-500/20 transition-all duration-200 hover:shadow-lg hover:shadow-indigo-500/5"
+                                    >
+                                        <div className="flex items-center justify-between mb-1">
+                                            <span className="text-xs text-slate-500 font-medium uppercase tracking-wider truncate">{kpi.label}</span>
+                                            {kpi.trend === "up" && <TrendingUp className="w-4 h-4 text-emerald-400" />}
+                                            {kpi.trend === "down" && <TrendingDown className="w-4 h-4 text-red-400" />}
+                                            {kpi.trend === "flat" && <Minus className="w-4 h-4 text-slate-500" />}
+                                        </div>
+                                        <div className="text-2xl font-bold text-white mb-1">{kpi.formatted}</div>
+                                        {kpi.change_pct !== undefined && kpi.change_pct !== 0 && (
+                                            <div className={`text-xs font-medium ${kpi.change_pct > 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                                {kpi.change_pct > 0 ? "↑" : "↓"} {Math.abs(kpi.change_pct)}%
+                                            </div>
+                                        )}
+                                        {kpi.best_category && (
+                                            <div className="mt-2 text-xs text-slate-500">
+                                                Best: <span className="text-slate-300">{kpi.best_category.name}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
 
                         {/* Tab Selector */}
                         <div className="flex gap-2 mb-6">
@@ -274,12 +521,34 @@ export default function InsightsPage() {
                                                         style={{ width: '100%' }}
                                                     />
                                                 </div>
-                                                <div className="mt-2 flex flex-wrap gap-1">
-                                                    {chart.columns_used.map((col) => (
-                                                        <span key={col} className="text-xs px-2 py-0.5 bg-slate-700 rounded text-slate-300">
-                                                            {col}
-                                                        </span>
-                                                    ))}
+                                                <div className="mt-2 flex items-center justify-between">
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {chart.columns_used.map((col, idx) => (
+                                                            <span key={`${col}-${idx}`} className="text-xs px-2 py-0.5 bg-slate-700 rounded text-slate-300">
+                                                                {col}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <button
+                                                            onClick={() => explainChart(chart)}
+                                                            disabled={explaining === chart.chart_id}
+                                                            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition-all bg-slate-800 text-slate-500 hover:text-amber-400 border border-transparent hover:border-amber-500/20 disabled:opacity-50"
+                                                        >
+                                                            {explaining === chart.chart_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                                                            Explain
+                                                        </button>
+                                                        <button
+                                                            onClick={() => togglePin(chart.chart_id)}
+                                                            className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition-all ${pinnedCharts.has(chart.chart_id)
+                                                                ? "bg-indigo-500/20 text-indigo-400 border border-indigo-500/30"
+                                                                : "bg-slate-800 text-slate-500 hover:text-indigo-400 border border-transparent hover:border-indigo-500/20"
+                                                                }`}
+                                                        >
+                                                            <Pin className="w-3 h-3" />
+                                                            {pinnedCharts.has(chart.chart_id) ? "Pinned" : "Pin"}
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             </div>
                                         ))}
@@ -369,6 +638,122 @@ export default function InsightsPage() {
                     </>
                 )}
             </main>
+            {/* Chat Floating Action Button */}
+            <button
+                onClick={() => setChatOpen(!chatOpen)}
+                className={`fixed bottom-6 right-6 p-4 rounded-full shadow-2xl transition-all duration-300 z-50 ${chatOpen ? "bg-red-500 rotate-90" : "bg-indigo-600 hover:bg-indigo-500"
+                    }`}
+            >
+                {chatOpen ? <X className="w-6 h-6" /> : <MessageSquare className="w-6 h-6" />}
+            </button>
+
+            {/* Chat Window */}
+            <div className={`fixed bottom-24 right-6 w-96 max-h-[600px] bg-slate-900 border border-white/10 rounded-2xl shadow-2xl z-40 flex flex-col transition-all duration-300 transform origin-bottom-right ${chatOpen ? "scale-100 opacity-100" : "scale-90 opacity-0 pointer-events-none"
+                }`} style={{ height: 'calc(100vh - 150px)' }}>
+                {/* Chat Header */}
+                <div className="p-4 border-b border-white/10 flex items-center justify-between bg-slate-950/50 rounded-t-2xl">
+                    <div className="flex items-center gap-2">
+                        <MessageSquare className="w-5 h-5 text-indigo-400" />
+                        <span className="font-semibold">Chart Assistant</span>
+                    </div>
+                    <button onClick={resetView} className="p-1.5 hover:bg-white/10 rounded-lg text-xs flex items-center gap-1 text-slate-400 hover:text-white transition-colors">
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Reset
+                    </button>
+                </div>
+
+                {/* Messages */}
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {messages.map((msg, i) => (
+                        <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                            <div className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed ${msg.role === "user"
+                                ? "bg-indigo-600 text-white rounded-br-none"
+                                : "bg-slate-800 text-slate-200 rounded-bl-none border border-white/5"
+                                }`}>
+                                {msg.content}
+                            </div>
+                        </div>
+                    ))}
+                    {chatLoading && (
+                        <div className="flex justify-start">
+                            <div className="bg-slate-800 p-3 rounded-2xl rounded-bl-none border border-white/5">
+                                <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Input Area */}
+                <form onSubmit={handleChatSubmit} className="p-4 border-t border-white/10 bg-slate-950/50 rounded-b-2xl">
+                    <div className="relative">
+                        <input
+                            type="text"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            placeholder="Type a request (e.g., 'Group by Region')..."
+                            className="w-full bg-slate-800 border border-white/10 rounded-xl pl-4 pr-12 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder-slate-500"
+                        />
+                        <button
+                            type="submit"
+                            disabled={!input.trim() || chatLoading}
+                            className="absolute right-2 top-2 p-1.5 bg-indigo-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-indigo-500 transition-colors"
+                        >
+                            <Send className="w-4 h-4" />
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            {/* AI Explanation Panel */}
+            {explainOpen && (
+                <div className="fixed inset-0 z-50 flex items-end justify-center">
+                    <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setExplainOpen(false)} />
+                    <div className="relative w-full max-w-2xl bg-slate-900 border border-white/10 rounded-t-2xl p-6 animate-slide-up">
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-2">
+                                <Sparkles className="w-5 h-5 text-amber-400" />
+                                <h3 className="font-semibold text-white">AI Chart Explanation</h3>
+                            </div>
+                            <button onClick={() => setExplainOpen(false)} className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+                        {!explanation ? (
+                            <div className="flex items-center justify-center py-12">
+                                <Loader2 className="w-6 h-6 animate-spin text-indigo-500 mr-3" />
+                                <span className="text-slate-400">Analyzing chart with AI...</span>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                {explanation.pattern && (
+                                    <div className="p-3 rounded-xl bg-slate-800/50 border border-white/5">
+                                        <div className="text-xs text-indigo-400 font-medium mb-1">📊 Pattern</div>
+                                        <p className="text-sm text-slate-300">{explanation.pattern}</p>
+                                    </div>
+                                )}
+                                {explanation.importance && (
+                                    <div className="p-3 rounded-xl bg-slate-800/50 border border-white/5">
+                                        <div className="text-xs text-emerald-400 font-medium mb-1">⭐ Importance</div>
+                                        <p className="text-sm text-slate-300">{explanation.importance}</p>
+                                    </div>
+                                )}
+                                {explanation.business_reason && (
+                                    <div className="p-3 rounded-xl bg-slate-800/50 border border-white/5">
+                                        <div className="text-xs text-amber-400 font-medium mb-1">💡 Business Reason</div>
+                                        <p className="text-sm text-slate-300">{explanation.business_reason}</p>
+                                    </div>
+                                )}
+                                {explanation.risk_or_opportunity && (
+                                    <div className="p-3 rounded-xl bg-slate-800/50 border border-white/5">
+                                        <div className="text-xs text-rose-400 font-medium mb-1">🎯 Risk / Opportunity</div>
+                                        <p className="text-sm text-slate-300">{explanation.risk_or_opportunity}</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

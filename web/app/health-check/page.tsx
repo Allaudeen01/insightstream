@@ -544,8 +544,8 @@ export default function HealthCheckPage() {
                       <div
                         key={i}
                         className={`p-4 rounded-xl border transition-colors cursor-pointer ${action.enabled
-                            ? 'bg-indigo-500/10 border-indigo-500/30'
-                            : 'bg-slate-800 border-white/10 hover:border-white/20'
+                          ? 'bg-indigo-500/10 border-indigo-500/30'
+                          : 'bg-slate-800 border-white/10 hover:border-white/20'
                           }`}
                         onClick={() => toggleAction(i)}
                       >
