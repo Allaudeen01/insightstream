@@ -37,6 +37,9 @@ interface InsightCard {
     chart_type: string;
     chart_data?: { labels: string[]; values: number[] };
     importance: string;
+    // New smart engine fields
+    impact?: string;           // "high" | "medium" | "low"
+    recommendation?: string;   // Actionable next step
 }
 
 interface InsightsData {
@@ -44,6 +47,14 @@ interface InsightsData {
     executive_summary: string;
     insights: InsightCard[];
     recommendations: string[];
+    // New smart engine fields
+    warnings?: string[];
+    computed_metrics?: Record<string, {
+        name: string;
+        value: number;
+        formatted: string;
+        description: string;
+    }>;
 }
 
 interface ChartData {
@@ -118,6 +129,13 @@ export default function InsightsPage() {
     } | null>(null);
     const [explainOpen, setExplainOpen] = useState(false);
 
+    // ═══════════ PERFORMANCE: Background analysis + progress ═══════════
+    const [analysisProgress, setAnalysisProgress] = useState(0);
+    const [analysisStage, setAnalysisStage] = useState<string>("");
+
+    // sessionStorage cache key helper
+    const cacheKey = (sessionId: string, kind: string) => `is_cache_${sessionId}_${kind}`;
+
     useEffect(() => {
         const stored = localStorage.getItem("analysis_session");
         if (!stored) {
@@ -126,14 +144,125 @@ export default function InsightsPage() {
         }
 
         const session = JSON.parse(stored);
-        fetchInsights(session.session_id);
-        fetchVisualizations(session.session_id);
-        fetchKpis(session.session_id);
+        const sid = session.session_id;
+
+        // ── Instant render from sessionStorage if available ──────
+        const cachedInsights = sessionStorage.getItem(cacheKey(sid, "insights"));
+        const cachedKpis     = sessionStorage.getItem(cacheKey(sid, "kpis"));
+        const cachedViz      = sessionStorage.getItem(cacheKey(sid, "viz"));
+
+        if (cachedInsights) {
+            try { setData(JSON.parse(cachedInsights)); setLoading(false); } catch { /* ignore */ }
+        }
+        if (cachedKpis) {
+            try { setKpis(JSON.parse(cachedKpis)); } catch { /* ignore */ }
+        }
+        if (cachedViz) {
+            try { setVizData(JSON.parse(cachedViz)); setLoadingViz(false); } catch { /* ignore */ }
+        }
+
+        // ── Fire background analysis + parallel fetches ─────────
+        startBackgroundAnalysis(sid);
 
         // Load pinned charts from localStorage
-        const pinned = localStorage.getItem(`pinned_${session.session_id}`);
+        const pinned = localStorage.getItem(`pinned_${sid}`);
         if (pinned) setPinnedCharts(new Set(JSON.parse(pinned)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [router]);
+
+    // ── Background analysis: POST /analyze then poll /analyze-status ──
+    const startBackgroundAnalysis = async (sessionId: string) => {
+        try {
+            // 1. Kick off background analysis
+            setAnalysisStage("Starting analysis...");
+            const analyzeRes = await fetch(`${API_BASE}/analyze/${sessionId}`, { method: "POST" });
+            const analyzeData = await analyzeRes.json();
+
+            if (analyzeData.status === "done") {
+                // Already cached on server — just fetch results in parallel
+                setAnalysisProgress(100);
+                setAnalysisStage("");
+                fetchAllParallel(sessionId);
+                return;
+            }
+
+            // 2. Poll for progress
+            setAnalysisStage("Classifying columns...");
+            const pollInterval = setInterval(async () => {
+                try {
+                    const statusRes = await fetch(`${API_BASE}/analyze-status/${sessionId}`);
+                    const status = await statusRes.json();
+
+                    setAnalysisProgress(status.progress || 0);
+
+                    // Map progress to stage labels
+                    if (status.progress < 15) setAnalysisStage("Reading dataset...");
+                    else if (status.progress < 30) setAnalysisStage("Classifying columns...");
+                    else if (status.progress < 50) setAnalysisStage("Computing business metrics...");
+                    else if (status.progress < 65) setAnalysisStage("Evaluating business rules...");
+                    else if (status.progress < 80) setAnalysisStage("Generating narratives...");
+                    else if (status.progress < 95) setAnalysisStage("Building visualizations...");
+                    else setAnalysisStage("Finalizing...");
+
+                    if (status.status === "done") {
+                        clearInterval(pollInterval);
+                        setAnalysisStage("");
+                        fetchAllParallel(sessionId);
+                    } else if (status.status === "error") {
+                        clearInterval(pollInterval);
+                        setAnalysisStage("");
+                        setError(status.error || "Analysis failed");
+                        setLoading(false);
+                        setLoadingViz(false);
+                    }
+                } catch {
+                    clearInterval(pollInterval);
+                }
+            }, 750);
+
+            // Safety: clear after 60s max
+            setTimeout(() => clearInterval(pollInterval), 60_000);
+
+        } catch {
+            // Fallback: if /analyze fails, fetch synchronously
+            fetchAllParallel(sessionId);
+        }
+    };
+
+    // ── Parallel fetch: all 3 endpoints at once via Promise.allSettled ──
+    const fetchAllParallel = async (sessionId: string) => {
+        const [insightsRes, kpisRes, vizRes] = await Promise.allSettled([
+            fetch(`${API_BASE}/insights/${sessionId}`),
+            fetch(`${API_BASE}/kpis/${sessionId}`),
+            fetch(`${API_BASE}/generate-viz/${sessionId}?max_charts=8`),
+        ]);
+
+        // Insights
+        if (insightsRes.status === "fulfilled" && insightsRes.value.ok) {
+            const result = await insightsRes.value.json();
+            setData(result);
+            sessionStorage.setItem(cacheKey(sessionId, "insights"), JSON.stringify(result));
+        } else {
+            setError("Failed to fetch insights");
+        }
+        setLoading(false);
+
+        // KPIs
+        if (kpisRes.status === "fulfilled" && kpisRes.value.ok) {
+            const result = await kpisRes.value.json();
+            setKpis(result.kpis || []);
+            sessionStorage.setItem(cacheKey(sessionId, "kpis"), JSON.stringify(result.kpis || []));
+        }
+
+        // Visualizations
+        if (vizRes.status === "fulfilled" && vizRes.value.ok) {
+            const result = await vizRes.value.json();
+            setVizData(result);
+            sessionStorage.setItem(cacheKey(sessionId, "viz"), JSON.stringify(result));
+        }
+        setLoadingViz(false);
+    };
+
 
     const togglePin = (chartId: string) => {
         setPinnedCharts(prev => {
@@ -147,44 +276,6 @@ export default function InsightsPage() {
             }
             return next;
         });
-    };
-
-    const fetchInsights = async (sessionId: string) => {
-        try {
-            const response = await fetch(`${API_BASE}/insights/${sessionId}`);
-            if (!response.ok) throw new Error("Failed to fetch insights");
-            const result = await response.json();
-            setData(result);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "An error occurred");
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const fetchVisualizations = async (sessionId: string) => {
-        try {
-            const response = await fetch(`${API_BASE}/generate-viz/${sessionId}?max_charts=8`);
-            if (!response.ok) throw new Error("Failed to fetch visualizations");
-            const result = await response.json();
-            setVizData(result);
-        } catch (err) {
-            console.error("Viz error:", err);
-        } finally {
-            setLoadingViz(false);
-        }
-    };
-
-    const fetchKpis = async (sessionId: string) => {
-        try {
-            const response = await fetch(`${API_BASE}/kpis/${sessionId}`);
-            if (response.ok) {
-                const result = await response.json();
-                setKpis(result.kpis || []);
-            }
-        } catch (err) {
-            console.error("KPI fetch error:", err);
-        }
     };
 
     const explainChart = async (chart: any) => {
@@ -290,10 +381,20 @@ export default function InsightsPage() {
     };
 
     const getImportanceColor = (importance: string) => {
-        switch (importance) {
+        const level = importance === "high" || importance === "medium" || importance === "low"
+            ? importance : "medium";
+        switch (level) {
             case "high": return "border-red-500/30 bg-red-500/5";
             case "medium": return "border-yellow-500/30 bg-yellow-500/5";
             default: return "border-blue-500/30 bg-blue-500/5";
+        }
+    };
+
+    const getImpactBadge = (impact: string) => {
+        switch (impact) {
+            case "high":   return { label: "High Impact",   cls: "bg-red-500/20 text-red-400 border border-red-500/30" };
+            case "medium": return { label: "Medium Impact", cls: "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30" };
+            default:       return { label: "Low Impact",    cls: "bg-blue-500/20 text-blue-400 border border-blue-500/30" };
         }
     };
 
@@ -312,7 +413,7 @@ export default function InsightsPage() {
                                 className="w-full bg-indigo-500 rounded-t"
                                 style={{ height: `${(val / maxVal) * 100}%`, minHeight: '4px' }}
                             />
-                            <span className="text-xs text-slate-500 truncate w-full text-center">{labels[i]?.slice(0, 8)}</span>
+                            <span className="text-xs text-slate-500 overflow-visible text-center" style={{ textOverflow: 'unset' }}>{labels[i]}</span>
                         </div>
                     ))}
                 </div>
@@ -325,9 +426,65 @@ export default function InsightsPage() {
     if (loading) {
         return (
             <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
-                <div className="text-center">
-                    <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mx-auto mb-4" />
-                    <p className="text-slate-400">Generating insights...</p>
+                <div className="w-full max-w-md px-6">
+                    {/* Animated brain icon */}
+                    <div className="flex justify-center mb-6">
+                        <div className="relative">
+                            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 animate-pulse">
+                                <Sparkles className="w-8 h-8 text-white" />
+                            </div>
+                            <div className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full animate-ping" />
+                        </div>
+                    </div>
+
+                    {/* Stage label */}
+                    <p className="text-center text-slate-300 font-medium mb-4">
+                        {analysisStage || "Preparing analysis..."}
+                    </p>
+
+                    {/* Progress bar */}
+                    <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden mb-2">
+                        <div
+                            className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 rounded-full transition-all duration-500 ease-out"
+                            style={{ width: `${Math.max(analysisProgress, 5)}%` }}
+                        />
+                    </div>
+
+                    {/* Progress percentage */}
+                    <p className="text-center text-xs text-slate-500">
+                        {analysisProgress}% complete
+                    </p>
+
+                    {/* Pipeline steps */}
+                    <div className="mt-6 space-y-2">
+                        {[
+                            { label: "Reading dataset", threshold: 10 },
+                            { label: "Classifying columns", threshold: 25 },
+                            { label: "Computing metrics", threshold: 45 },
+                            { label: "Evaluating business rules", threshold: 60 },
+                            { label: "Generating narratives", threshold: 75 },
+                            { label: "Building charts", threshold: 85 },
+                        ].map((step) => (
+                            <div key={step.label} className="flex items-center gap-3">
+                                {analysisProgress >= step.threshold ? (
+                                    <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                                ) : analysisProgress >= step.threshold - 15 ? (
+                                    <Loader2 className="w-4 h-4 text-indigo-400 animate-spin flex-shrink-0" />
+                                ) : (
+                                    <div className="w-4 h-4 rounded-full border border-slate-700 flex-shrink-0" />
+                                )}
+                                <span className={`text-sm ${
+                                    analysisProgress >= step.threshold
+                                        ? "text-slate-300"
+                                        : analysisProgress >= step.threshold - 15
+                                            ? "text-indigo-300"
+                                            : "text-slate-600"
+                                }`}>
+                                    {step.label}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
                 </div>
             </div>
         );
@@ -393,11 +550,33 @@ export default function InsightsPage() {
 
                 {data && (
                     <>
+                        {/* Warnings Banner */}
+                        {data.warnings && data.warnings.length > 0 && (
+                            <div className="mb-6 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-1">
+                                {data.warnings.map((w, i) => (
+                                    <p key={i} className="text-sm text-amber-300">{w}</p>
+                                ))}
+                            </div>
+                        )}
+
                         {/* Executive Summary */}
                         <div className="mb-8 p-6 rounded-2xl bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20">
                             <h2 className="text-sm font-medium text-indigo-400 uppercase tracking-wider mb-2">Executive Summary</h2>
                             <p className="text-lg text-white leading-relaxed">{data.executive_summary}</p>
                         </div>
+
+                        {/* Computed Business Metrics */}
+                        {data.computed_metrics && Object.keys(data.computed_metrics).length > 0 && (
+                            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
+                                {Object.entries(data.computed_metrics).map(([key, metric]) => (
+                                    <div key={key} className="p-4 rounded-2xl bg-gradient-to-br from-indigo-900/40 to-purple-900/20 border border-indigo-500/20 hover:border-indigo-400/40 transition-all">
+                                        <p className="text-xs text-indigo-300 font-medium uppercase tracking-wider mb-1 truncate">{metric.name}</p>
+                                        <p className="text-2xl font-bold text-white">{metric.formatted}</p>
+                                        <p className="text-xs text-slate-500 mt-1 leading-snug">{metric.description}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
 
                         {/* KPI Cards */}
                         {kpis.length > 0 && (
@@ -572,26 +751,38 @@ export default function InsightsPage() {
                                     </div>
                                 ) : (
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {data.insights.map((insight, i) => (
-                                            <div
-                                                key={i}
-                                                className={`p-5 rounded-xl border ${getImportanceColor(insight.importance)}`}
-                                            >
-                                                <div className="flex items-start justify-between mb-2">
-                                                    <h3 className="font-semibold text-white">{insight.title}</h3>
-                                                    <span className={`text-xs px-2 py-0.5 rounded-full ${insight.importance === "high"
-                                                        ? "bg-red-500/20 text-red-400"
-                                                        : insight.importance === "medium"
-                                                            ? "bg-yellow-500/20 text-yellow-400"
-                                                            : "bg-blue-500/20 text-blue-400"
-                                                        }`}>
-                                                        {insight.importance}
-                                                    </span>
+                                        {data.insights.map((insight, i) => {
+                                            const level = insight.impact || insight.importance || "medium";
+                                            const badge = getImpactBadge(level);
+                                            return (
+                                                <div
+                                                    key={i}
+                                                    className={`p-5 rounded-xl border ${getImportanceColor(level)} flex flex-col gap-3`}
+                                                >
+                                                    {/* Header */}
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <h3 className="font-semibold text-white leading-snug">{insight.title}</h3>
+                                                        <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0 ${badge.cls}`}>
+                                                            {badge.label}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Description */}
+                                                    <p className="text-slate-300 text-sm leading-relaxed">{insight.description}</p>
+
+                                                    {/* Mini chart */}
+                                                    {renderMiniChart(insight)}
+
+                                                    {/* Recommendation */}
+                                                    {insight.recommendation && (
+                                                        <div className="pt-3 border-t border-white/10">
+                                                            <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-1">→ Action</p>
+                                                            <p className="text-sm text-slate-300 leading-relaxed">{insight.recommendation}</p>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                <p className="text-slate-300 text-sm leading-relaxed">{insight.description}</p>
-                                                {renderMiniChart(insight)}
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 )}
                             </div>

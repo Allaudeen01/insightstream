@@ -138,7 +138,7 @@ export default function ChatPage() {
                                     className="w-full bg-gradient-to-t from-indigo-600 to-indigo-400 rounded-t"
                                     style={{ height: `${(val / maxVal) * 100}%`, minHeight: '8px' }}
                                 />
-                                <span className="text-xs text-slate-500 truncate w-full text-center">{labels[i]?.slice(0, 10)}</span>
+                                <span className="text-xs text-slate-500 overflow-visible text-center" style={{ textOverflow: 'unset' }}>{labels[i]}</span>
                             </div>
                         ))}
                     </div>
@@ -155,7 +155,7 @@ export default function ChatPage() {
                             const pct = Math.round((values[i] / total) * 100);
                             return (
                                 <div key={i} className="flex items-center gap-2">
-                                    <div className="w-24 truncate text-xs text-slate-400">{label}</div>
+                                    <div className="w-24 overflow-visible text-xs text-slate-400" style={{ textOverflow: 'unset' }}>{label}</div>
                                     <div className="flex-1 h-4 bg-slate-700 rounded-full overflow-hidden">
                                         <div
                                             className="h-full bg-gradient-to-r from-indigo-600 to-purple-500"

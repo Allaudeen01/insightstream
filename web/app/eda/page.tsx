@@ -19,6 +19,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 interface ColumnStats {
     column: string;
     dtype: string;
+    role?: string;  // "identifier" | "numerical" | "categorical" | "temporal" | "binary" | "text"
     mean?: number;
     median?: number;
     std?: number;
@@ -33,9 +34,12 @@ interface EDAData {
     numeric_columns: string[];
     categorical_columns: string[];
     date_columns: string[];
+    identifier_columns: string[];  // NEW
+    binary_columns: string[];       // NEW
     column_stats: ColumnStats[];
     correlation_matrix: Record<string, Record<string, number>>;
     insights: string[];
+    warnings: string[];             // NEW
 }
 
 export default function EDAPage() {
@@ -114,13 +118,13 @@ export default function EDAPage() {
                 {edaData && (
                     <>
                         {/* Column Type Summary */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
                             <div className="p-6 rounded-2xl bg-slate-900 border border-white/10 flex items-center gap-4">
                                 <div className="p-3 rounded-xl bg-blue-500/20">
                                     <BarChart3 className="w-6 h-6 text-blue-400" />
                                 </div>
                                 <div>
-                                    <p className="text-slate-400 text-sm">Numeric Columns</p>
+                                    <p className="text-slate-400 text-sm">Numeric</p>
                                     <p className="text-2xl font-bold">{edaData.numeric_columns.length}</p>
                                 </div>
                             </div>
@@ -129,7 +133,7 @@ export default function EDAPage() {
                                     <PieChart className="w-6 h-6 text-purple-400" />
                                 </div>
                                 <div>
-                                    <p className="text-slate-400 text-sm">Categorical Columns</p>
+                                    <p className="text-slate-400 text-sm">Categorical</p>
                                     <p className="text-2xl font-bold">{edaData.categorical_columns.length}</p>
                                 </div>
                             </div>
@@ -138,8 +142,18 @@ export default function EDAPage() {
                                     <TrendingUp className="w-6 h-6 text-green-400" />
                                 </div>
                                 <div>
-                                    <p className="text-slate-400 text-sm">Date Columns</p>
+                                    <p className="text-slate-400 text-sm">Date / Time</p>
                                     <p className="text-2xl font-bold">{edaData.date_columns.length}</p>
+                                </div>
+                            </div>
+                            <div className="p-6 rounded-2xl bg-slate-900 border border-red-500/10 flex items-center gap-4">
+                                <div className="p-3 rounded-xl bg-red-500/20">
+                                    <span className="text-red-400 font-bold text-sm">ID</span>
+                                </div>
+                                <div>
+                                    <p className="text-slate-500 text-sm">Identifiers</p>
+                                    <p className="text-2xl font-bold text-slate-400">{(edaData.identifier_columns || []).length}</p>
+                                    <p className="text-xs text-red-400/70">excluded</p>
                                 </div>
                             </div>
                         </div>
@@ -169,6 +183,7 @@ export default function EDAPage() {
                                         <thead>
                                             <tr className="border-b border-white/10">
                                                 <th className="py-3 px-4 text-slate-400 font-medium">Column</th>
+                                                <th className="py-3 px-4 text-slate-400 font-medium">Role</th>
                                                 <th className="py-3 px-4 text-slate-400 font-medium">Type</th>
                                                 <th className="py-3 px-4 text-slate-400 font-medium">Mean</th>
                                                 <th className="py-3 px-4 text-slate-400 font-medium">Median</th>
@@ -178,10 +193,25 @@ export default function EDAPage() {
                                         </thead>
                                         <tbody>
                                             {edaData.column_stats.map((stat, i) => (
-                                                <tr key={i} className="border-b border-white/5 hover:bg-white/5">
-                                                    <td className="py-3 px-4 font-medium">{stat.column}</td>
+                                                <tr key={i} className={`border-b border-white/5 hover:bg-white/5 ${stat.role === "identifier" ? "opacity-50" : ""}`}>
+                                                    <td className="py-3 px-4 font-medium">
+                                                        {stat.column}
+                                                        {stat.role === "identifier" && (
+                                                            <span className="ml-2 text-xs text-red-400/70 font-normal">(ID)</span>
+                                                        )}
+                                                    </td>
                                                     <td className="py-3 px-4">
-                                                        <span className="text-xs px-2 py-1 rounded bg-white/10">{stat.dtype}</span>
+                                                        <span className={`text-xs px-2 py-1 rounded font-medium ${
+                                                            stat.role === "identifier" ? "bg-red-500/20 text-red-400" :
+                                                            stat.role === "numerical" ? "bg-blue-500/20 text-blue-400" :
+                                                            stat.role === "categorical" ? "bg-purple-500/20 text-purple-400" :
+                                                            stat.role === "temporal" ? "bg-green-500/20 text-green-400" :
+                                                            stat.role === "binary" ? "bg-amber-500/20 text-amber-400" :
+                                                            "bg-white/10 text-slate-400"
+                                                        }`}>{stat.role || "unknown"}</span>
+                                                    </td>
+                                                    <td className="py-3 px-4">
+                                                        <span className="text-xs px-2 py-1 rounded bg-white/10 text-slate-400">{stat.dtype}</span>
                                                     </td>
                                                     <td className="py-3 px-4 text-slate-300">{stat.mean ?? "-"}</td>
                                                     <td className="py-3 px-4 text-slate-300">{stat.median ?? "-"}</td>
@@ -241,6 +271,13 @@ export default function EDAPage() {
                         {activeTab === "insights" && (
                             <div>
                                 <h2 className="text-xl font-semibold mb-4">Auto-Generated Insights</h2>
+                                {edaData.warnings && edaData.warnings.length > 0 && (
+                                    <div className="mb-4 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-1">
+                                        {edaData.warnings.map((w, i) => (
+                                            <p key={i} className="text-sm text-amber-300">{w}</p>
+                                        ))}
+                                    </div>
+                                )}
                                 {edaData.insights.length === 0 ? (
                                     <div className="p-8 rounded-2xl bg-slate-900 border border-white/10 text-center">
                                         <Lightbulb className="w-12 h-12 text-slate-600 mx-auto mb-3" />

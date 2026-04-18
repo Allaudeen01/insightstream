@@ -1,6 +1,8 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+import concurrent.futures
 from pydantic import BaseModel
 import polars as pl
 import io
@@ -17,6 +19,12 @@ from openpyxl.styles import Font, PatternFill, Alignment
 import google.generativeai as genai
 import os
 import database as db
+from insight_engine import (
+    ColumnClassifier, MetricComputer, BusinessRuleEngine,
+    InsightNarrator, SmartChartRecommender, AnomalyDetector,
+    run_insight_engine,
+)
+from session_cache import SessionCache, JobTracker
 
 app = FastAPI(title="Virtual Data Scientist Engine")
 
@@ -28,6 +36,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZip compress responses > 1KB (charts payload: 500KB → 80KB)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# ============== PERFORMANCE: CACHE + BACKGROUND JOBS ==============
+_cache = SessionCache()
+_jobs  = JobTracker()
+_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 # ============== FILE-BASED SESSION STORAGE ==============
 # Sessions are stored in /tmp/sessions/ as JSON (metadata) + Parquet (dataframe)
@@ -638,6 +654,7 @@ def undo_cleaning(session_id: str):
 class EDAColumnStats(BaseModel):
     column: str
     dtype: str
+    role: str = "unknown"  # identifier | numerical | categorical | temporal | binary | text
     mean: Optional[float] = None
     median: Optional[float] = None
     std: Optional[float] = None
@@ -651,255 +668,225 @@ class EDAResponse(BaseModel):
     numeric_columns: list[str]
     categorical_columns: list[str]
     date_columns: list[str]
+    identifier_columns: list[str]  # NEW — excluded from analysis
+    binary_columns: list[str]      # NEW
     column_stats: list[EDAColumnStats]
     correlation_matrix: dict  # column -> {column: correlation}
     insights: list[str]
+    warnings: list[str]  # NEW — edge case warnings
 
 @app.get("/eda/{session_id}", response_model=EDAResponse)
 def get_eda(session_id: str):
     """
     Perform Exploratory Data Analysis.
-    This is the "Auto EDA" step - auto-generated statistics and insights.
+    Uses the smart ColumnClassifier to properly detect and exclude ID columns.
+    Results are cached — revisits are <5ms.
     """
+    # ── Cache hit? ─────────────────────────────────────────────────
+    cached = _cache.get(session_id, "eda_response")
+    if cached is not None:
+        return EDAResponse(**cached)
+
     try:
         filename, df = load_session(session_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Categorize columns
-    numeric_cols = []
-    categorical_cols = []
-    date_cols = []
-    
-    for col in df.columns:
-        dtype = df[col].dtype
-        if dtype in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]:
-            numeric_cols.append(col)
-        elif dtype in [pl.Date, pl.Datetime]:
-            date_cols.append(col)
-        else:
-            categorical_cols.append(col)
-    
+
+    # ── Reuse cached profile if available ─────────────────────────
+    profile = _cache.get(session_id, "profile")
+    if profile is None:
+        classifier = ColumnClassifier()
+        profile = classifier.classify(df)
+        _cache.put(session_id, "profile", profile)
+
+    numeric_cols     = profile.numericals
+    categorical_cols = profile.categoricals
+    date_cols        = profile.temporals
+    identifier_cols  = profile.identifiers
+    binary_cols      = profile.binaries
+
     # Compute column statistics
     column_stats = []
     for col in df.columns:
-        dtype = df[col].dtype
+        cp = profile.profiles.get(col)
+        role = cp.role if cp else "unknown"
+
         stats = EDAColumnStats(
             column=col,
-            dtype=str(dtype),
+            dtype=str(df[col].dtype),
+            role=role,
             unique_count=df[col].n_unique(),
             top_values=[]
         )
-        
+
         if col in numeric_cols:
             col_data = df[col].drop_nulls()
             if len(col_data) > 0:
-                stats.mean = round(float(col_data.mean()), 2)
-                stats.median = round(float(col_data.median()), 2)
-                stats.std = round(float(col_data.std()), 2)
+                stats.mean    = round(float(col_data.mean()), 2)
+                stats.median  = round(float(col_data.median()), 2)
+                stats.std     = round(float(col_data.std()), 2)
                 stats.min_val = float(col_data.min())
                 stats.max_val = float(col_data.max())
-        
-        if col in categorical_cols:
-            value_counts = df[col].value_counts().head(5).to_dicts()
-            stats.top_values = value_counts
-        
+
+        if col in categorical_cols or col in binary_cols:
+            stats.top_values = df[col].value_counts().head(5).to_dicts()
+
         column_stats.append(stats)
-    
-    # Compute correlation matrix for numeric columns
+
+    # Correlation matrix — only non-identifier numerics
     correlation_matrix = {}
-    if len(numeric_cols) > 1:
-        for col1 in numeric_cols:
+    analysis_numeric = [c for c in numeric_cols if c not in identifier_cols]
+    if len(analysis_numeric) > 1:
+        for col1 in analysis_numeric:
             correlation_matrix[col1] = {}
-            for col2 in numeric_cols:
+            for col2 in analysis_numeric:
                 try:
                     corr = df.select(pl.corr(col1, col2)).item()
                     correlation_matrix[col1][col2] = round(float(corr), 3) if corr is not None else 0
-                except:
+                except Exception:
                     correlation_matrix[col1][col2] = 0
-    
-    # Generate insights
+
+    # Smart insights (using the new engine's rule set)
+    detector = AnomalyDetector()
+    warnings = detector.detect(df, profile)
+
     insights = []
-    
-    # Insight 1: High correlation pairs
+    if identifier_cols:
+        insights.append(
+            f"ID columns detected and excluded from analysis: {', '.join(identifier_cols)}."
+        )
+
     for col1 in correlation_matrix:
         for col2, corr in correlation_matrix[col1].items():
             if col1 != col2 and abs(corr) > 0.7:
-                insights.append(f"Strong correlation ({corr}) between '{col1}' and '{col2}'")
-    
-    # Insight 2: Skewed distributions
-    for stats in column_stats:
-        if stats.mean and stats.median:
-            skew_ratio = abs(stats.mean - stats.median) / max(stats.std, 0.01) if stats.std else 0
-            if skew_ratio > 0.5:
-                direction = "right-skewed" if stats.mean > stats.median else "left-skewed"
-                insights.append(f"'{stats.column}' is {direction} (mean: {stats.mean}, median: {stats.median})")
-    
-    # Insight 3: Dominant categories
-    for stats in column_stats:
-        if stats.top_values and len(stats.top_values) > 0:
-            top = stats.top_values[0]
-            if "count" in top:
-                pct = round(top["count"] / len(df) * 100, 1)
-                if pct > 50:
-                    insights.append(f"'{stats.column}': '{top.get(stats.column, 'N/A')}' dominates with {pct}% of values")
-    
-    return EDAResponse(
-        session_id=session_id,
-        numeric_columns=numeric_cols,
-        categorical_columns=categorical_cols,
-        date_columns=date_cols,
-        column_stats=column_stats,
-        correlation_matrix=correlation_matrix,
-        insights=insights[:10]  # Limit to top 10 insights
-    )
+                insights.append(
+                    f"Strong {'positive' if corr > 0 else 'negative'} correlation "
+                    f"({corr:.2f}) between '{col1}' and '{col2}'."
+                )
+
+    for col in analysis_numeric[:3]:
+        col_data = df[col].drop_nulls()
+        if len(col_data) > 20:
+            mean   = float(col_data.mean())
+            median = float(col_data.median())
+            std    = float(col_data.std()) or 1.0
+            if abs(mean - median) / std > 0.5:
+                direction = "right-skewed" if mean > median else "left-skewed"
+                insights.append(
+                    f"'{col}' is {direction} (mean: {mean:.2f}, median: {median:.2f})."
+                )
+
+    resp_data = {
+        "session_id": session_id,
+        "numeric_columns": numeric_cols,
+        "categorical_columns": categorical_cols,
+        "date_columns": date_cols,
+        "identifier_columns": identifier_cols,
+        "binary_columns": binary_cols,
+        "column_stats": [s.model_dump() for s in column_stats],
+        "correlation_matrix": correlation_matrix,
+        "insights": insights[:10],
+        "warnings": warnings[:5]
+    }
+    _cache.put(session_id, "eda_response", resp_data)
+
+    return EDAResponse(**resp_data)
 
 # ============== PHASE 4: INTELLIGENCE LAYER ==============
 
 class InsightCard(BaseModel):
     title: str
     description: str
-    chart_type: str  # "bar" | "pie" | "line" | "none"
+    impact: str = "medium"   # "high" | "medium" | "low"
+    recommendation: str = ""  # Actionable next step
+    confidence: str = "medium" # "high" | "medium" | "low"
+    chart_type: str = "none"  # "bar" | "pie" | "line" | "scatter" | "none"
     chart_data: Optional[dict] = None
-    importance: str  # "high" | "medium" | "low"
+    # Keep legacy field for backward compat
+    importance: str = "medium"
 
 class InsightsResponse(BaseModel):
     session_id: str
     executive_summary: str
     insights: list[InsightCard]
     recommendations: list[str]
+    warnings: list[str] = []       # NEW — edge case / data quality alerts
+    computed_metrics: Optional[dict] = None  # NEW — Revenue, Return Rate, AOV
 
 @app.get("/insights/{session_id}", response_model=InsightsResponse)
 def get_insights(session_id: str):
     """
-    Generate business insights in plain English.
-    This is the 'What is happening?' answer - real Data Scientist work.
+    Generate smart business insights using the new insight engine.
+    Results are cached — subsequent calls are <5ms.
+    Falls back to background-job result if /analyze was used.
     """
-    try:
-        filename, df = load_session(session_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    insights = []
-    recommendations = []
-    
-    # Categorize columns
-    numeric_cols = [col for col in df.columns if df[col].dtype in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]]
-    categorical_cols = [col for col in df.columns if df[col].dtype == pl.Utf8]
-    
-    # INSIGHT 1: Top contributors (for numeric columns)
-    for num_col in numeric_cols[:2]:  # Limit to first 2 numeric columns
-        for cat_col in categorical_cols[:1]:  # Pair with first categorical
-            try:
-                top_groups = df.group_by(cat_col).agg(pl.sum(num_col).alias("total")).sort("total", descending=True).head(3)
-                if len(top_groups) >= 3:
-                    total_sum = df[num_col].sum()
-                    top_3_sum = top_groups["total"].sum()
-                    pct = round(top_3_sum / total_sum * 100, 1) if total_sum > 0 else 0
-                    
-                    top_names = top_groups[cat_col].to_list()
-                    insights.append(InsightCard(
-                        title=f"Top 3 {cat_col} by {num_col}",
-                        description=f"The top 3 {cat_col} values ({', '.join(str(n) for n in top_names[:3])}) account for {pct}% of total {num_col}.",
-                        chart_type="bar",
-                        chart_data={
-                            "labels": [str(x) for x in top_groups[cat_col].to_list()],
-                            "values": [float(x) for x in top_groups["total"].to_list()]
-                        },
-                        importance="high"
-                    ))
-                    recommendations.append(f"Focus resources on top-performing {cat_col} categories to maximize {num_col}.")
-            except:
-                pass
-    
-    # INSIGHT 2: Distribution analysis
-    for col in numeric_cols[:3]:
-        try:
-            col_data = df[col].drop_nulls()
-            if len(col_data) > 10:
-                mean = col_data.mean()
-                median = col_data.median()
-                std = col_data.std()
-                
-                if abs(mean - median) / max(std, 0.01) > 0.3:
-                    skew = "right-skewed (long tail of high values)" if mean > median else "left-skewed (long tail of low values)"
-                    insights.append(InsightCard(
-                        title=f"{col} Distribution Pattern",
-                        description=f"The {col} data is {skew}. Mean: {round(mean, 2)}, Median: {round(median, 2)}. Most values cluster below the average.",
-                        chart_type="none",
-                        importance="medium"
-                    ))
-        except:
-            pass
-    
-    # INSIGHT 3: Category dominance
-    for col in categorical_cols[:2]:
-        try:
-            value_counts = df[col].value_counts()
-            if len(value_counts) > 1:
-                top_val = value_counts.head(1)
-                top_name = top_val[col].item()
-                top_count = top_val["count"].item()
-                pct = round(top_count / len(df) * 100, 1)
-                
-                if pct > 40:
-                    insights.append(InsightCard(
-                        title=f"{col} Concentration",
-                        description=f"'{top_name}' dominates the {col} category with {pct}% of all records. Consider if this concentration is desired.",
-                        chart_type="pie",
-                        chart_data={
-                            "labels": [str(x) for x in value_counts[col].head(5).to_list()],
-                            "values": [int(x) for x in value_counts["count"].head(5).to_list()]
-                        },
-                        importance="medium"
-                    ))
-        except:
-            pass
-    
-    # INSIGHT 4: Correlation insights
-    if len(numeric_cols) >= 2:
-        for i, col1 in enumerate(numeric_cols[:3]):
-            for col2 in numeric_cols[i+1:4]:
-                try:
-                    corr = df.select(pl.corr(col1, col2)).item()
-                    if corr and abs(corr) > 0.6:
-                        direction = "increases" if corr > 0 else "decreases"
-                        insights.append(InsightCard(
-                            title=f"{col1} & {col2} Relationship",
-                            description=f"When {col1} goes up, {col2} tends to {direction} (correlation: {round(corr, 2)}). This could indicate a causal relationship worth investigating.",
-                            chart_type="none",
-                            importance="high" if abs(corr) > 0.8 else "medium"
-                        ))
-                        recommendations.append(f"Investigate why {col1} and {col2} are {'positively' if corr > 0 else 'negatively'} correlated.")
-                except:
-                    pass
-    
-    # Generate executive summary
-    high_insights = [i for i in insights if i.importance == "high"]
-    if high_insights:
-        exec_summary = f"Analysis of {len(df)} records across {len(df.columns)} columns reveals {len(high_insights)} critical findings. " + high_insights[0].description
+    # ── Check background job result first ─────────────────────────
+    job = _jobs.get(session_id)
+    if job and job.status == "done" and job.result:
+        result = job.result
     else:
-        exec_summary = f"Dataset contains {len(df)} records with {len(numeric_cols)} numeric and {len(categorical_cols)} categorical columns. No critical anomalies detected."
-    
-    # Cache insights in project
+        # ── Check full result cache ──────────────────────────────
+        cached_resp = _cache.get(session_id, "insight_response")
+        if cached_resp is not None:
+            return cached_resp
+
+        result = _cache.get(session_id, "insight_result")
+
+    if result is None:
+        # ── Cold path: run synchronously ─────────────────────────
+        try:
+            filename, df = load_session(session_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        result = run_insight_engine(df, max_insights=10, max_charts=0)
+        _cache.put(session_id, "insight_result", result)
+
+    # Convert flat dicts → InsightCard objects
+    insight_cards = []
+    for ins in result["insights"]:
+        card = InsightCard(
+            title=ins.get("title", ""),
+            description=ins.get("description", ""),
+            impact=ins.get("impact", "medium"),
+            importance=ins.get("impact", "medium"),
+            recommendation=ins.get("recommendation", ""),
+            confidence=ins.get("confidence", "medium"),
+            chart_type=ins.get("chart_type", "none"),
+            chart_data=ins.get("chart_data"),
+        )
+        insight_cards.append(card)
+
+    exec_summary = result["executive_summary"]
+    recommendations = result["recommendations"]
+    warnings = result["warnings"]
+    computed_metrics = result.get("computed_metrics", {})
+
+    # Persist to project DB
     try:
-        recs_text = json.dumps(recommendations[:5])
-        db.update_project(session_id, executive_summary=exec_summary, recommendations=recs_text)
-        db.add_history(session_id, "insight", None, f"Generated {len(insights)} insights")
+        db.update_project(session_id, executive_summary=exec_summary,
+                          recommendations=json.dumps(recommendations[:5]))
+        db.add_history(session_id, "insight", None,
+                       f"Generated {len(insight_cards)} smart insights")
     except Exception:
         pass
-    
-    return InsightsResponse(
+
+    resp = InsightsResponse(
         session_id=session_id,
         executive_summary=exec_summary,
-        insights=insights[:8],  # Limit to 8 insights
-        recommendations=recommendations[:5]  # Limit to 5 recommendations
+        insights=insight_cards,
+        recommendations=recommendations,
+        warnings=warnings,
+        computed_metrics=computed_metrics,
     )
+    _cache.put(session_id, "insight_response", resp)
+    return resp
 
 
 # ============== KPI ENGINE ==============
 
-KPI_KEYWORDS = ["revenue", "sales", "profit", "amount", "income", "price", "cost", "total", "quantity", "budget", "expense", "margin"]
+KPI_KEYWORDS = ["revenue", "sales", "profit", "amount", "income", "price", "cost",
+                "total", "quantity", "budget", "expense", "margin"]
 
 def _format_number(val: float) -> str:
     """Format large numbers for display."""
@@ -914,38 +901,76 @@ def _format_number(val: float) -> str:
 
 @app.get("/kpis/{session_id}")
 def get_kpis(session_id: str):
-    """Auto-detect and compute KPI metrics from the dataset."""
+    """Auto-detect and compute KPI metrics. ID columns are excluded. Cached."""
+    # ── Cache hit? ─────────────────────────────────────────────────
+    cached = _cache.get(session_id, "kpi_response")
+    if cached is not None:
+        return cached
+
     try:
         filename, df = load_session(session_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    kpis = []
-    numeric_cols = [col for col in df.columns if df[col].dtype in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]]
-    categorical_cols = [col for col in df.columns if df[col].dtype == pl.Utf8]
-    date_cols = [col for col in df.columns if df[col].dtype in [pl.Date, pl.Datetime]]
+    # Reuse cached profile
+    profile = _cache.get(session_id, "profile")
+    if profile is None:
+        classifier = ColumnClassifier()
+        profile = classifier.classify(df)
+        _cache.put(session_id, "profile", profile)
 
-    # Detect KPI columns by keyword matching
+    # Computed business metrics first (Revenue, Return Rate, AOV)
+    computer = MetricComputer()
+    computed = computer.compute(df, profile)
+
+    kpis = []
+
+    # Add computed metrics as KPI cards
+    for key, metric in computed.items():
+        kpis.append({
+            "label": metric.name,
+            "column": key,
+            "value": metric.value,
+            "formatted": metric.formatted,
+            "avg": metric.value,
+            "min": 0,
+            "max": metric.value,
+            "count": len(df),
+            "trend": "flat",
+            "change_pct": 0,
+            "description": metric.description,
+        })
+
+    # Also add raw numeric KPIs (excluding identifiers)
+    numeric_cols = [c for c in profile.numericals if c not in profile.identifiers]
+    categorical_cols = profile.categoricals
+    date_cols = profile.temporals
+
+    # Keyword-match KPI columns (excluding IDs)
     kpi_cols = []
     for col in numeric_cols:
         col_lower = col.lower()
-        for keyword in KPI_KEYWORDS:
-            if keyword in col_lower:
+        if any(kw in col_lower for kw in KPI_KEYWORDS):
+            # Skip if already covered by computed metrics
+            already_covered = (
+                col == profile.price_col or
+                col == profile.qty_col or
+                col == profile.revenue_col
+            )
+            if not already_covered:
                 kpi_cols.append(col)
-                break
-    
-    # If no keyword matches, use top numeric columns by variance
-    if not kpi_cols:
+
+    if not kpi_cols and not computed:
         kpi_cols = numeric_cols[:3]
 
-    for col in kpi_cols[:5]:  # Limit to 5 KPIs
+    for col in kpi_cols[:3]:  # Max 3 additional raw KPIs
         try:
             col_data = df[col].drop_nulls()
             if len(col_data) == 0:
                 continue
 
-            total = float(col_data.sum())
-            avg = float(col_data.mean())
+            total   = float(col_data.sum())
+            avg     = float(col_data.mean())
             min_val = float(col_data.min())
             max_val = float(col_data.max())
 
@@ -960,7 +985,7 @@ def get_kpis(session_id: str):
                 "count": len(col_data),
             }
 
-            # Growth % — if date column exists, compare last period to previous
+            # Growth trend via date column
             if date_cols:
                 try:
                     date_col = date_cols[0]
@@ -968,9 +993,9 @@ def get_kpis(session_id: str):
                     n = len(sorted_df)
                     mid = n // 2
                     if mid > 0:
-                        first_half = sorted_df[:mid][col].drop_nulls().sum()
-                        second_half = sorted_df[mid:][col].drop_nulls().sum()
-                        if first_half and first_half != 0:
+                        first_half  = float(sorted_df[:mid][col].drop_nulls().sum())
+                        second_half = float(sorted_df[mid:][col].drop_nulls().sum())
+                        if first_half != 0:
                             change_pct = round(((second_half - first_half) / abs(first_half)) * 100, 1)
                             kpi["change_pct"] = change_pct
                             kpi["trend"] = "up" if change_pct > 2 else ("down" if change_pct < -2 else "flat")
@@ -978,19 +1003,21 @@ def get_kpis(session_id: str):
                             kpi["change_pct"] = 0
                             kpi["trend"] = "flat"
                 except Exception:
-                    kpi["trend"] = "flat"
                     kpi["change_pct"] = 0
+                    kpi["trend"] = "flat"
             else:
                 kpi["trend"] = "flat"
                 kpi["change_pct"] = 0
 
-            # Best/worst category
+            # Best/worst category (using a non-ID categorical)
             if categorical_cols:
                 try:
-                    cat_col = categorical_cols[0]
-                    grouped = df.group_by(cat_col).agg(pl.sum(col).alias("total")).sort("total", descending=True)
+                    cat_col = profile.category_col or categorical_cols[0]
+                    grouped = df.group_by(cat_col).agg(
+                        pl.sum(col).alias("total")
+                    ).sort("total", descending=True)
                     if len(grouped) >= 2:
-                        best = grouped.head(1)
+                        best  = grouped.head(1)
                         worst = grouped.tail(1)
                         kpi["best_category"] = {
                             "name": str(best[cat_col].item()),
@@ -1007,8 +1034,139 @@ def get_kpis(session_id: str):
         except Exception:
             continue
 
-    return {"session_id": session_id, "kpis": kpis}
+    resp = {"session_id": session_id, "kpis": kpis[:6]}
+    _cache.put(session_id, "kpi_response", resp)
+    return resp
 
+
+# ============== BACKGROUND ANALYSIS (Layer 2) ==============
+
+def _run_background_analysis(session_id: str) -> None:
+    """Run the full insight engine in a background thread."""
+    try:
+        _jobs.update(session_id, status="running", progress=5)
+
+        filename, df = load_session(session_id)
+        _jobs.update(session_id, progress=10)
+
+        def on_progress(stage: str, pct: int) -> None:
+            _jobs.update(session_id, progress=pct)
+
+        # Run the full pipeline with progress callbacks
+        result = run_insight_engine(
+            df,
+            max_insights=10,
+            max_charts=8,
+            progress_callback=on_progress,
+        )
+
+        # Store in both the job tracker and the cache
+        _cache.put(session_id, "insight_result", result)
+        _jobs.update(session_id, status="done", progress=100, result=result)
+
+    except Exception as e:
+        _jobs.update(session_id, status="error", error=str(e))
+
+
+@app.post("/analyze/{session_id}")
+def start_analysis(session_id: str):
+    """
+    Kick off the full insight pipeline in a background thread.
+    Returns 202 immediately; frontend polls /analyze-status for progress.
+    """
+    # Don't start if already running
+    if _jobs.is_running(session_id):
+        job = _jobs.get(session_id)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "session_id": session_id,
+                "status": job.status,
+                "progress": job.progress,
+                "message": "Analysis already in progress."
+            }
+        )
+
+    # Check if result is already cached
+    cached = _cache.get(session_id, "insight_result")
+    if cached is not None:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "session_id": session_id,
+                "status": "done",
+                "progress": 100,
+                "message": "Results available (cached)."
+            }
+        )
+
+    # Verify session exists before starting
+    if not session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Create job and submit to thread pool
+    _jobs.create(session_id)
+    _thread_pool.submit(_run_background_analysis, session_id)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "session_id": session_id,
+            "status": "pending",
+            "progress": 0,
+            "message": "Analysis started. Poll /analyze-status for progress."
+        }
+    )
+
+
+@app.get("/analyze-status/{session_id}")
+def get_analysis_status(session_id: str):
+    """
+    Poll for background analysis progress.
+    Returns status, progress %, and result when done.
+    """
+    job = _jobs.get(session_id)
+
+    # If no job exists but cache has result, return done
+    if job is None:
+        cached = _cache.get(session_id, "insight_result")
+        if cached is not None:
+            return {
+                "session_id": session_id,
+                "status": "done",
+                "progress": 100,
+                "has_result": True,
+            }
+        return {
+            "session_id": session_id,
+            "status": "not_started",
+            "progress": 0,
+            "has_result": False,
+        }
+
+    response = {
+        "session_id": session_id,
+        "status": job.status,
+        "progress": job.progress,
+        "has_result": job.status == "done",
+    }
+    if job.status == "error":
+        response["error"] = job.error
+
+    return response
+
+
+@app.get("/cache-status/{session_id}")
+def get_cache_status(session_id: str):
+    """Debug endpoint: show what's cached for a session."""
+    return {
+        "session_id": session_id,
+        "has_profile": _cache.has(session_id, "profile"),
+        "has_eda": _cache.has(session_id, "eda_response"),
+        "has_insights": _cache.has(session_id, "insight_result"),
+        "has_kpis": _cache.has(session_id, "kpi_response"),
+        "cache_stats": _cache.stats(),
+    }
 
 # ============== AI CHART EXPLANATION ==============
 
@@ -1341,9 +1499,33 @@ def _internal_gen_viz(
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Backend Error: {str(e)}")
     
-    # Categorize columns
-    numeric_cols = [c for c in pdf.columns if pdf[c].dtype in ['int64', 'float64', 'int32', 'float32']]
-    categorical_cols = [c for c in pdf.columns if pdf[c].dtype == 'object' or pdf[c].nunique() < 10]
+    # ── Smart column classification — exclude identifiers from all charts ──
+    _classifier = ColumnClassifier()
+    _profile = _classifier.classify(df)
+    _id_cols = set(_profile.identifiers)
+
+    # If no custom filters requested, delegate to SmartChartRecommender
+    _use_smart = not groupby and not chart_types and not focus and not exclude_types
+    if _use_smart:
+        try:
+            rec = SmartChartRecommender()
+            smart_charts = rec.recommend(df, _profile, [], max_charts=max_charts)
+            return VizResponse(
+                session_id=session_id,
+                charts=[ChartData(**c) for c in smart_charts],
+                total_generated=len(smart_charts)
+            )
+        except Exception as _e:
+            print(f"SmartChartRecommender failed, falling back: {_e}")
+            # Fall through to legacy path
+
+    # Categorize columns — excluding identifiers
+    numeric_cols = [c for c in pdf.columns
+                    if pdf[c].dtype in ['int64', 'float64', 'int32', 'float32']
+                    and c not in _id_cols]
+    categorical_cols = [c for c in pdf.columns
+                        if (pdf[c].dtype == 'object' or pdf[c].nunique() < 10)
+                        and c not in _id_cols]
     
     # ============== SMART COLUMN SCORING ==============
     # Analyze data patterns to prioritize most interesting visualizations
