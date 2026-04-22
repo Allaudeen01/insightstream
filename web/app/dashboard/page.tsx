@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, type ComponentType, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
@@ -13,20 +13,61 @@ import {
     Type,
     Check,
     GripVertical,
-    X
+    X,
+    Share2
 } from "lucide-react";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
-// @ts-ignore
+// @ts-expect-error - CSS modules from external package have no local TS types
 import "react-grid-layout/css/styles.css";
-// @ts-ignore
+// @ts-expect-error - CSS modules from external package have no local TS types
 import "react-resizable/css/styles.css";
 
 // We import react-grid-layout client-side only
-let ResponsiveGrid: any = null;
+type ResponsiveGridProps = {
+    className?: string;
+    layouts: Record<string, LayoutItem[]>;
+    breakpoints: Record<string, number>;
+    cols: Record<string, number>;
+    rowHeight: number;
+    width: number;
+    isDraggable?: boolean;
+    isResizable?: boolean;
+    onLayoutChange?: (layout: LayoutItem[]) => void;
+    draggableHandle?: string;
+    children?: ReactNode;
+};
+
+let ResponsiveGrid: ComponentType<ResponsiveGridProps> | null = null;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+
+const TEMPLATE_KEYWORDS: Record<string, string[]> = {
+    revenue_intelligence: ["revenue", "sales", "funnel", "trend", "pipeline"],
+    marketing_performance: ["cac", "roas", "channel", "campaign", "cost", "conversion"],
+    founder_snapshot: ["runway", "burn", "revenue", "pipeline", "cash"],
+};
+
+const suggestTemplatePins = (charts: ChartData[], template?: string): string[] => {
+    if (!template || template === "none" || !TEMPLATE_KEYWORDS[template]) return [];
+    const keywords = TEMPLATE_KEYWORDS[template];
+    const selected: string[] = [];
+
+    for (const chart of charts) {
+        const haystack = `${chart.title} ${chart.description} ${chart.columns_used.join(" ")}`.toLowerCase();
+        if (keywords.some((kw) => haystack.includes(kw)) && !selected.includes(chart.chart_id)) {
+            selected.push(chart.chart_id);
+        }
+        if (selected.length >= 6) break;
+    }
+
+    if (selected.length === 0) {
+        return charts.slice(0, 4).map((c) => c.chart_id);
+    }
+    return selected;
+};
 
 interface ChartData {
     chart_id: string;
@@ -69,11 +110,12 @@ export default function DashboardPage() {
     const [gridReady, setGridReady] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const [containerWidth, setContainerWidth] = useState(1200);
+    const [shareCopied, setShareCopied] = useState(false);
 
     useEffect(() => {
         // Load react-grid-layout on client side
         import("react-grid-layout").then((mod) => {
-            ResponsiveGrid = mod.Responsive || mod.default;
+            ResponsiveGrid = (mod.Responsive || mod.default) as ComponentType<ResponsiveGridProps>;
             setGridReady(true);
         }).catch((err) => {
             console.error("Failed to load react-grid-layout:", err);
@@ -109,13 +151,23 @@ export default function DashboardPage() {
             fetch(`${API_BASE}/generate-viz/${sid}?max_charts=12`).then(r => r.json()),
             fetch(`${API_BASE}/dashboard/${sid}`).then(r => r.json()),
         ]).then(([vizRes, dashRes]) => {
-            setAllCharts(vizRes.charts || []);
+            const charts = vizRes.charts || [];
+            setAllCharts(charts);
             if (dashRes.layout && dashRes.layout.length > 0) {
                 setLayout(dashRes.layout);
                 setPinnedIds(dashRes.pinned_chart_ids || pinnedList);
                 setTextBlocks(dashRes.text_blocks || []);
             } else {
-                const defaultLayout = pinnedList.map((id, i) => ({
+                let initialPins = pinnedList;
+                if (initialPins.length === 0) {
+                    initialPins = suggestTemplatePins(charts, session.template);
+                    if (initialPins.length > 0) {
+                        localStorage.setItem(`pinned_${sid}`, JSON.stringify(initialPins));
+                        setPinnedIds(initialPins);
+                    }
+                }
+
+                const defaultLayout = initialPins.map((id, i) => ({
                     i: id,
                     x: (i % 2) * 6,
                     y: Math.floor(i / 2) * 4,
@@ -305,6 +357,23 @@ export default function DashboardPage() {
                         <button onClick={addTextBlock} className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm transition-colors">
                             <Type className="w-4 h-4" />
                             Add Text
+                        </button>
+                        <button
+                            onClick={async () => {
+                                if (!sessionId) return;
+                                const shareUrl = `${window.location.origin}/share/dashboard/${sessionId}`;
+                                try {
+                                    await navigator.clipboard.writeText(shareUrl);
+                                } catch {
+                                    window.prompt("Copy dashboard link", shareUrl);
+                                }
+                                setShareCopied(true);
+                                setTimeout(() => setShareCopied(false), 1800);
+                            }}
+                            className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm transition-colors"
+                        >
+                            <Share2 className="w-4 h-4" />
+                            {shareCopied ? "Copied" : "Share Link"}
                         </button>
                         <button
                             onClick={handleSave}

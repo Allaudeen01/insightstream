@@ -35,6 +35,7 @@ export default function UploadPage() {
     const [showSheetModal, setShowSheetModal] = useState(false);
     const [availableSheets, setAvailableSheets] = useState<string[]>([]);
     const [pendingFile, setPendingFile] = useState<File | null>(null);
+    const [selectedTemplate, setSelectedTemplate] = useState<string>("none");
 
     // Check API health on mount
     useEffect(() => {
@@ -131,7 +132,11 @@ export default function UploadPage() {
             }
 
             // Store session in localStorage
-            localStorage.setItem("analysis_session", JSON.stringify(data));
+            localStorage.setItem("analysis_session", JSON.stringify({
+                ...data,
+                template: selectedTemplate,
+                project_name: data.filename?.replace(/\.[^/.]+$/, "") || "InsightStream Project",
+            }));
 
             // Navigate to Health Check (Screen 3)
             router.push("/health-check");
@@ -277,6 +282,22 @@ export default function UploadPage() {
                         <div className="h-px bg-slate-800 w-full max-w-[100px]" />
                         <span className="text-slate-500 text-sm">OR</span>
                         <div className="h-px bg-slate-800 w-full max-w-[100px]" />
+                    </div>
+
+
+                    <div className="mt-8 text-left">
+                        <label className="block text-sm text-slate-400 mb-2">Start with template (optional)</label>
+                        <select
+                            value={selectedTemplate}
+                            onChange={(e) => setSelectedTemplate(e.target.value)}
+                            className="w-full px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-indigo-500"
+                            disabled={isUploading}
+                        >
+                            <option value="none">No template (blank setup)</option>
+                            <option value="revenue_intelligence">Revenue Intelligence</option>
+                            <option value="marketing_performance">Marketing Performance</option>
+                            <option value="founder_snapshot">Founder Snapshot</option>
+                        </select>
                     </div>
 
                     <button

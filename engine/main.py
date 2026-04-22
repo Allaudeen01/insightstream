@@ -172,6 +172,28 @@ def load_dashboard_endpoint(project_id: str):
         return {"project_id": project_id, "layout": [], "pinned_chart_ids": [], "text_blocks": []}
     return dashboard
 
+
+@app.get("/share/dashboard/{project_id}")
+def load_shared_dashboard(project_id: str):
+    """Public read-only payload for shared dashboard links."""
+    dashboard = db.load_dashboard(project_id)
+    if not dashboard:
+        return {"project_id": project_id, "layout": [], "pinned_chart_ids": [], "text_blocks": [], "charts": []}
+
+    try:
+        viz = generate_visualizations(project_id, max_charts=12)
+        charts = viz.get("charts", [])
+    except Exception:
+        charts = []
+
+    return {
+        "project_id": project_id,
+        "layout": dashboard.get("layout", []),
+        "pinned_chart_ids": dashboard.get("pinned_chart_ids", []),
+        "text_blocks": dashboard.get("text_blocks", []),
+        "charts": charts,
+    }
+
 # ─── Upload (creates project) ───────────────────────────────────
 
 @app.post("/upload", response_model=DatasetSchema)
@@ -899,7 +921,16 @@ def get_insights(session_id: str):
 
 # ============== KPI ENGINE ==============
 
-KPI_KEYWORDS = ["revenue", "sales", "profit", "amount", "income", "price", "cost", "total", "quantity", "budget", "expense", "margin"]
+KPI_KEYWORDS = [
+    "revenue", "sales", "profit", "amount", "income", "price", "cost", "total", "quantity", "budget", "expense", "margin",
+    "ltv", "lifetime", "burn", "runway"
+]
+
+
+class CustomKPIRequest(BaseModel):
+    column: str
+    aggregation: str  # sum | avg | growth
+    label: str
 
 def _format_number(val: float) -> str:
     """Format large numbers for display."""
@@ -1010,6 +1041,71 @@ def get_kpis(session_id: str):
     return {"session_id": session_id, "kpis": kpis}
 
 
+@app.post("/kpis/{session_id}/custom")
+def create_custom_kpi(session_id: str, body: CustomKPIRequest):
+    """Create a user-defined KPI from a selected numeric column and aggregation."""
+    try:
+        _, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if body.column not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Column '{body.column}' not found")
+
+    numeric_dtypes = [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]
+    if df[body.column].dtype not in numeric_dtypes:
+        raise HTTPException(status_code=400, detail="Custom KPI requires a numeric column")
+
+    aggregation = body.aggregation.lower().strip()
+    if aggregation not in {"sum", "avg", "growth"}:
+        raise HTTPException(status_code=400, detail="aggregation must be one of: sum, avg, growth")
+
+    col_data = df[body.column].drop_nulls()
+    if len(col_data) == 0:
+        raise HTTPException(status_code=400, detail="Column has no non-null values")
+
+    kpi = {
+        "label": body.label.strip() or f"Custom {body.column}",
+        "column": body.column,
+        "avg": round(float(col_data.mean()), 2),
+        "min": round(float(col_data.min()), 2),
+        "max": round(float(col_data.max()), 2),
+        "count": len(col_data),
+    }
+
+    if aggregation == "sum":
+        metric_value = float(col_data.sum())
+        kpi["value"] = metric_value
+        kpi["formatted"] = _format_number(metric_value)
+        kpi["trend"] = "flat"
+        kpi["change_pct"] = 0
+    elif aggregation == "avg":
+        metric_value = float(col_data.mean())
+        kpi["value"] = metric_value
+        kpi["formatted"] = _format_number(metric_value)
+        kpi["trend"] = "flat"
+        kpi["change_pct"] = 0
+    else:
+        date_cols = [c for c in df.columns if df[c].dtype in [pl.Date, pl.Datetime]]
+        metric_value = 0.0
+        change_pct = 0.0
+        if date_cols:
+            ordered = df.sort(date_cols[0])
+            midpoint = len(ordered) // 2
+            if midpoint > 0:
+                first_half = float(ordered[:midpoint][body.column].drop_nulls().sum())
+                second_half = float(ordered[midpoint:][body.column].drop_nulls().sum())
+                metric_value = second_half
+                if first_half != 0:
+                    change_pct = round(((second_half - first_half) / abs(first_half)) * 100, 1)
+        kpi["value"] = metric_value
+        kpi["formatted"] = f"{change_pct:+.1f}%"
+        kpi["change_pct"] = change_pct
+        kpi["trend"] = "up" if change_pct > 2 else ("down" if change_pct < -2 else "flat")
+
+    return {"session_id": session_id, "kpi": kpi}
+
+
 # ============== AI CHART EXPLANATION ==============
 
 class ExplainRequest(BaseModel):
@@ -1102,7 +1198,12 @@ from fastapi.responses import HTMLResponse
 import base64
 
 @app.get("/export-report/{session_id}")
-def export_report(session_id: str):
+def export_report(
+    session_id: str,
+    project_name: Optional[str] = Query(None),
+    report_title: str = Query("InsightStream Report"),
+    logo_data: Optional[str] = Query(None),
+):
     """Generate a styled HTML report suitable for Print-to-PDF."""
     try:
         filename, df = load_session(session_id)
@@ -1188,6 +1289,9 @@ def export_report(session_id: str):
             <img src="data:image/png;base64,{ci['b64']}" alt="{ci['title']}" />
         </div>"""
 
+    project_display_name = project_name or filename.rsplit('.', 1)[0]
+    safe_logo = logo_data if logo_data and logo_data.startswith("data:image") else None
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1202,6 +1306,11 @@ def export_report(session_id: str):
         .chart-block {{ break-inside: avoid; }}
         .insight-card {{ break-inside: avoid; }}
     }}
+    .cover {{ border: 1px solid #e2e8f0; border-radius: 16px; padding: 28px; margin-bottom: 28px; background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 100%); }}
+    .cover-logo {{ max-height: 48px; max-width: 200px; margin-bottom: 20px; object-fit: contain; }}
+    .cover-title {{ font-size: 34px; color: #312e81; margin-bottom: 8px; }}
+    .cover-project {{ font-size: 18px; color: #334155; font-weight: 600; margin-bottom: 6px; }}
+    .cover-date {{ font-size: 13px; color: #64748b; }}
     .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 2px solid #e2e8f0; }}
     .header h1 {{ font-size: 28px; color: #4f46e5; margin-bottom: 4px; }}
     .header .subtitle {{ font-size: 14px; color: #64748b; }}
@@ -1226,6 +1335,13 @@ def export_report(session_id: str):
 </style>
 </head>
 <body>
+    <div class="cover">
+        {f'<img src="{safe_logo}" class="cover-logo" alt="Logo" />' if safe_logo else ''}
+        <h1 class="cover-title">{report_title}</h1>
+        <div class="cover-project">Project: {project_display_name}</div>
+        <div class="cover-date">Generated on {pd.Timestamp.now().strftime('%Y-%m-%d')}</div>
+    </div>
+
     <div class="header">
         <h1>📊 InsightStream Report</h1>
         <div class="subtitle">{filename} · {len(df)} rows · {len(df.columns)} columns</div>
@@ -1268,6 +1384,15 @@ class VizResponse(BaseModel):
     charts: List[ChartData]
     total_generated: int
 
+def _normalize_query_list(value: Optional[List[str]]) -> Optional[List[str]]:
+    """Normalize FastAPI Query defaults when endpoint functions are called directly."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    default = getattr(value, "default", None)
+    return default if isinstance(default, list) or default is None else None
+
 @app.get("/generate-viz/{session_id}")
 def generate_visualizations(
     session_id: str, 
@@ -1288,9 +1413,9 @@ def generate_visualizations(
             session_id=session_id,
             max_charts=max_charts,
             groupby=groupby,
-            chart_types=chart_types,
+            chart_types=_normalize_query_list(chart_types),
             focus=focus,
-            exclude_types=exclude_types
+            exclude_types=_normalize_query_list(exclude_types)
         )
     except HTTPException as he:
         raise he

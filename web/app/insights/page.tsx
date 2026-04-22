@@ -23,7 +23,9 @@ import {
     Pin,
     LayoutDashboard,
     Sparkles,
-    FileText
+    FileText,
+    Plus,
+    ImageUp
 } from "lucide-react";
 
 // Dynamic import for Plotly (no SSR)
@@ -72,6 +74,11 @@ interface ChatMsg {
     content: string;
 }
 
+interface SessionColumnInfo {
+    name: string;
+    dtype: string;
+}
+
 interface KPIItem {
     label: string;
     column: string;
@@ -110,6 +117,14 @@ export default function InsightsPage() {
 
     // KPI state
     const [kpis, setKpis] = useState<KPIItem[]>([]);
+    const [customKpiOpen, setCustomKpiOpen] = useState(false);
+    const [customKpiLabel, setCustomKpiLabel] = useState("");
+    const [customKpiColumn, setCustomKpiColumn] = useState("");
+    const [customKpiAggregation, setCustomKpiAggregation] = useState<"sum" | "avg" | "growth">("sum");
+    const [numericColumns, setNumericColumns] = useState<string[]>([]);
+
+    // Report branding state
+    const [reportLogo, setReportLogo] = useState<string | null>(null);
 
     // Chart explanation state
     const [explaining, setExplaining] = useState<string | null>(null);
@@ -130,9 +145,19 @@ export default function InsightsPage() {
         fetchVisualizations(session.session_id);
         fetchKpis(session.session_id);
 
+        const numericDtypes = ["Float64", "Float32", "Int64", "Int32", "Int16", "Int8", "UInt64", "UInt32", "UInt16", "UInt8", "Decimal"];
+        const sessionCols: SessionColumnInfo[] = Array.isArray(session.columns) ? session.columns : [];
+        const detectedNumeric = sessionCols
+            .filter((col) => typeof col?.dtype === "string" && numericDtypes.some((dt) => col.dtype.includes(dt)))
+            .map((col) => col.name);
+        setNumericColumns(detectedNumeric);
+
         // Load pinned charts from localStorage
         const pinned = localStorage.getItem(`pinned_${session.session_id}`);
         if (pinned) setPinnedCharts(new Set(JSON.parse(pinned)));
+
+        const logo = localStorage.getItem(`report_logo_${session.session_id}`);
+        if (logo) setReportLogo(logo);
     }, [router]);
 
     const togglePin = (chartId: string) => {
@@ -187,7 +212,51 @@ export default function InsightsPage() {
         }
     };
 
-    const explainChart = async (chart: any) => {
+
+    const handleCreateCustomKpi = async () => {
+        const stored = localStorage.getItem("analysis_session");
+        if (!stored || !customKpiColumn || !customKpiLabel.trim()) return;
+        const session = JSON.parse(stored);
+
+        try {
+            const response = await fetch(`${API_BASE}/kpis/${session.session_id}/custom`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    column: customKpiColumn,
+                    aggregation: customKpiAggregation,
+                    label: customKpiLabel.trim(),
+                }),
+            });
+            if (!response.ok) throw new Error("Failed to create custom KPI");
+            const result = await response.json();
+            if (result.kpi) setKpis((prev) => [result.kpi, ...prev]);
+            setCustomKpiOpen(false);
+            setCustomKpiLabel("");
+            setCustomKpiColumn("");
+            setCustomKpiAggregation("sum");
+        } catch (err) {
+            setError("Could not create custom KPI");
+        }
+    };
+
+    const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            const content = String(reader.result || "");
+            setReportLogo(content);
+            const stored = localStorage.getItem("analysis_session");
+            if (stored) {
+                const session = JSON.parse(stored);
+                localStorage.setItem(`report_logo_${session.session_id}`, content);
+            }
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const explainChart = async (chart: ChartData) => {
         setExplaining(chart.chart_id);
         setExplanation(null);
         setExplainOpen(true);
@@ -364,7 +433,12 @@ export default function InsightsPage() {
                                 const stored = localStorage.getItem("analysis_session");
                                 if (stored) {
                                     const session = JSON.parse(stored);
-                                    window.open(`${API_BASE}/export-report/${session.session_id}`, '_blank');
+                                    const params = new URLSearchParams({
+                                        project_name: session.project_name || session.filename || "InsightStream Project",
+                                        report_title: "InsightStream Report",
+                                    });
+                                    if (reportLogo) params.set("logo_data", reportLogo);
+                                    window.open(`${API_BASE}/export-report/${session.session_id}?${params.toString()}`, '_blank');
                                 }
                             }}
                             className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm font-medium transition-colors"
@@ -372,6 +446,11 @@ export default function InsightsPage() {
                             <FileText className="w-4 h-4" />
                             Export Report
                         </button>
+                        <label className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm font-medium transition-colors cursor-pointer">
+                            <ImageUp className="w-4 h-4" />
+                            Logo
+                            <input type="file" accept="image/*" className="hidden" onChange={handleLogoUpload} />
+                        </label>
                         <button
                             onClick={handleExport}
                             disabled={isExporting}
@@ -400,11 +479,20 @@ export default function InsightsPage() {
                         </div>
 
                         {/* KPI Cards */}
+                        <div className="mb-4">
+                            <button
+                                onClick={() => setCustomKpiOpen(true)}
+                                className="inline-flex items-center gap-2 px-3 py-2 bg-slate-900 border border-white/10 hover:border-indigo-500/30 rounded-lg text-sm text-slate-200"
+                            >
+                                <Plus className="w-4 h-4" />
+                                Add Custom KPI
+                            </button>
+                        </div>
                         {kpis.length > 0 && (
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-8">
-                                {kpis.map((kpi) => (
+                                {kpis.map((kpi, idx) => (
                                     <div
-                                        key={kpi.column}
+                                        key={`${kpi.label}-${kpi.column}-${idx}`}
                                         className="p-4 rounded-2xl bg-slate-900 border border-white/10 hover:border-indigo-500/20 transition-all duration-200 hover:shadow-lg hover:shadow-indigo-500/5"
                                     >
                                         <div className="flex items-center justify-between mb-1">
@@ -638,6 +726,51 @@ export default function InsightsPage() {
                     </>
                 )}
             </main>
+            {customKpiOpen && (
+                <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="w-full max-w-md bg-slate-900 border border-white/10 rounded-2xl p-6">
+                        <h3 className="text-lg font-semibold mb-4">Create Custom KPI</h3>
+                        <div className="space-y-3">
+                            <input
+                                placeholder="KPI label (e.g. Gross Margin)"
+                                value={customKpiLabel}
+                                onChange={(e) => setCustomKpiLabel(e.target.value)}
+                                className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg"
+                            />
+                            <select
+                                value={customKpiColumn}
+                                onChange={(e) => setCustomKpiColumn(e.target.value)}
+                                className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg"
+                            >
+                                <option value="">Pick numeric column</option>
+                                {numericColumns.map((column) => (
+                                    <option key={column} value={column}>{column}</option>
+                                ))}
+                            </select>
+                            <select
+                                value={customKpiAggregation}
+                                onChange={(e) => setCustomKpiAggregation(e.target.value as "sum" | "avg" | "growth")}
+                                className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg"
+                            >
+                                <option value="sum">Sum</option>
+                                <option value="avg">Average</option>
+                                <option value="growth">Growth</option>
+                            </select>
+                        </div>
+                        <div className="flex justify-end gap-2 mt-5">
+                            <button onClick={() => setCustomKpiOpen(false)} className="px-4 py-2 text-slate-300">Cancel</button>
+                            <button
+                                onClick={handleCreateCustomKpi}
+                                disabled={!customKpiColumn || !customKpiLabel.trim()}
+                                className="px-4 py-2 bg-indigo-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Create
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Chat Floating Action Button */}
             <button
                 onClick={() => setChatOpen(!chatOpen)}
