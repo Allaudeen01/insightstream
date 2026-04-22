@@ -13,8 +13,13 @@ import {
     Download,
     Copy,
     Check,
-    BarChart3
+    BarChart3,
+    Sparkles,
+    Terminal,
+    ChevronRight,
+    Command
 } from "lucide-react";
+import Navbar from "@/components/Navbar";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -37,26 +42,18 @@ export default function ChatPage() {
 
     useEffect(() => {
         const stored = localStorage.getItem("analysis_session");
-        if (!stored) {
-            router.push("/upload");
-            return;
-        }
+        if (!stored) { router.push("/upload"); return; }
         const session = JSON.parse(stored);
         setSessionId(session.session_id);
 
-        // Add welcome message
         setMessages([{
             role: "assistant",
-            content: `Welcome! I'm ready to analyze your dataset "${session.filename}".\n\nTry asking:\n• "What is the total [column]?"\n• "Show me top 5 [category]"\n• "Why did [metric] change?"\n• "How many [category] are there?"`
+            content: `I've initialized the brain for "${session.filename}". I can run multi-dimensional queries, synthesize trends, or explain specific anomalies.\n\nWhat would you like to explore?`
         }]);
     }, [router]);
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    };
-
     useEffect(() => {
-        scrollToBottom();
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages]);
 
     const handleSend = async () => {
@@ -74,7 +71,7 @@ export default function ChatPage() {
                 body: JSON.stringify({ question: input })
             });
 
-            if (!response.ok) throw new Error("Chat request failed");
+            if (!response.ok) throw new Error("Terminal link severed");
 
             const data = await response.json();
             const assistantMessage: ChatMessage = {
@@ -88,7 +85,7 @@ export default function ChatPage() {
         } catch {
             setMessages(prev => [...prev, {
                 role: "assistant",
-                content: "Sorry, I encountered an error processing your question. Please try again."
+                content: "Data pipeline interrupted. Please verify backend stability."
             }]);
         } finally {
             setLoading(false);
@@ -109,16 +106,13 @@ export default function ChatPage() {
     };
 
     const exportChat = () => {
-        const content = messages
-            .map(m => `${m.role.toUpperCase()}: ${m.content}`)
-            .join("\n\n");
+        const content = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
         const blob = new Blob([content], { type: "text/plain" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = "chat-export.txt";
+        a.download = "InsightStream_Internal_Log.txt";
         a.click();
-        URL.revokeObjectURL(url);
     };
 
     const renderChart = (msg: ChatMessage) => {
@@ -127,162 +121,128 @@ export default function ChatPage() {
         const { labels, values } = msg.chart_data;
         const maxVal = Math.max(...values);
 
-        if (msg.chart_type === "bar") {
-            return (
-                <div className="mt-4 p-4 rounded-lg bg-slate-800/50">
-                    <div className="flex items-end gap-2 h-32">
-                        {values.map((val, i) => (
-                            <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                                <span className="text-xs text-slate-400">{val.toLocaleString()}</span>
-                                <div
-                                    className="w-full bg-gradient-to-t from-indigo-600 to-indigo-400 rounded-t"
-                                    style={{ height: `${(val / maxVal) * 100}%`, minHeight: '8px' }}
-                                />
-                                <span className="text-xs text-slate-500 overflow-visible text-center" style={{ textOverflow: 'unset' }}>{labels[i]}</span>
-                            </div>
-                        ))}
-                    </div>
+        return (
+            <div className="mt-4 p-5 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-sm">
+                <div className="flex items-end gap-2 h-36">
+                    {values.map((val, i) => (
+                        <div key={i} className="flex-1 flex flex-col items-center gap-2 group/bar">
+                            <div 
+                                className="w-full bg-gradient-to-t from-purple-600 to-purple-400 rounded-lg transition-all group-hover/bar:brightness-125 group-hover/bar:scale-x-110"
+                                style={{ height: `${(val / maxVal) * 100}%`, minHeight: '8px' }}
+                            />
+                            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest truncate w-full text-center">{labels[i]}</span>
+                        </div>
+                    ))}
                 </div>
-            );
-        }
-
-        if (msg.chart_type === "pie") {
-            const total = values.reduce((a, b) => a + b, 0);
-            return (
-                <div className="mt-4 p-4 rounded-lg bg-slate-800/50">
-                    <div className="space-y-2">
-                        {labels.slice(0, 5).map((label, i) => {
-                            const pct = Math.round((values[i] / total) * 100);
-                            return (
-                                <div key={i} className="flex items-center gap-2">
-                                    <div className="w-24 overflow-visible text-xs text-slate-400" style={{ textOverflow: 'unset' }}>{label}</div>
-                                    <div className="flex-1 h-4 bg-slate-700 rounded-full overflow-hidden">
-                                        <div
-                                            className="h-full bg-gradient-to-r from-indigo-600 to-purple-500"
-                                            style={{ width: `${pct}%` }}
-                                        />
-                                    </div>
-                                    <div className="w-12 text-xs text-slate-400 text-right">{pct}%</div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            );
-        }
-
-        return null;
+            </div>
+        );
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 text-white flex flex-col">
-            {/* Header */}
-            <header className="border-b border-white/10 bg-slate-950/50 backdrop-blur-xl flex-shrink-0">
-                <div className="container mx-auto px-4 h-16 flex items-center justify-between">
-                    <Link href="/insights" className="flex items-center gap-2 hover:text-indigo-400 transition-colors">
-                        <ArrowLeft className="w-5 h-5" />
-                        <span className="font-medium">Back</span>
-                    </Link>
-                    <div className="flex items-center gap-2">
-                        <div className="h-8 w-8 bg-indigo-600 rounded-lg flex items-center justify-center">
-                            <MessageSquare className="w-5 h-5" />
-                        </div>
-                        <span className="font-bold text-lg tracking-tight">Chat with Data</span>
-                    </div>
-                    <button
-                        onClick={exportChat}
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm transition-colors"
-                    >
-                        <Download className="w-4 h-4" />
-                        Export
-                    </button>
-                </div>
-            </header>
+        <div className="min-h-screen bg-background flex flex-col overflow-hidden">
+            <Navbar />
 
-            {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto p-4">
-                <div className="max-w-3xl mx-auto space-y-4">
+            {/* Chat Body */}
+            <div className="flex-1 overflow-y-auto pt-8 pb-32 px-6">
+                <div className="max-w-4xl mx-auto space-y-8">
                     {messages.map((msg, i) => (
-                        <div
-                            key={i}
-                            className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                        >
-                            {msg.role === "assistant" && (
-                                <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center flex-shrink-0">
-                                    <Bot className="w-5 h-5" />
-                                </div>
-                            )}
-                            <div
-                                className={`max-w-[80%] rounded-2xl p-4 ${msg.role === "user"
-                                    ? "bg-indigo-600 text-white"
-                                    : "bg-slate-800 text-white"
-                                    }`}
-                            >
-                                <p className="whitespace-pre-wrap">{msg.content}</p>
-                                {renderChart(msg)}
-                                {msg.sql_equivalent && (
-                                    <div className="mt-3 p-2 rounded bg-slate-900 text-xs">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <span className="text-slate-500">SQL Equivalent:</span>
-                                            <button
-                                                onClick={() => copyToClipboard(msg.sql_equivalent!, i)}
-                                                className="text-slate-400 hover:text-white"
-                                            >
-                                                {copied === i ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                                            </button>
-                                        </div>
-                                        <code className="text-indigo-400">{msg.sql_equivalent}</code>
-                                    </div>
-                                )}
+                        <div key={i} className={`flex gap-5 ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}>
+                            <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 border transition-all ${
+                                msg.role === "assistant" 
+                                    ? "bg-purple-600 border-purple-500 shadow-lg shadow-purple-500/20" 
+                                    : "bg-white/5 border-white/10"
+                            }`}>
+                                {msg.role === "assistant" ? <Sparkles className="w-5 h-5 text-white" /> : <User className="w-5 h-5 text-muted-foreground" />}
                             </div>
-                            {msg.role === "user" && (
-                                <div className="w-8 h-8 rounded-lg bg-slate-700 flex items-center justify-center flex-shrink-0">
-                                    <User className="w-5 h-5" />
+
+                            <div className={`flex flex-col gap-2 max-w-[85%] ${msg.role === "user" ? "items-end" : "items-start"}`}>
+                                <div className={`px-6 py-4 rounded-3xl text-[15px] leading-relaxed relative ${
+                                    msg.role === "user"
+                                        ? "bg-purple-600 text-white rounded-tr-none"
+                                        : "bg-white/5 border border-white/10 text-foreground rounded-tl-none backdrop-blur-sm"
+                                }`}>
+                                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                                    {renderChart(msg)}
+                                    
+                                    {msg.sql_equivalent && (
+                                        <div className="mt-4 p-4 rounded-xl bg-black/40 border border-white/5 font-mono text-xs overflow-hidden group">
+                                            <div className="flex items-center justify-between mb-2 text-muted-foreground/60">
+                                                <div className="flex items-center gap-2">
+                                                    <Terminal className="w-3 h-3" />
+                                                    <span className="uppercase tracking-widest font-bold">Relational Logic</span>
+                                                </div>
+                                                <button 
+                                                    onClick={() => copyToClipboard(msg.sql_equivalent!, i)}
+                                                    className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-purple-400"
+                                                >
+                                                    {copied === i ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                                                </button>
+                                            </div>
+                                            <code className="text-purple-300 block overflow-x-auto whitespace-pre">{msg.sql_equivalent}</code>
+                                        </div>
+                                    )}
                                 </div>
-                            )}
+                                <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest px-2">
+                                    {msg.role === "assistant" ? "Insight Engine" : "Internal Request"}
+                                </span>
+                            </div>
                         </div>
                     ))}
+                    
                     {loading && (
-                        <div className="flex gap-3">
-                            <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center flex-shrink-0">
-                                <Bot className="w-5 h-5" />
+                        <div className="flex gap-5">
+                            <div className="w-10 h-10 rounded-2xl bg-purple-600 flex items-center justify-center border border-purple-500 animate-pulse">
+                                <Sparkles className="w-5 h-5 text-white" />
                             </div>
-                            <div className="bg-slate-800 rounded-2xl p-4">
-                                <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
+                            <div className="bg-white/5 border border-white/10 rounded-3xl rounded-tl-none p-5">
+                                <div className="flex gap-2">
+                                    <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                                    <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce [animation-delay:-0.15s]" />
+                                    <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" />
+                                </div>
                             </div>
                         </div>
                     )}
-                    <div ref={messagesEndRef} />
+                    <div ref={messagesEndRef} className="h-4" />
                 </div>
             </div>
 
-            {/* Input Area */}
-            <div className="border-t border-white/10 bg-slate-900/50 p-4 flex-shrink-0">
-                <div className="max-w-3xl mx-auto">
-                    <div className="flex gap-3">
-                        <input
-                            type="text"
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onKeyPress={handleKeyPress}
-                            placeholder="Ask a question about your data..."
-                            className="flex-1 bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                            disabled={loading}
-                        />
-                        <button
-                            onClick={handleSend}
-                            disabled={loading || !input.trim()}
-                            className="px-4 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl transition-colors"
-                        >
-                            <Send className="w-5 h-5" />
-                        </button>
+            {/* Input Overlay */}
+            <div className="fixed bottom-0 left-0 right-0 p-8 pt-0 bg-gradient-to-t from-background via-background to-transparent pointer-events-none">
+                <div className="max-w-4xl mx-auto pointer-events-auto">
+                    <div className="relative group">
+                        <div className="absolute -inset-1 bg-gradient-to-r from-purple-600 to-purple-400 rounded-3xl blur opacity-20 group-focus-within:opacity-40 transition-opacity" />
+                        <div className="relative flex items-center gap-3 bg-white/5 border border-white/10 rounded-3xl p-2 pl-6 backdrop-blur-xl">
+                            <Command className="w-5 h-5 text-muted-foreground" />
+                            <input 
+                                value={input}
+                                onChange={(e) => setInput(e.target.value)}
+                                onKeyPress={handleKeyPress}
+                                placeholder="Sync data patterns or request multi-pivot analysis..."
+                                className="flex-1 bg-transparent py-4 text-sm text-foreground focus:outline-none placeholder:text-muted-foreground/50"
+                                disabled={loading}
+                            />
+                            <button 
+                                onClick={handleSend}
+                                disabled={loading || !input.trim()}
+                                className="p-4 bg-purple-600 hover:bg-purple-500 text-white rounded-2xl transition-all disabled:opacity-50 disabled:grayscale group"
+                            >
+                                {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" />}
+                            </button>
+                        </div>
                     </div>
-                    <div className="flex gap-2 mt-3 flex-wrap">
-                        {["What is the total?", "Show top 5", "Why did it change?", "Count by category"].map((q) => (
+                    
+                    <div className="flex gap-2 mt-4 overflow-x-auto no-scrollbar pb-2">
+                        {[
+                            "Synthesize growth trends", 
+                            "Identify outlier segments", 
+                            "Verify profitability vs volume",
+                            "Explain variance in Q3"
+                        ].map((q) => (
                             <button
                                 key={q}
                                 onClick={() => setInput(q)}
-                                className="px-3 py-1 text-xs rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+                                className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground hover:text-foreground bg-white/5 border border-white/10 rounded-xl hover:border-purple-500/50 transition-all whitespace-nowrap"
                             >
                                 {q}
                             </button>
@@ -293,3 +253,4 @@ export default function ChatPage() {
         </div>
     );
 }
+

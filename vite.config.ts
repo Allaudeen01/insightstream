@@ -8,6 +8,24 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        watch: {
+          ignored: [
+            '**/engine/venv/**',
+            '**/engine/.venv/**',
+            '**/.venv/**',
+            '**/venv/**',
+            '**/web/.next/**',
+            '**/__pycache__/**',
+            '**/*.pyc',
+            '**/node_modules/**',
+            '**/data/*.db',
+            '**/insightstream_sessions/**',
+            '**/.env',
+            '**/.env.local',
+          ],
+          usePolling: false,
+          interval: 1000,
+        },
       },
       plugins: [react()],
       define: {

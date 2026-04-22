@@ -1,51 +1,44 @@
 import polars as pl
 import pandas as pd
-from insight_engine import BusinessRuleEngine, DataProfile, ComputedMetric, ColumnProfile
+from insight_engine import run_insight_engine
+import re
 
-def test_engine():
-    engine = BusinessRuleEngine()
-    
-    # Mock data for return rate 0% vs high%
+def strip_emojis(text):
+    if not isinstance(text, str): return str(text)
+    return re.sub(r'[^\x00-\x7F]+', '', text)
+
+def test_engine_v2():
+    # Mock data with an anomaly: Delivery Days and Returns are NOT correlated (Surprise!)
     df = pl.DataFrame({
-        "Category": ["A", "A", "B", "B", "C", "C"] * 4, # 24 rows
-        "Returned": [0, 0, 1, 1, 0, 1] * 4, 
-        "Delivery_Days": [1, 2, 8, 9, 3, 4] * 4, 
-        "Payment_Method": ["Card", "Card", "Card", "UPI", "UPI", "Cash"] * 4,
-        "Price": [20, 20, 50, 50, 50, 50] * 4, # A has very low price (revenue), meaning worst revenue performer
-        "Quantity": [1] * 24
+        "order_id": [f"ORD_{i}" for i in range(100)],
+        "category": ["Electronics", "Fashion", "Home"] * 33 + ["Electronics"],
+        "price": [100, 20, 50] * 33 + [100],
+        "quantity": [1] * 100,
+        "returned": [0, 0, 1, 1, 0, 0, 1, 1, 0, 0] * 10,
+        "delivery_days": [2, 1, 15, 12, 3, 2, 14, 11, 4, 3] * 10,
+        "marketing_spend": [10, 5, 15] * 33 + [10]
     })
     
-    profile = DataProfile(row_count=24, col_count=6)
-    profile.category_col = "Category"
-    profile.return_col = "Returned"
-    profile.delivery_days_col = "Delivery_Days"
-    profile.categoricals = ["Category", "Payment_Method"]
-    profile.profiles["Category"] = ColumnProfile("Category", "categorical")
-    profile.profiles["Payment_Method"] = ColumnProfile("Payment_Method", "categorical")
-    profile.profiles["Returned"] = ColumnProfile("Returned", "binary")
-    profile.profiles["Delivery_Days"] = ColumnProfile("Delivery_Days", "numerical")
-    profile.profiles["Price"] = ColumnProfile("Price", "numerical")
-    profile.profiles["Quantity"] = ColumnProfile("Quantity", "numerical")
-    profile.price_col = "Price"
-    profile.qty_col = "Quantity"
-    profile.numericals = ["Delivery_Days", "Price", "Quantity"]
-
-    # Add the series
-    profile._return_count_series = df["Returned"]
-    profile._revenue_series = df["Price"] * df["Quantity"]
-
-    metrics = {
-        "return_rate": ComputedMetric("Return Rate", 0.5, "50%", "Test")
-    }
-
-    # Evaluate
-    insights, warnings = engine.evaluate(df, profile, metrics)
+    print("\nStarting E2E Decision Intelligence Test (V2)...")
     
-    print("\n=== GENERATED INSIGHTS ===")
-    for ins in insights:
-        print(f"[{ins.confidence.upper()}] Pts: {ins.score:.1f} | {ins.title}")
-        print(f"   Desc: {ins.description}")
-        print(f"   Rec: {ins.recommendation}\n")
+    results = run_insight_engine(df)
+    
+    print("\n--- EXECUTIVE SUMMARY ---")
+    print(strip_emojis(results["executive_summary"]))
+    
+    print("\n--- STRATEGIC INSIGHTS (SYNTHESIZED) ---")
+    for ins in results["insights"]:
+        impact = strip_emojis(ins['impact']).strip()
+        print(f"\n[{impact}] {ins['title']}")
+        if ins.get("is_unexpected"):
+            print("WARNING: UNEXPECTED INSIGHT TRIGGERED")
+        print(strip_emojis(ins["description"]))
+        
+    print("\n--- CORE DRIVERS ---")
+    for d in results["key_drivers"]:
+        col = strip_emojis(d['column'])
+        type_str = strip_emojis(d.get('type', d.get('impact', 'unknown')))
+        print(f"Driver: {col} | Impact: {type_str} | r={d.get('r')}")
 
 if __name__ == "__main__":
-    test_engine()
+    test_engine_v2()

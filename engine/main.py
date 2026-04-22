@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 import concurrent.futures
@@ -16,8 +16,11 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, PatternFill, Alignment
-import google.generativeai as genai
+from google import genai
+from contextlib import asynccontextmanager
 import os
+import socket
+import sys
 import database as db
 from insight_engine import (
     ColumnClassifier, MetricComputer, BusinessRuleEngine,
@@ -25,8 +28,27 @@ from insight_engine import (
     run_insight_engine,
 )
 from session_cache import SessionCache, JobTracker
+from report_generator import ChartGenerator, PDFReportGenerator, ColumnMap, cleanup_temp_files
 
-app = FastAPI(title="Virtual Data Scientist Engine")
+import tempfile
+from pathlib import Path
+
+SESSION_DIR = Path(tempfile.gettempdir()) / "insightstream_sessions"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create session directory and initialize database on startup."""
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Session directory created: {SESSION_DIR}")
+    except Exception as e:
+        print(f"Warning: Could not create session directory: {e}")
+    # Initialize SQLite database
+    db.init_db()
+    print("Database initialized.")
+    yield
+
+app = FastAPI(title="Virtual Data Scientist Engine", lifespan=lifespan)
 
 # Allow CORS for Next.js frontend (localhost + production)
 app.add_middleware(
@@ -49,29 +71,11 @@ _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 # Sessions are stored in /tmp/sessions/ as JSON (metadata) + Parquet (dataframe)
 # This survives within a container's lifetime, unlike in-memory dicts
 
-import os
-import json
-import tempfile
-from pathlib import Path
-
-SESSION_DIR = Path(tempfile.gettempdir()) / "insightstream_sessions"
-
-@app.on_event("startup")
-async def startup_event():
-    """Create session directory and initialize database on startup."""
-    try:
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"Session directory created: {SESSION_DIR}")
-    except Exception as e:
-        print(f"Warning: Could not create session directory: {e}")
-    # Initialize SQLite database
-    db.init_db()
-    print("Database initialized.")
-
 # Configure Gemini
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = None
 if GENAI_API_KEY:
-    genai.configure(api_key=GENAI_API_KEY)
+    client = genai.Client(api_key=GENAI_API_KEY)
 
 def save_session(session_id: str, filename: str, df: pl.DataFrame) -> None:
     """Save session to disk."""
@@ -195,50 +199,73 @@ async def upload_dataset(
     file: UploadFile = File(...),
     sheet_name: Optional[str] = Form(None)
 ):
-    """
-    Upload a dataset (CSV or Excel) and get back the schema.
-    Supports multi-sheet Excel files by returning a list of sheets for selection.
-    """
-    # Validate file type
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
-    
-    extension = file.filename.split(".")[-1].lower()
-    if extension not in ["csv", "xlsx", "xls"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {extension}. Use CSV or Excel."
-        )
+    print(f"=== UPLOAD DEBUG ===")
+    print(f"Filename: {file.filename}")
+    print(f"Content-Type: {file.content_type}")
+    print(f"File size: {file.size if hasattr(file, 'size') else 'unknown'}")
     
     try:
         contents = await file.read()
+        print(f"Bytes read: {len(contents)}")
         
-        # Parse with Polars (faster than Pandas for large files)
-        if extension == "csv":
-            df = pl.read_csv(io.BytesIO(contents))
+        filename = file.filename.lower().strip()
+        
+        if filename.endswith('.csv'):
+            print("Attempting CSV parse...")
+            # Try multiple encodings
+            df = None
+            errors = []
+            for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+                try:
+                    import io
+                    df = pl.read_csv(
+                        io.BytesIO(contents),
+                        encoding=encoding,
+                        ignore_errors=True
+                    )
+                    print(f"CSV parsed with encoding: {encoding}")
+                    print(f"Shape: {df.shape}")
+                    break
+                except Exception as e:
+                    errors.append(f"{encoding}: {str(e)}")
+                    continue
+            
+            if df is None:
+                print(f"All CSV encodings failed: {errors}")
+                raise ValueError(f"CSV parse failed: {errors}")
+                
+        elif filename.endswith(('.xlsx', '.xls')):
+            print("Attempting Excel parse...")
+            try:
+                import pandas as pd
+                import io
+                excel_file = pd.ExcelFile(io.BytesIO(contents), engine='openpyxl')
+                sheet_names = excel_file.sheet_names
+                
+                if len(sheet_names) > 1 and not sheet_name:
+                    return DatasetSchema(
+                        filename=file.filename,
+                        sheets=sheet_names,
+                        requires_selection=True
+                    )
+                
+                target_sheet = sheet_name if sheet_name else 0
+                pdf = pd.read_excel(excel_file, sheet_name=target_sheet)
+                df = pl.from_pandas(pdf)
+                print(f"Excel parsed. Shape: {df.shape}")
+            except Exception as e:
+                print(f"Excel parse failed: {type(e).__name__}: {str(e)}")
+                # Install check
+                try:
+                    import openpyxl
+                    print(f"openpyxl version: {openpyxl.__version__}")
+                except ImportError:
+                    print("openpyxl NOT INSTALLED — run: pip install openpyxl")
+                raise
         else:
-            # Excel Handling
-            import pandas as pd
-            excel_file = pd.ExcelFile(io.BytesIO(contents))
-            sheet_names = excel_file.sheet_names
+            raise ValueError(f"Unknown file type: {filename}")
             
-            # Case 1: Multiple sheets and no specific sheet selected
-            if len(sheet_names) > 1 and not sheet_name:
-                return DatasetSchema(
-                    filename=file.filename,
-                    sheets=sheet_names,
-                    requires_selection=True
-                )
-            
-            # Case 2: Specific sheet selected OR only one sheet exists
-            target_sheet = sheet_name if sheet_name else 0
-            
-            # Validate sheet choice
-            if sheet_name and sheet_name not in sheet_names:
-                 raise HTTPException(status_code=400, detail=f"Sheet '{sheet_name}' not found.")
-
-            pandas_df = pd.read_excel(excel_file, sheet_name=target_sheet)
-            df = pl.from_pandas(pandas_df)
+        print(f"=== UPLOAD SUCCESS: {df.shape} ===")
         
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -288,10 +315,10 @@ async def upload_dataset(
         )
         
     except Exception as e:
-        # Re-raise HTTP exceptions to preserve status code
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        print(f"=== UPLOAD FAILED: {type(e).__name__}: {str(e)} ===")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=422, detail=f"Failed to process file: {str(e)}")
 
 @app.get("/session/{session_id}")
 def get_session(session_id: str):
@@ -808,7 +835,7 @@ class InsightCard(BaseModel):
 class InsightsResponse(BaseModel):
     session_id: str
     executive_summary: str
-    insights: list[InsightCard]
+    strategic_brief: list[InsightCard]
     recommendations: list[str]
     warnings: list[str] = []       # NEW — edge case / data quality alerts
     computed_metrics: Optional[dict] = None  # NEW — Revenue, Return Rate, AOV
@@ -844,15 +871,15 @@ def get_insights(session_id: str):
 
     # Convert flat dicts → InsightCard objects
     insight_cards = []
-    for ins in result["insights"]:
+    for ins in result["strategic_brief"]:
         card = InsightCard(
-            title=ins.get("title", ""),
-            description=ins.get("description", ""),
-            impact=ins.get("impact", "medium"),
-            importance=ins.get("impact", "medium"),
-            recommendation=ins.get("recommendation", ""),
-            confidence=ins.get("confidence", "medium"),
-            chart_type=ins.get("chart_type", "none"),
+            title=ins.get("title") or "",
+            description=ins.get("description") or "",
+            impact=ins.get("impact") or "medium",
+            importance=ins.get("impact") or "medium",
+            recommendation=ins.get("recommendation") or "",
+            confidence=ins.get("confidence") or "medium",
+            chart_type=ins.get("chart_type") or "none",
             chart_data=ins.get("chart_data"),
         )
         insight_cards.append(card)
@@ -871,14 +898,20 @@ def get_insights(session_id: str):
     except Exception:
         pass
 
+    # Safe Return Layer (Step 1 - safe return layer)
     resp = InsightsResponse(
         session_id=session_id,
         executive_summary=exec_summary,
-        insights=insight_cards,
+        strategic_brief=insight_cards,
         recommendations=recommendations,
         warnings=warnings,
         computed_metrics=computed_metrics,
     )
+    
+    # Final Validation Guard
+    assert isinstance(resp.strategic_brief, list), "API Contract: strategic_brief must be a list"
+    print("INSIGHTS OUTPUT (Strict):", len(resp.strategic_brief), "cards mapped.")
+    
     _cache.put(session_id, "insight_response", resp)
     return resp
 
@@ -1259,154 +1292,136 @@ Be concise (2-3 sentences each). Use real numbers from the statistics."""
 from fastapi.responses import HTMLResponse
 import base64
 
+from fastapi import BackgroundTasks
+import shutil
+import tempfile
+
+def cleanup_temp_dir(temp_dir: str, pdf_path: str):
+    """Cleanup function to be run after FileResponse."""
+    try:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            print(f"Cleaned up temp directory: {temp_dir}")
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+@app.get("/debug-columns/{session_id}")
+async def debug_columns(session_id: str):
+    """
+    Returns the ColumnMap resolution for a session without generating a PDF.
+    """
+    try:
+        filename, pl_df = load_session(session_id)
+        df = pl_df.to_pandas()
+        cm = ColumnMap(df)
+        return JSONResponse({
+            "all_columns":  list(df.columns),
+            "dtypes":       {c: str(t) for c, t in df.dtypes.items()},
+            "resolved": {
+                "numeric":   cm.numeric,
+                "numeric2":  cm.numeric2,
+                "category":  cm.category,
+                "region":    cm.region,
+                "date":      cm.date,
+                "label":     cm.label,
+            }
+        })
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
 @app.get("/export-report/{session_id}")
-def export_report(session_id: str):
-    """Generate a styled HTML report suitable for Print-to-PDF."""
+async def export_report(session_id: str, background_tasks: BackgroundTasks):
+    """
+    Generate a professional PDF report with embedded Matplotlib/Seaborn charts.
+    Uses robust ColumnMap logic for dynamic visualization.
+    """
     try:
-        filename, df = load_session(session_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Session not found")
+        # 1. Load Data
+        filename, pl_df = load_session(session_id)
+        
+        # Performance: Limit rows if > 10k
+        if len(pl_df) > 10000:
+            df = pl_df.sample(10000, seed=42).to_pandas()
+        else:
+            df = pl_df.to_pandas()
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="Dataset is empty")
+            
+        # 2. Get Insights/Brief
+        insights_data_obj = get_insights(session_id)
+        
+        # 3. Generate Charts (Using isolated session directory)
+        chart_gen = ChartGenerator(session_id=session_id)
+        temp_dir = chart_gen.output_dir
+        charts, cm = chart_gen.generate_all(df)   # ← returns (dict, ColumnMap)
 
-    # Get insights
-    insights_response = get_insights(session_id)
-    exec_summary = insights_response.executive_summary
-    insights = insights_response.insights
-    recommendations = insights_response.recommendations
+        if not charts:
+            log.error(f"No charts generated for session {session_id}")
+            raise HTTPException(status_code=500, detail="No charts could be generated. Check /debug-columns.")
 
-    # Get KPIs
-    kpi_data = get_kpis(session_id)
-    kpis = kpi_data.get("kpis", [])
+        # 4. Build Insights (Dynamic labels using ColumnMap)
+        num = cm.numeric or "value"
+        cat = cm.category or "category"
+        reg = cm.region or "region"
+        
+        insights_dict = {
+            "executive_summary": getattr(insights_data_obj, 'executive_summary', f"Analysis of {filename} patterns."),
+            "category": f"{cat} breakdown shows clear performance variation. The top {cat.lower()} accounts for a significant share of total {num.lower()}.",
+            "region": f"Regional analysis reveals {reg} as a key differentiator in {num.lower()} performance.",
+            "distribution": f"The {num.lower()} distribution shows the statistical spread and volatility across the dataset.",
+            "correlation": f"Numerical interdependencies highlight how key levers impact {num.lower()}."
+        }
+        
+        # 5. Generate PDF
+        print("Building robust PDF report...")
+        report_filename = f"InsightStream_Report_{session_id[:8]}.pdf"
+        output_pdf_path = os.path.join(temp_dir, report_filename)
+        
+        pdf_gen = PDFReportGenerator()
+        pdf_gen.build(
+            df=df,
+            charts=charts,
+            insights=insights_dict,
+            output_path=output_pdf_path,
+            cm=cm,
+            title=f"Analysis Report - {filename}"
+        )
+        
+        # 6. Schedule Cleanup
+        background_tasks.add_task(cleanup_temp_files, str(temp_dir), output_pdf_path)
+        
+        # 7. Return as FileResponse
+        return FileResponse(
+            output_pdf_path, 
+            media_type="application/pdf",
+            filename=f"InsightStream_Report_{filename.split('.')[0]}.pdf"
+        )
 
-    # Generate chart images as base64
-    chart_images = []
-    try:
-        viz_response = generate_visualizations(session_id, max_charts=6)
-        for chart in viz_response.get("charts", [])[:6]:
-            try:
-                fig_dict = chart.get("plotly_json", {})
-                fig = go.Figure(data=fig_dict.get("data", []), layout=fig_dict.get("layout", {}))
-                fig.update_layout(
-                    paper_bgcolor='white',
-                    plot_bgcolor='#f8fafc',
-                    font=dict(color='#1e293b'),
-                    width=550,
-                    height=350,
-                )
-                img_bytes = fig.to_image(format="png", engine="kaleido")
-                b64 = base64.b64encode(img_bytes).decode("utf-8")
-                chart_images.append({
-                    "title": chart.get("title", "Chart"),
-                    "description": chart.get("description", ""),
-                    "b64": b64,
-                })
-            except Exception:
-                continue
-    except Exception:
-        pass
+    except Exception as e:
+        import traceback
+        print(f"Export Error: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
 
-    # Build KPI HTML
-    kpi_html = ""
-    if kpis:
-        kpi_cards = ""
-        for kpi in kpis:
-            trend_icon = "↑" if kpi.get("trend") == "up" else ("↓" if kpi.get("trend") == "down" else "→")
-            trend_color = "#10b981" if kpi.get("trend") == "up" else ("#ef4444" if kpi.get("trend") == "down" else "#94a3b8")
-            change = kpi.get("change_pct", 0)
-            kpi_cards += f"""
-            <div class="kpi-card">
-                <div class="kpi-label">{kpi['label']}</div>
-                <div class="kpi-value">{kpi['formatted']}</div>
-                <div class="kpi-trend" style="color: {trend_color}">
-                    {trend_icon} {abs(change)}% {'growth' if change > 0 else 'decline' if change < 0 else 'stable'}
-                </div>
-            </div>"""
-        kpi_html = f'<div class="kpi-grid">{kpi_cards}</div>'
+        
+        # 5. Schedule Cleanup
+        background_tasks.add_task(cleanup_temp_dir, temp_dir, output_pdf_path)
+        
+        # 6. Return as FileResponse
+        return FileResponse(
+            output_pdf_path, 
+            media_type="application/pdf",
+            filename=f"InsightStream_Report_{filename.split('.')[0]}.pdf"
+        )
 
-    # Build insights HTML
-    insights_html = ""
-    for ins in insights[:6]:
-        insights_html += f"""
-        <div class="insight-card">
-            <div class="insight-title">{ins.title}</div>
-            <div class="insight-desc">{ins.description}</div>
-        </div>"""
+    except Exception as e:
+        import traceback
+        print(f"Export Error: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
 
-    # Build recommendations HTML
-    recs_html = ""
-    for i, rec in enumerate(recommendations[:5], 1):
-        recs_html += f'<div class="rec-item"><span class="rec-num">{i}</span> {rec}</div>'
 
-    # Build charts HTML
-    charts_html = ""
-    for ci in chart_images:
-        charts_html += f"""
-        <div class="chart-block">
-            <h3 class="chart-title">{ci['title']}</h3>
-            <p class="chart-desc">{ci['description']}</p>
-            <img src="data:image/png;base64,{ci['b64']}" alt="{ci['title']}" />
-        </div>"""
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>InsightStream Report — {filename}</title>
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    body {{ font-family: 'Inter', sans-serif; color: #1e293b; background: #fff; padding: 40px; max-width: 900px; margin: 0 auto; }}
-    @media print {{
-        body {{ padding: 20px; }}
-        .chart-block {{ break-inside: avoid; }}
-        .insight-card {{ break-inside: avoid; }}
-    }}
-    .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 2px solid #e2e8f0; }}
-    .header h1 {{ font-size: 28px; color: #4f46e5; margin-bottom: 4px; }}
-    .header .subtitle {{ font-size: 14px; color: #64748b; }}
-    .section {{ margin-bottom: 32px; }}
-    .section-title {{ font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; }}
-    .summary-box {{ background: #f1f5f9; border-radius: 12px; padding: 20px; font-size: 15px; line-height: 1.7; color: #334155; }}
-    .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }}
-    .kpi-card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; text-align: center; }}
-    .kpi-label {{ font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; margin-bottom: 4px; }}
-    .kpi-value {{ font-size: 24px; font-weight: 700; color: #1e293b; }}
-    .kpi-trend {{ font-size: 12px; margin-top: 4px; }}
-    .insight-card {{ background: #f8fafc; border-left: 3px solid #4f46e5; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; }}
-    .insight-title {{ font-weight: 600; font-size: 14px; margin-bottom: 4px; }}
-    .insight-desc {{ font-size: 13px; color: #475569; line-height: 1.5; }}
-    .rec-item {{ display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f1f5f9; font-size: 14px; line-height: 1.5; }}
-    .rec-num {{ background: #4f46e5; color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0; }}
-    .chart-block {{ margin-bottom: 24px; text-align: center; }}
-    .chart-title {{ font-size: 16px; font-weight: 600; margin-bottom: 4px; }}
-    .chart-desc {{ font-size: 13px; color: #64748b; margin-bottom: 12px; }}
-    .chart-block img {{ max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; }}
-    .footer {{ margin-top: 40px; text-align: center; font-size: 12px; color: #94a3b8; padding-top: 20px; border-top: 1px solid #e2e8f0; }}
-</style>
-</head>
-<body>
-    <div class="header">
-        <h1>📊 InsightStream Report</h1>
-        <div class="subtitle">{filename} · {len(df)} rows · {len(df.columns)} columns</div>
-    </div>
-
-    <div class="section">
-        <div class="section-title">Executive Summary</div>
-        <div class="summary-box">{exec_summary}</div>
-    </div>
-
-    {f'<div class="section"><div class="section-title">Key Performance Indicators</div>{kpi_html}</div>' if kpi_html else ''}
-
-    {f'<div class="section"><div class="section-title">Insights</div>{insights_html}</div>' if insights_html else ''}
-
-    {f'<div class="section"><div class="section-title">Recommendations</div>{recs_html}</div>' if recs_html else ''}
-
-    {f'<div class="section"><div class="section-title">Visualizations</div>{charts_html}</div>' if charts_html else ''}
-
-    <div class="footer">Generated by InsightStream AI Data Analyst</div>
-</body>
-</html>"""
-
-    return HTMLResponse(content=html, media_type="text/html")
 
 # ============== PHASE 5: ADVANCED VISUALIZATIONS ==============
 
@@ -1442,7 +1457,7 @@ def generate_visualizations(
     print("ENTERED generate_visualizations")
     try:
         print(f"Calling _internal_gen_viz with session_id={session_id}")
-        return _internal_gen_viz(
+        resp = _internal_gen_viz(
             session_id=session_id,
             max_charts=max_charts,
             groupby=groupby,
@@ -1450,6 +1465,16 @@ def generate_visualizations(
             focus=focus,
             exclude_types=exclude_types
         )
+        try:
+            db.add_history(
+                session_id, 
+                "generate_viz", 
+                {"groupby": groupby, "chart_types": chart_types}, 
+                f"Generated {resp.total_generated} visualizations"
+            )
+        except Exception as e:
+            print(f"Warning: Could not log history: {e}")
+        return resp
     except HTTPException as he:
         raise he
     except BaseException as e:
@@ -1599,11 +1624,18 @@ def _internal_gen_viz(
     
 
     
-    # Override best_cat if groupby provided
-    if groupby and groupby in categorical_cols:
-        best_cat = groupby
-        # Boost score of groupby column
-        column_scores[groupby] = 100
+    # Override primary category if groupby provided
+    if groupby:
+        # Boost score of groupby column if it's already categorical
+        if groupby in categorical_cols:
+            categorical_cols.remove(groupby)
+            categorical_cols.insert(0, groupby)
+            column_scores[groupby] = 100
+        elif groupby in numeric_cols:
+            # If it was numeric, treat it as categorical for grouping purposes
+            numeric_cols.remove(groupby)
+            categorical_cols.insert(0, groupby)
+            column_scores[groupby] = 100
 
     # ============== PHASE 0: CORE BASICS ==============
     
@@ -1910,7 +1942,7 @@ def _internal_gen_viz(
             pass
     
     # 1.4 DENSITY HEATMAP: Joint distribution of top correlation pair
-    if len(numeric_cols) >= 2 and len(charts) < max_charts:
+    if is_chart_allowed("density_heatmap") and len(numeric_cols) >= 2 and len(charts) < max_charts:
         # Use correlation pair if available, else first two
         if strong_correlations:
             col1, col2, _ = strong_correlations[0]
@@ -1954,7 +1986,7 @@ def _internal_gen_viz(
     path_candidates.sort(key=lambda x: x[4], reverse=True)
     
     # 2.1 TREEMAP: Hierarchical categories (prefer when labels are long)
-    if len(path_candidates) >= 2 and len(charts) < max_charts:
+    if is_chart_allowed("treemap") and len(path_candidates) >= 2 and len(charts) < max_charts:
         path_cols = [p[0] for p in path_candidates[:3]]  # Top 2-3 columns
         val_col = best_num if best_num else None
         avg_label_len = sum(p[3] for p in path_candidates[:2]) / 2
@@ -1998,7 +2030,7 @@ def _internal_gen_viz(
                 pass
     
     # 2.2 SUNBURST: Radial hierarchy (prefer when labels are short)
-    if len(path_candidates) >= 2 and len(charts) < max_charts:
+    if is_chart_allowed("sunburst") and len(path_candidates) >= 2 and len(charts) < max_charts:
         path_cols = [p[0] for p in path_candidates[:3]]
         val_col = best_num if best_num else None
         avg_label_len = sum(p[3] for p in path_candidates[:2]) / 2
@@ -2060,7 +2092,7 @@ def _internal_gen_viz(
                 funnel_col = col
                 funnel_score = 70
     
-    if funnel_col and len(charts) < max_charts:
+    if is_chart_allowed("funnel") and funnel_col and len(charts) < max_charts:
         try:
             funnel_data = pdf[funnel_col].value_counts().reset_index()
             funnel_data.columns = [funnel_col, 'count']
@@ -2090,7 +2122,7 @@ def _internal_gen_viz(
             pass
     
     # 2.4 ICICLE: For deep hierarchies (3+ levels)
-    if len(path_candidates) >= 3 and len(charts) < max_charts:
+    if is_chart_allowed("icicle") and len(path_candidates) >= 3 and len(charts) < max_charts:
         path_cols = [p[0] for p in path_candidates[:3]]
         val_col = best_num if best_num else None
         
@@ -2132,7 +2164,7 @@ def _internal_gen_viz(
     # ============== PHASE 3: ADVANCED CHARTS ==============
     
     # 3.1 PARALLEL COORDINATES: Multi-numeric exploration (enhanced)
-    if len(numeric_cols) >= 4 and len(charts) < max_charts:
+    if is_chart_allowed("parallel_coordinates") and len(numeric_cols) >= 4 and len(charts) < max_charts:
         dims = numeric_cols[:6]  # Limit to 6 dimensions
         color_col = best_cat if best_cat else (categorical_cols[0] if categorical_cols else None)
         try:
@@ -2430,35 +2462,41 @@ def chat_with_data(session_id: str, request: ChatRequest):
     
     question = request.question.lower()
     
+    # ── Smart column classification ──
+    _classifier = ColumnClassifier()
+    _profile = _classifier.classify(df)
+    numeric_cols = _profile.numericals
+    categorical_cols = _profile.categoricals
+
     # Use Gemini for intent detection
-    if GENAI_API_KEY:
+    if client:
         try:
-            model = genai.GenerativeModel('gemini-2.0-flash-exp')
-            
-            prompt = f"""
-            You are a helpful chart refinement assistant. The user is asking to change how visualizations are displayed.
+            # Note: We use the new client structure
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=f"""
+                You are a helpful chart refinement assistant. The user is asking to change how visualizations are displayed.
 
-            Current columns: {', '.join(numeric_cols)} (numeric), {', '.join(categorical_cols)} (categorical)
-            
-            User said: "{question}"
+                Current columns: {', '.join(numeric_cols)} (numeric), {', '.join(categorical_cols)} (categorical)
+                
+                User said: "{question}"
 
-            Parse the request and return ONLY valid JSON with these keys:
-            {{
-                "intent": "chart_refinement" | "none" | "other",
-                "params": {{
-                    "groupby": "ColumnName" | null,
-                    "chart_types": ["bar", "pie", ...] | null,
-                    "focus": "high_insight" | "smart_pick" | "all" | null,
-                    "exclude_types": ["pie", ...] | null,
-                    "specific_request": "description if unclear"
-                }},
-                "reply": "short friendly confirmation message to show user"
-            }}
+                Parse the request and return ONLY valid JSON with these keys:
+                {{
+                    "intent": "chart_refinement" | "none" | "other",
+                    "params": {{
+                        "groupby": "ColumnName" | null,
+                        "chart_types": ["bar", "pie", ...] | null,
+                        "focus": "high_insight" | "smart_pick" | "all" | null,
+                        "exclude_types": ["pie", ...] | null,
+                        "specific_request": "description if unclear"
+                    }},
+                    "reply": "short friendly confirmation message to show user"
+                }}
 
-            If no chart-related request, return intent: "none" and reply with normal chat answer to the question based on data if possible (though you don't have row data here, just schema). If it's a general data question, just answer generally or ask them to be specific.
-            """
-            
-            response = model.generate_content(prompt)
+                If no chart-related request, return intent: "none" and reply with normal chat answer to the question based on data if possible (though you don't have row data here, just schema). If it's a general data question, just answer generally or ask them to be specific.
+                """
+            )
             result = json.loads(response.text.strip().replace('```json', '').replace('```', ''))
             
             intent = result.get("intent")
@@ -2749,41 +2787,30 @@ def generate_report(session_id: str):
             content=stats_text.strip(),
         ))
     
-    # Section 4: Top Insights
-    insights_text = "Key Findings:\n"
-    insight_count = 0
-    
-    # Find top category
-    for cat_col in categorical_cols[:1]:
-        try:
-            top = df[cat_col].value_counts().head(1)
-            top_name = top[cat_col].item()
-            top_pct = round(top["count"].item() / len(df) * 100, 1)
-            insights_text += f"• '{top_name}' is the dominant {cat_col} ({top_pct}% of records)\n"
-            insight_count += 1
-        except:
-            pass
-    
-    # Find correlations
-    if len(numeric_cols) >= 2:
-        for i, col1 in enumerate(numeric_cols[:3]):
-            for col2 in numeric_cols[i+1:4]:
-                try:
-                    corr = df.select(pl.corr(col1, col2)).item()
-                    if corr and abs(corr) > 0.5:
-                        direction = "positively" if corr > 0 else "negatively"
-                        insights_text += f"• {col1} and {col2} are {direction} correlated ({corr:.2f})\n"
-                        insight_count += 1
-                        break
-                except:
-                    pass
-            if insight_count >= 3:
-                break
-    
-    if insight_count > 0:
+    # Section 4: Strategic Brief (V2 Alignment)
+    try:
+        # Pull from the new synthesized intelligence layer
+        insights_data = get_insights(session_id)
         sections.append(ReportSection(
-            title="Key Insights",
-            content=insights_text.strip(),
+            title="Strategic Executive Intelligence",
+            content=insights_data.executive_summary,
+        ))
+        
+        brief_text = "Key Strategic Findings:\n"
+        for ins in insights_data.strategic_brief[:5]:
+            brief_text += f"• {ins.title}: {ins.description}\n"
+            
+        sections.append(ReportSection(
+            title="Deep Insights & Findings",
+            content=brief_text.strip(),
+        ))
+        insight_count = len(insights_data.strategic_brief)
+    except Exception as e:
+        print(f"Report Insight Error: {e}")
+        # Legacy fallback if insights engine fails
+        sections.append(ReportSection(
+            title="Statistical Summary",
+            content="Historical data patterns detected across majority segments.",
         ))
     
     # Section 5: Recommendations
@@ -2820,7 +2847,7 @@ def export_excel_report(session_id: str):
         insights_data = get_insights(session_id)
         
         # 3. Get Charts (limit to top 5 for performance)
-        viz_data = generate_visualizations(session_id, max_charts=5)
+        viz_data = _internal_gen_viz(session_id, max_charts=5)
         
         # 4. Create Workbook
         wb = Workbook()
@@ -2869,7 +2896,7 @@ def export_excel_report(session_id: str):
         ws_insights['A4'].font = Font(size=12, bold=True)
         
         row = 5
-        for insight in insights_data.insights:
+        for insight in insights_data.strategic_brief:
             ws_insights[f'A{row}'] = f"• {insight.title}: {insight.description}"
             ws_insights[f'A{row}'].alignment = Alignment(wrap_text=True)
             row += 1
@@ -2938,9 +2965,66 @@ def export_excel_report(session_id: str):
          print(f"Export Error: {e}")
          raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
+def is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("0.0.0.0", port))
+            return False
+        except OSError:
+            return True
+
+def find_free_port(start_port: int) -> int:
+    """Find next available port from start_port."""
+    port = start_port
+    while port < start_port + 10:
+        if not is_port_in_use(port):
+            return port
+        port += 1
+    raise RuntimeError(f"No free ports found between {start_port} and {start_port + 10}")
+
+@app.post("/dev/load-csv/{session_id}")
+async def dev_load_csv(session_id: str, filepath: str):
+    """
+    Dev-only endpoint. Loads a CSV from the server's filesystem into the session store.
+    """
+    try:
+        df = pd.read_csv(filepath)
+        # Convert to polars and save to session dir
+        pl_df = pl.from_pandas(df)
+        session_path = SESSION_DIR / session_id
+        session_path.mkdir(parents=True, exist_ok=True)
+        pl_df.write_parquet(session_path / "data.parquet")
+        
+        # Metadata
+        metadata = {
+            "original_filename": os.path.basename(filepath),
+            "rows": len(df),
+            "columns": list(df.columns)
+        }
+        with open(session_path / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+            
+        return {"status": "ok", "rows": len(df), "columns": list(df.columns)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
 if __name__ == '__main__':
     import uvicorn
-    import os
-    port = int(os.environ.get('PORT', 8000))
-    print(f"Starting server on port {port}...")
+    
+    preferred_port = int(os.environ.get('PORT', 8000))
+    
+    if is_port_in_use(preferred_port):
+        print(f"Port {preferred_port} is in use. Finding alternative...")
+        try:
+            port = find_free_port(preferred_port + 1)
+            print(f"Using port {port} instead.")
+            print(f"Update frontend API_BASE to http://localhost:{port}")
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    else:
+        port = preferred_port
+        
+    print(f"Starting InsightStream on port {port}...")
     uvicorn.run(app, host='0.0.0.0', port=port, proxy_headers=True, forwarded_allow_ips="*")

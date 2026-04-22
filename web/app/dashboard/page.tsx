@@ -7,14 +7,18 @@ import dynamic from "next/dynamic";
 import {
     ArrowLeft,
     Save,
-    Loader2,
     LayoutDashboard,
     Pin,
     Type,
     Check,
     GripVertical,
-    X
+    X,
+    Plus,
+    Loader2
 } from "lucide-react";
+import Navbar from "@/components/Navbar";
+import ChartCard from "@/components/ChartCard";
+import SkeletonCard from "@/components/SkeletonCard";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
@@ -66,6 +70,7 @@ export default function DashboardPage() {
     const [saved, setSaved] = useState(false);
     const [editingText, setEditingText] = useState<string | null>(null);
     const [editContent, setEditContent] = useState("");
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [gridReady, setGridReady] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const [containerWidth, setContainerWidth] = useState(1200);
@@ -172,10 +177,16 @@ export default function DashboardPage() {
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
-                <div className="text-center">
-                    <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mx-auto mb-4" />
-                    <p className="text-slate-400">Loading dashboard...</p>
+            <div className="min-h-screen bg-background">
+                <Navbar />
+                <div className="container mx-auto px-6 py-12">
+                    <div className="flex items-center justify-between mb-8">
+                        <div className="h-8 bg-white/5 rounded w-48 animate-pulse" />
+                        <div className="h-10 bg-white/5 rounded w-32 animate-pulse" />
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {[1, 2, 3, 4, 5, 6].map(i => <SkeletonCard key={i} />)}
+                    </div>
                 </div>
             </div>
         );
@@ -204,79 +215,85 @@ export default function DashboardPage() {
 
                         if (chart) {
                             return (
-                                <div key={itemId} className="rounded-2xl bg-slate-900 border border-white/10 overflow-hidden flex flex-col">
-                                    <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
-                                        <div className="flex items-center gap-2 min-w-0">
-                                            <GripVertical className="drag-handle w-4 h-4 text-slate-600 cursor-grab flex-shrink-0" />
-                                            <h3 className="text-sm font-semibold text-white truncate">{chart.title}</h3>
+                                <div key={itemId} className="flex flex-col group">
+                                    <ChartCard>
+                                        <div className="flex items-center justify-between mb-4">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <GripVertical className="drag-handle w-4 h-4 text-muted-foreground/30 cursor-grab flex-shrink-0 hover:text-purple-400 transition-colors" />
+                                                <h3 className="text-sm font-semibold text-foreground truncate">{chart.title}</h3>
+                                            </div>
+                                            <button onClick={() => removeItem(itemId)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-muted-foreground hover:text-red-400 transition-all">
+                                                <X className="w-4 h-4" />
+                                            </button>
                                         </div>
-                                        <button onClick={() => removeItem(itemId)} className="p-1 hover:bg-red-500/10 rounded text-slate-500 hover:text-red-400 transition-colors flex-shrink-0">
-                                            <X className="w-3.5 h-3.5" />
-                                        </button>
-                                    </div>
-                                    <div className="flex-1 p-2">
-                                        <Plot
-                                            data={chart.plotly_json.data}
-                                            layout={{
-                                                ...chart.plotly_json.layout,
-                                                autosize: true,
-                                                margin: { l: 40, r: 20, t: 30, b: 40 },
-                                                paper_bgcolor: 'transparent',
-                                                plot_bgcolor: 'rgba(30,41,59,0.5)',
-                                                font: { color: '#94a3b8', size: 10 }
-                                            }}
-                                            config={{ displayModeBar: false, responsive: true, displaylogo: false }}
-                                            style={{ width: '100%', height: '100%' }}
-                                            useResizeHandler
-                                        />
-                                    </div>
+                                        <div className="flex-1 min-h-0">
+                                            <Plot
+                                                data={chart.plotly_json.data}
+                                                layout={{
+                                                    ...chart.plotly_json.layout,
+                                                    autosize: true,
+                                                    margin: { l: 40, r: 20, t: 20, b: 40 },
+                                                    paper_bgcolor: 'transparent',
+                                                    plot_bgcolor: 'transparent',
+                                                    font: { color: 'rgba(255,255,255,0.5)', size: 10 },
+                                                    xaxis: { ...chart.plotly_json.layout.xaxis, gridcolor: 'rgba(255,255,255,0.05)', zerolinecolor: 'rgba(255,255,255,0.1)' },
+                                                    yaxis: { ...chart.plotly_json.layout.yaxis, gridcolor: 'rgba(255,255,255,0.05)', zerolinecolor: 'rgba(255,255,255,0.1)' }
+                                                }}
+                                                config={{ displayModeBar: false, responsive: true, displaylogo: false }}
+                                                style={{ width: '100%', height: '100%' }}
+                                                useResizeHandler
+                                            />
+                                        </div>
+                                    </ChartCard>
                                 </div>
                             );
                         }
 
                         if (textBlock) {
                             return (
-                                <div key={itemId} className="rounded-2xl bg-slate-900 border border-white/10 overflow-hidden flex flex-col">
-                                    <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
-                                        <div className="flex items-center gap-2">
-                                            <GripVertical className="drag-handle w-4 h-4 text-slate-600 cursor-grab" />
-                                            <Type className="w-3.5 h-3.5 text-slate-500" />
-                                            <span className="text-xs text-slate-500">Text Block</span>
+                                <div key={itemId} className="flex flex-col group">
+                                    <div className="rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm p-6 hover:border-white/20 transition-all flex flex-col h-full">
+                                        <div className="flex items-center justify-between mb-4">
+                                            <div className="flex items-center gap-2">
+                                                <GripVertical className="drag-handle w-4 h-4 text-muted-foreground/30 cursor-grab hover:text-purple-400" />
+                                                <Type className="w-4 h-4 text-purple-400" />
+                                                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Note</span>
+                                            </div>
+                                            <button onClick={() => removeItem(itemId)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-muted-foreground hover:text-red-400 transition-all">
+                                                <X className="w-4 h-4" />
+                                            </button>
                                         </div>
-                                        <button onClick={() => removeItem(itemId)} className="p-1 hover:bg-red-500/10 rounded text-slate-500 hover:text-red-400 transition-colors">
-                                            <X className="w-3.5 h-3.5" />
-                                        </button>
-                                    </div>
-                                    <div className="flex-1 p-4">
-                                        {editingText === itemId ? (
-                                            <div className="h-full flex flex-col gap-2">
-                                                <textarea
-                                                    autoFocus
-                                                    value={editContent}
-                                                    onChange={(e) => setEditContent(e.target.value)}
-                                                    className="flex-1 bg-slate-800 border border-indigo-500/30 rounded-lg p-3 text-sm text-white resize-none focus:outline-none"
-                                                />
-                                                <div className="flex gap-2">
-                                                    <button onClick={() => saveTextEdit(itemId)} className="px-3 py-1 text-xs bg-indigo-600 rounded text-white hover:bg-indigo-500">Save</button>
-                                                    <button onClick={() => setEditingText(null)} className="px-3 py-1 text-xs bg-slate-700 rounded text-slate-300 hover:bg-slate-600">Cancel</button>
+                                        <div className="flex-1 overflow-auto">
+                                            {editingText === itemId ? (
+                                                <div className="h-full flex flex-col gap-3">
+                                                    <textarea
+                                                        autoFocus
+                                                        value={editContent}
+                                                        onChange={(e) => setEditContent(e.target.value)}
+                                                        className="flex-1 bg-white/5 border border-purple-500/30 rounded-xl p-4 text-sm text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-purple-500/20"
+                                                    />
+                                                    <div className="flex gap-2">
+                                                        <button onClick={() => saveTextEdit(itemId)} className="px-4 py-2 text-xs font-medium bg-purple-600 rounded-lg text-white hover:bg-purple-500 transition-colors">Save</button>
+                                                        <button onClick={() => setEditingText(null)} className="px-4 py-2 text-xs font-medium bg-white/5 rounded-lg text-muted-foreground hover:bg-white/10 transition-colors">Cancel</button>
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        ) : (
-                                            <div
-                                                onClick={() => { setEditingText(itemId); setEditContent(textBlock.content); }}
-                                                className="h-full text-sm text-slate-300 cursor-text whitespace-pre-wrap hover:bg-slate-800/50 rounded-lg p-2 transition-colors"
-                                            >
-                                                {textBlock.content}
-                                            </div>
-                                        )}
+                                            ) : (
+                                                <div
+                                                    onClick={() => { setEditingText(itemId); setEditContent(textBlock.content); }}
+                                                    className="h-full text-sm text-muted-foreground cursor-text whitespace-pre-wrap hover:text-foreground transition-colors p-2 rounded-lg hover:bg-white/5"
+                                                >
+                                                    {textBlock.content}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             );
                         }
 
                         return (
-                            <div key={itemId} className="rounded-2xl bg-slate-900 border border-white/10 p-4 flex items-center justify-center">
-                                <p className="text-slate-500 text-sm">Chart not found</p>
+                            <div key={itemId} className="rounded-xl border border-white/10 bg-white/5 p-4 flex items-center justify-center">
+                                <p className="text-muted-foreground text-sm">Item not found</p>
                             </div>
                         );
                     })}
@@ -286,50 +303,70 @@ export default function DashboardPage() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 text-white">
-            <header className="border-b border-white/10 bg-slate-950/50 backdrop-blur-xl sticky top-0 z-50">
-                <div className="container mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="min-h-screen bg-background">
+            <Navbar />
+
+            <main className="container mx-auto px-6 py-8">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
                     <div className="flex items-center gap-4">
-                        <Link href="/insights" className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors">
+                        <Link href="/insights" className="p-2 hover:bg-white/5 rounded-lg text-muted-foreground hover:text-foreground transition-all">
                             <ArrowLeft className="w-5 h-5" />
-                            <span className="font-medium">Back</span>
                         </Link>
-                        <div className="flex items-center gap-2">
-                            <div className="h-8 w-8 bg-indigo-600 rounded-lg flex items-center justify-center">
-                                <LayoutDashboard className="w-5 h-5" />
+                        <div>
+                            <div className="flex items-center gap-3">
+                                <h1 className="text-2xl font-bold text-foreground tracking-tight">Executive Dashboard</h1>
+                                {saved && (
+                                    <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-400/10 px-2.5 py-1 rounded-full border border-emerald-400/20 animate-fade-in">
+                                        <Check className="w-3 h-3" />
+                                        Changes Saved
+                                    </span>
+                                )}
                             </div>
-                            <span className="font-bold text-lg tracking-tight">Dashboard</span>
+                            <p className="text-sm text-muted-foreground">Customize your data workspace</p>
                         </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <button onClick={addTextBlock} className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-lg text-sm transition-colors">
-                            <Type className="w-4 h-4" />
-                            Add Text
+                    
+                    <div className="flex items-center gap-3">
+                        <button onClick={addTextBlock} className="flex items-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/8 border border-white/10 rounded-xl text-sm font-medium transition-all group">
+                            <Plus className="w-4 h-4 text-purple-400 group-hover:scale-110 transition-transform" />
+                            Add Insight Note
                         </button>
                         <button
                             onClick={handleSave}
                             disabled={saving}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${saved ? "bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"
-                                } disabled:opacity-50`}
+                            className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+                                saved 
+                                ? "bg-emerald-600/20 text-emerald-400 border border-emerald-600/30" 
+                                : "bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-600/20"
+                            } disabled:opacity-50`}
                         >
-                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> :
-                                saved ? <Check className="w-4 h-4" /> :
-                                    <Save className="w-4 h-4" />}
-                            {saved ? "Saved!" : "Save Layout"}
+                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                            {saved ? "Layout Secured" : "Save Perspective"}
                         </button>
                     </div>
                 </div>
-            </header>
 
-            <main className="container mx-auto px-4 py-6">
+                {errorMessage && (
+                    <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 mb-8 flex items-center justify-between text-red-400 text-sm animate-fade-in">
+                        <div className="flex items-center gap-3">
+                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-red-500/20 text-xs font-bold">!</span>
+                            {errorMessage}
+                        </div>
+                        <button onClick={() => setErrorMessage(null)} className="p-1 hover:bg-red-500/10 rounded-lg">
+                            <X className="w-4 h-4" />
+                        </button>
+                    </div>
+                )}
+
                 {pinnedIds.length === 0 ? (
-                    <div className="text-center py-20">
-                        <Pin className="w-16 h-16 text-slate-700 mx-auto mb-4" />
-                        <h2 className="text-xl font-semibold mb-2">No charts pinned</h2>
-                        <p className="text-slate-400 mb-6">Go to the Insights page and pin charts to build your dashboard.</p>
-                        <Link href="/insights" className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-medium transition-all">
-                            <ArrowLeft className="w-4 h-4" />
-                            Back to Insights
+                    <div className="text-center py-32 rounded-3xl border border-dashed border-white/10 bg-white/[0.02]">
+                        <div className="w-20 h-20 bg-white/5 rounded-3xl flex items-center justify-center mx-auto mb-6">
+                            <Pin className="w-10 h-10 text-muted-foreground/20" />
+                        </div>
+                        <h2 className="text-xl font-bold mb-2">Workspace is Empty</h2>
+                        <p className="text-muted-foreground mb-8 max-w-sm mx-auto">Discover key findings in the Insights engine and pin them here to build your narrative.</p>
+                        <Link href="/insights" className="inline-flex items-center gap-2 px-8 py-3.5 bg-purple-600 hover:bg-purple-500 rounded-xl font-bold transition-all shadow-xl shadow-purple-600/25">
+                            Discover Insights
                         </Link>
                     </div>
                 ) : (
@@ -339,3 +376,4 @@ export default function DashboardPage() {
         </div>
     );
 }
+

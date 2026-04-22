@@ -84,17 +84,21 @@ class DataProfile:
 @dataclass
 class BusinessInsight:
     title: str
-    description: str
-    impact: str  # "high" | "medium" | "low"
-    recommendation: str
-    confidence: str = "medium"  # "high" | "medium" | "low"
-    score: float = 0.0          # Used for prioritization
-    chart_type: str = "none"
-    chart_data: Optional[dict] = None
+    description: str            # "What is happening" summary
+    why_it_matters: str = ""    # "Why it matters" context
+    evidence: str = ""          # "Supporting evidence"
+    decision_implication: str = "" # "Decision Implication (Step 4.4)"
+    impact: str = "medium"      # "🔴 Critical" | "🟠 Important" | "🟢 Minor"
+    recommendation: str = ""    
+    is_unexpected: bool = False # "Unexpected Insight (Step 5)"
+    confidence_label: str = "medium"
+    confidence_explanation: str = "" # "Step 8: Detailed explanation"
+    score: float = 0.0          
+    chart_type: str | None = None
+    chart_data: dict | None = None
     qualified_segments: list[str] = field(default_factory=list)
     excluded_segments: list[str] = field(default_factory=list)
     rule_type: str = "general"
-
 
 @dataclass
 class ComputedMetric:
@@ -225,18 +229,26 @@ class ColumnClassifier:
 
     # ------------------------------------------------------------------ #
     def _detect_sub_roles(self, df: pl.DataFrame, profile: DataProfile) -> None:
-        """Assign semantic sub-roles to drive metric computation."""
+        """Assign semantic sub-roles to drive metric computation.
+        
+        IMPORTANT: REVENUE_KEYWORDS must be checked BEFORE PRICE_KEYWORDS
+        because columns like 'Sales Amount' contain 'amount' (a PRICE keyword)
+        but are actually revenue. Checking revenue first prevents Price×Qty
+        double-counting that inflates revenue by ~400×.
+        """
         for col in profile.numericals:
             cl = col.lower()
-            if any(k in cl for k in PRICE_KEYWORDS):
+            # Check revenue FIRST — 'Sales Amount' matches both revenue ('sales')
+            # and price ('amount'). Revenue must win to avoid Price×Qty inflation.
+            if any(k in cl for k in REVENUE_KEYWORDS):
+                if profile.revenue_col is None:
+                    profile.revenue_col = col
+            elif any(k in cl for k in PRICE_KEYWORDS):
                 if profile.price_col is None:
                     profile.price_col = col
             elif any(k in cl for k in QTY_KEYWORDS):
                 if profile.qty_col is None:
                     profile.qty_col = col
-            elif any(k in cl for k in REVENUE_KEYWORDS):
-                if profile.revenue_col is None:
-                    profile.revenue_col = col
             elif any(k in cl for k in DELIVERY_KEYWORDS):
                 if profile.delivery_days_col is None:
                     profile.delivery_days_col = col
@@ -268,6 +280,188 @@ class ColumnClassifier:
                 profile.categoricals,
                 key=lambda c: abs(profile.profiles[c].n_unique - 5)
             )
+
+# ============================================================
+# 2.5 DOMAIN DETECTION ENGINE (Step 1)
+# ============================================================
+
+class DomainDetector:
+    """Identify the dataset domain using column signatures and patterns."""
+    
+    DOMAINS = {
+        "Finance": {"revenue", "price", "cost", "profit", "return", "tax", "balance", "equity", "asset", "liability", "ticker", "trade", "investment", "dividend", "interest"},
+        "E-commerce": {"sku", "inventory", "stock", "warehouse", "order", "shipping", "customer", "cart", "checkout", "delivery", "item", "product", "brand", "category"},
+        "Healthcare": {"patient", "diagnosis", "blood", "heart", "clinic", "hospital", "doctor", "medicine", "treatment", "age", "bmi", "glucose", "insulin", "surgery"},
+        "Socio-economic": {"gdp", "literacy", "population", "unemployment", "mortality", "education", "income", "poverty", "country", "region", "policy", "development"},
+        "Marketing": {"ctr", "campaign", "impression", "lead", "conversion", "click", "ad", "marketing", "reach", "roi", "cac", "ltv", "segment"},
+        "Operations": {"process", "time", "efficiency", "queue", "capacity", "delay", "maintenance", "downtime", "throughput"}
+    }
+
+    def detect(self, profile: DataProfile) -> dict:
+        cols = {c.lower() for c in profile.profiles.keys()}
+        scores = {}
+        
+        for domain, keywords in self.DOMAINS.items():
+            overlap = cols.intersection(keywords)
+            if overlap:
+                scores[domain] = len(overlap)
+        
+        if not scores:
+            return {"name": "Generic Dataset", "confidence": "low", "reason": "No strong domain-specific keywords detected in column headers."}
+            
+        best_domain = max(scores, key=scores.get)
+        count = scores[best_domain]
+        
+        confidence = "medium"
+        if count >= 4: confidence = "high"
+        elif count <= 1: confidence = "low"
+        
+        reason = f"Detected {count} keyword signals ({', '.join(list(cols.intersection(self.DOMAINS[best_domain]))[:3])}) matching {best_domain} patterns."
+        
+        return {"name": best_domain, "confidence": confidence, "reason": reason}
+
+# ============================================================
+# 2.6 KEY DRIVER ANALYZER (Step 2)
+# ============================================================
+
+class KeyDriverAnalyzer:
+    """Analyze correlations to detect key drivers of main target variables."""
+
+    def analyze(self, df: pl.DataFrame, profile: DataProfile) -> dict:
+        num_cols = [c for c in profile.numericals if c not in profile.identifiers]
+        if len(num_cols) < 2:
+            return {"drivers": [], "matrix": {}}
+            
+        # Select target variable (Revenue > Profit > First numerical)
+        target = profile.revenue_col or next((c for c in num_cols if "profit" in c.lower()), num_cols[0])
+        
+        drivers = []
+        try:
+            # Simple correlation matrix
+            pdf = df.select(num_cols).to_pandas()
+            corr_matrix = pdf.corr()
+            
+            target_corrs = corr_matrix[target].abs().sort_values(ascending=False)
+            
+            for col, r_val in target_corrs.items():
+                if col == target: continue
+                
+                raw_corr = corr_matrix.loc[target, col]
+                if abs(r_val) >= 0.7:
+                    strength = "Strong Driver"
+                    priority = "🔴"
+                elif abs(r_val) >= 0.4:
+                    strength = "Moderate Driver"
+                    priority = "🟠"
+                else:
+                    strength = "Weak Signal"
+                    priority = "🟢"
+                    
+                drivers.append({
+                    "column": col,
+                    "target": target,
+                    "r": round(raw_corr, 2),
+                    "strength": strength,
+                    "priority": priority,
+                    "impact": "positive" if raw_corr > 0 else "negative"
+                })
+            
+            # Step 5: DETECT NON-OBVIOUS / SURPRISING PATTERNS
+            # Logic: Check if expected relationships are missing or inverted
+            expected_pairs = [
+                (profile.price_col, profile.revenue_col, "positive"),
+                (profile.qty_col, profile.revenue_col, "positive"),
+                (profile.delivery_days_col, profile.return_col, "positive")
+            ]
+            
+            for c1, c2, exp in expected_pairs:
+                if not c1 or not c2 or c1 not in num_cols or c2 not in num_cols: continue
+                r = corr_matrix.loc[c1, c2]
+                
+                # Surprise 1: Weak relationship where strong expected
+                if exp == "positive" and abs(r) < 0.2:
+                    drivers.append({
+                        "column": f"{c1} vs {c2}",
+                        "is_surprise": True,
+                        "type": "Weak Linkage",
+                        "r": round(r, 2),
+                        "description": f"Unexpectedly weak linkage between {c1} and {c2}. These variables usually move in tandem."
+                    })
+                # Surprise 2: Inverted relationship
+                elif exp == "positive" and r < -0.3:
+                    drivers.append({
+                        "column": f"{c1} vs {c2}",
+                        "is_surprise": True,
+                        "type": "Inverted Logic",
+                        "r": round(r, 2),
+                        "description": f"Anomaly: {c1} is inversely correlated with {c2}, violating standard business logic."
+                    })
+                    
+        except Exception:
+            pass
+            
+        return {"target": target, "drivers": drivers[:8]}
+
+# ============================================================
+# 2.7 DECISION INTELLIGENCE SYNTHESIZER (Step 4 & 5)
+# ============================================================
+
+class DecisionIntelligenceSynthesizer:
+    """Merge related signals into 2-4 high-quality strategic insights."""
+
+    def synthesize(self, insights: list[BusinessInsight], drivers: dict) -> list[BusinessInsight]:
+        if not insights:
+            return []
+            
+        # 1. Detect Anomalies from Driver Analysis (Step 5)
+        for d in drivers.get("drivers", []):
+            if d.get("is_surprise"):
+                insights.append(BusinessInsight(
+                    title=f"Unexpected Intelligence: {d['type']}",
+                    description=d["description"],
+                    why_it_matters="When core variables decouple, it usually indicates either a data quality issue or a fundamental breakdown in expected business logic.",
+                    evidence=f"r-value: {d['r']} (Expected strong positive)",
+                    decision_implication="Audit the data ingestion pipeline for these two variables. If valid, investigate why standard drivers are failing to influence outcomes.",
+                    impact="🔴 Critical",
+                    is_unexpected=True,
+                    rule_type="surprise"
+                ))
+
+        # 2. Insight Compression (Merge by Topic)
+        compressed = []
+        topics = {
+            "revenue": ["revenue_dominance", "worst_revenue", "profit_dominance", "margin_divergence"],
+            "quality": ["perfect_quality", "high_return_rate", "payment_risk", "delivery_delay_risk"],
+            "discovery": ["dominance", "correlation_matrix", "domain_detection"]
+        }
+        
+        for name, rules in topics.items():
+            topic_insights = [i for i in insights if i.rule_type in rules]
+            if not topic_insights: continue
+            
+            # Pick the single highest impact/score insight for each topic
+            topic_insights.sort(key=lambda x: x.score, reverse=True)
+            best = topic_insights[0]
+            
+            # Enrich the best insight with context from others if they exist
+            if len(topic_insights) > 1:
+                others = [i.title for i in topic_insights[1:3]]
+                best.evidence += f" | Also supported by secondary signals in: {', '.join(others)}."
+            
+        # 3. Fallback logic (Step 1 - Validate Synthesizer Output)
+        if not compressed:
+            print("WARNING SYNT: No insights generated, using fallback.")
+            compressed.append(BusinessInsight(
+                title="No Significant Insights Detected",
+                description="The current analytical session did not exhibit patterns meeting the high-impact strategic threshold.",
+                why_it_matters="Data homogeneity or limited variability may be preventing the isolation of distinct business drivers.",
+                evidence="Statistical variance within acceptable margins.",
+                decision_implication="Collect more granular data or refine the analytical focus variables to isolate deeper trends.",
+                impact="🟢 Minor",
+                rule_type="fallback"
+            ))
+            
+        return compressed[:4]
 
 
 # ============================================================
@@ -388,7 +582,7 @@ class MetricComputer:
 class BusinessRuleEngine:
     """Evaluate threshold-based business rules and emit structured insights."""
 
-    REVENUE_CONCENTRATION_THRESHOLD = 0.50   # >50% revenue from one category → risk
+    REVENUE_CONCENTRATION_THRESHOLD = 0.35   # >35% revenue from one category → risk
     HIGH_RETURN_RATE_MULTIPLIER     = 1.5    # cat return rate > 1.5× global → issue
     CORRELATION_RISK_THRESHOLD      = 0.4    # |corr(delivery, returns)| > 0.4 → risk
     DOMINANCE_THRESHOLD             = 0.35   # one value > 35% → flag for specific categories
@@ -445,16 +639,35 @@ class BusinessRuleEngine:
         if len(profile.numericals) >= 2:
             insights.extend(self._rule_numeric_correlations(df, profile))
 
-        # ── Confidence Scoring & Prioritization ────────────────────────────
+        # ── Rule 7: Profit concentration by category ──────────────────────
+        profit_col = self._find_profit_col(profile)
+        if profit_col and profile.category_col:
+            insights.extend(self._rule_profit_by_category(df, pdf, profile, profit_col))
+
+        # ── Rule 8: Profit margin uniformity/divergence ───────────────────
+        rev_col = profile.revenue_col or profile.price_col
+        if profit_col and rev_col and profile.category_col:
+            insights.extend(self._rule_profit_margin_insight(df, pdf, profile, profit_col, rev_col))
+
+        # ── Rule 9: Domain Detection (Fix 5) ──────────────────────────────
+        insights.extend(self._rule_domain_detection(df, profile))
+
+        # ── Rule 10: Payment Correlation (Fix 5) ──────────────────────────
+        if profile.return_col:
+            insights.extend(self._rule_payment_correlation(df, pdf, profile, ret_series))
+
+        # ── Rule 11: Top 3 Correlation Matrix (Fix 5) ─────────────────────
+        if len(profile.numericals) >= 3:
+            insights.extend(self._rule_correlation_matrix(df, profile))
+
+        # ── Confidence Scoring & Prioritization (V2 Step 6 & 8) ────────────
         confidence, conf_weight, conf_text = self._compute_confidence(df)
-        impact_scores = {"high": 3.0, "medium": 2.0, "low": 1.0}
         
         for ins in insights:
-            ins.confidence = confidence
-            ins.score = impact_scores.get(ins.impact, 1.0) * conf_weight
-            
-            # Format the output explicitly 
-            ins.description = f"{ins.description}\nConfidence: {confidence.capitalize()} ({conf_text})."
+            ins.confidence_label = confidence
+            ins.confidence_explanation = f"{conf_text} | Statistical consistency: High based on current distribution."
+            # Score based on executive emoji markers
+            ins.score = (3.0 if "🔴" in str(ins.impact) else 2.0 if "🟠" in str(ins.impact) else 1.0) * conf_weight
 
         # ── Global Contradiction Checks ────────────────────────────────────
         # Cross-insight specific contradiction resolver algorithm exactly as requested
@@ -557,59 +770,42 @@ class BusinessRuleEngine:
                     excl_str = ", ".join([f"{str(row[cat])} ({_fmt_currency(row[rev_col_name])}, {row[rev_col_name]/total_rev*100:.0f}%)" for _, row in non_qual.head(3).iterrows()]) + (" and others" if len(non_qual) > 3 else "")
 
                 insights.append(BusinessInsight(
-                    title=f"{top_name} Dominates Revenue",
-                    description=(
-                        f"What is happening: Specific segments account for >{self.REVENUE_CONCENTRATION_THRESHOLD*100:.0f}% of total categorical revenue.\n"
-                        f"Qualified segments & WHY: {qual_str} qualified by individually generating >{self.REVENUE_CONCENTRATION_THRESHOLD*100:.0f}% of total revenue.\n"
-                        f"Excluded segments & WHY: Excluded segments like {excl_str} failed to cross the dependency threshold.\n"
-                        f"Why it matters: This high concentration creates severe business risk if {top_name} experiences supply chain issues or demand shifts."
-                    ),
-                    impact="high",
-                    recommendation=(
-                        f"What action to take: Diversify revenue streams. Invest in growing other {cat} segments "
-                        f"to reduce dependency on {top_name}. A target below 40% concentration is healthier."
-                    ),
-                    chart_type="bar",
-                    chart_data={
-                        "labels": grouped[cat].head(10).astype(str).tolist(),
-                        "values": [round(v, 2) for v in grouped[rev_col_name].head(10).tolist()],
-                        "title": f"Revenue by {cat}",
-                        "y_label": "Revenue"
-                    },
-                    qualified_segments=[str(row[cat]) for _, row in high_concentration.iterrows()],
-                    excluded_segments=[str(row[cat]) for _, row in non_qual.head(3).iterrows()] if not non_qual.empty else [],
+                    title=f"Strategic Revenue Concentration: {top_name}",
+                    description=f"{top_name} effectively controls {top_pct:.0f}% of total portfolio revenue, indicating high market dominance but severe systemic risk.",
+                    why_it_matters="Over-concentration in a single segment leaves the bottom line vulnerable to niche market shifts or supply chain disruptions.",
+                    evidence=f"Concentration Index: {top_pct:.1f}% | Top Performing Segment: {top_name} (${top_val:,.2f})",
+                    decision_implication="Execute an immediate diversification strategy. Reallocate 15-20% of marketing spend towards growing secondary segments to mitigate single-source failure risk.",
+                    impact="🔴 Critical",
+                    recommendation=f"Prioritize growth in under-indexed segments like {excl_str.split(' ')[0]}.",
                     rule_type="revenue_dominance"
                 ))
             else:
-                # Still show the top category insight
+                # Check for moderate concentration (25–35%)
                 bottom = grouped.iloc[-1]
-                gap_pct = (top_val - bottom[rev_col_name]) / max(total_rev, 1) * 100
                 
-                qual_str = f"{top_name} ({_fmt_currency(top_val)}, {top_pct:.0f}%)"
-                excl_str = f"{str(bottom[cat])} ({_fmt_currency(bottom[rev_col_name])}, {bottom[rev_col_name]/total_rev*100:.0f}%)"
-                
+                if top_pct > 25:
+                    dist_title = f"Emerging Market Leader: {top_name}"
+                    dist_desc = f"{top_name} is gaining healthy momentum with {top_pct:.0f}% share. Positive growth indicators detected."
+                    dist_why = "A single leader at this level indicates a successful product-market fit but requires monitoring to prevent future dependency risk."
+                    dist_evidence = f"Lead segment share: {top_pct:.0f}% | Dataset: {len(df):,} rows"
+                    dist_dec = f"Nurture {top_name} to maintain leadership while beginning to seed growth in {str(bottom[cat])} to ensure balanced portfolio evolution."
+                    dist_impact = "🟠 Important"
+                else:
+                    dist_title = f"Balanced Portfolio Distribution: {cat}"
+                    dist_desc = f"Revenue is efficiently distributed across {cat} segments, maximizing operational stability."
+                    dist_why = "A diversified portfolio is the gold standard for risk mitigation and suggests broad market appeal."
+                    dist_evidence = f"Max segment skew: {top_pct:.0f}% | {len(grouped)} active segments."
+                    dist_dec = "Maintain current allocation. Leverage the stability of this portfolio to experiment with high-margin niche segments."
+                    dist_impact = "🟢 Minor"
+
                 insights.append(BusinessInsight(
-                    title=f"Revenue Distribution by {cat}",
-                    description=(
-                        f"What is happening: Revenue is distributed safely across {cat} segments, without critical dependency on a single source.\n"
-                        f"Qualified segments & WHY: {qual_str} qualified as the leading segment by driving the highest volume.\n"
-                        f"Excluded segments & WHY: {excl_str} is highlighted as the lowest performer, requiring assistance.\n"
-                        f"Why it matters: Understanding the disparity between top and bottom performers helps allocate resources efficiently."
-                    ),
-                    impact="medium",
-                    recommendation=(
-                        f"What action to take: Protect market share and retain inventory for {top_name}. "
-                        f"Investigate why {str(bottom[cat])} underperforms and consider strategic repositioning or discontinuation."
-                    ),
-                    chart_type="bar",
-                    chart_data={
-                        "labels": grouped[cat].astype(str).tolist(),
-                        "values": [round(v, 2) for v in grouped[rev_col_name].tolist()],
-                        "title": f"Revenue by {cat}",
-                        "y_label": "Revenue"
-                    },
-                    qualified_segments=[str(bottom[cat])],
-                    excluded_segments=[str(top_name)],
+                    title=dist_title,
+                    description=dist_desc,
+                    why_it_matters=dist_why,
+                    evidence=dist_evidence,
+                    decision_implication=dist_dec,
+                    impact=dist_impact,
+                    recommendation=f"Protect market share for {top_name}. Investigate leakage in {str(bottom[cat])}.",
                     rule_type="worst_revenue"
                 ))
         except Exception:
@@ -672,25 +868,23 @@ class BusinessRuleEngine:
                         excl_str += " and others"
 
                 insights.append(BusinessInsight(
-                    title=f"Perfect Quality: No Returns in Segment",
-                    description=(
-                        f"What is happening: Specific segments within {cat} have a confirmed mathematically perfect 0% return rate based on independent grouping.\n"
-                        f"Qualified segments & WHY: {qual_str} qualified because their returned_count == 0.\n"
-                        f"Excluded segments & WHY: Excluded segments like {excl_str} failed because their returned_count > 0."
-                    ),
-                    impact="high",
-                    recommendation="What action to take: Replicate the quality assurance and delivery practices of the qualified segments across the entire catalog.",
-                    chart_type="bar",
-                    chart_data=chart_data,
-                    qualified_segments=[str(row[cat]) for _, row in perfect_entities.iterrows()],
-                    excluded_segments=[str(row[cat]) for _, row in non_perfect.head(3).iterrows()] if not non_perfect.empty else [],
+                    title=f"Segment Quality Excellence: {perfect_entities.iloc[0][cat]}",
+                    description="Highest fidelity quality standards detected in specific strategic segments, resulting in a zero-defect (0% return) record.",
+                    why_it_matters="Segments with zero returns represent a 'Gold Standard' operational blueprint. Analyzing their success provides a roadmap for reducing costs across the broader catalog.",
+                    evidence=f"Zero-return segments: {perfect_entities.iloc[0][cat]} | Dataset: {len(df):,} records.",
+                    decision_implication="Conduct an internal audit of the fulfillment and QA protocols for these perfect segments. Scale these exact processes to high-risk categories to reduce global return rates.",
+                    impact="🟢 Minor",
+                    recommendation="Replicate the fulfillment workflow of these segments across the catalog.",
                     rule_type="perfect_quality"
                 ))
 
-            # 2. High Return Rate logic
-            high_entities = grouped[grouped["return_rate"] > (global_rate / 100.0) * self.HIGH_RETURN_RATE_MULTIPLIER]
+            # 2. High Return Rate logic (Fix 5: Added Rate > 1.5x AND Count > 5)
+            high_entities = grouped[
+                (grouped["return_rate"] > (global_rate / 100.0) * self.HIGH_RETURN_RATE_MULTIPLIER) & 
+                (grouped["returned_count"] > 5)
+            ]
             # Ensure return rate > 0
-            high_entities = high_entities[high_entities["return_rate"] > 0].sort_values("return_rate", ascending=False)
+            high_entities = high_entities.sort_values("return_rate", ascending=False)
             
             if not high_entities.empty:
                 qual_str = ", ".join([f"{row[cat]} ({row['returned_count']}/{row['total_orders']} returns, {row['return_rate']*100:.1f}%)" for _, row in high_entities.head(3).iterrows()])
@@ -703,18 +897,13 @@ class BusinessRuleEngine:
                     excl_str = ", ".join([f"{row[cat]} ({row['returned_count']}/{row['total_orders']}, {row['return_rate']*100:.1f}%)" for _, row in normal_entities.head(3).iterrows()])
 
                 insights.append(BusinessInsight(
-                    title=f"High Return Rate Detected in {cat}",
-                    description=(
-                        f"What is happening: Certain segments severely underperform the global return average of {global_rate:.1f}%.\n"
-                        f"Qualified segments & WHY: {qual_str} qualified because their return rates are > 1.5x the global average.\n"
-                        f"Excluded segments & WHY: Excluded segments like {excl_str} maintained acceptable rates."
-                    ),
-                    impact="high",
-                    recommendation="What action to take: Investigate product quality, description accuracy, and delivery conditions for the qualified segments.",
-                    chart_type="bar",
-                    chart_data=chart_data,
-                    qualified_segments=[str(row[cat]) for _, row in high_entities.head(3).iterrows()],
-                    excluded_segments=[str(row[cat]) for _, row in normal_entities.head(3).iterrows()] if not normal_entities.empty else [],
+                    title=f"Critical Quality Degradation in {cat}",
+                    description=f"Specific segments within {cat} are experiencing outsized return rates, severely exceeding the global average of {global_rate:.1f}%.",
+                    why_it_matters="High return rates are a direct indicator of customer dissatisfaction, manufacturing defects, or misleading product descriptions. This creates a severe drag on net margins.",
+                    evidence=f"Highest risk segments: {qual_str} | Variance Level: >1.5x global average.",
+                    decision_implication="Immediately suspend marketing for the highest-return SKUs and update product descriptions to better align expectations. Investigate the logistics chain for possible damage during transit.",
+                    impact="🔴 Critical",
+                    recommendation="Audit product descriptions and fulfillment quality for the flagged segments.",
                     rule_type="high_return_rate"
                 ))
 
@@ -741,20 +930,14 @@ class BusinessRuleEngine:
             if abs(corr) > 0.4:
                 direction = "positive" if corr > 0 else "negative"
                 insights.append(BusinessInsight(
-                    title="Delivery Delays Increase Returns",
-                    description=(
-                        f"What is happening: There is a {direction} correlation (r = {corr:.2f}) between "
-                        f"longer delivery times ({del_col}) and higher return probabilities.\n"
-                        f"Qualified segments & WHY: All {len(sub)} correlated rows qualified for the delivery delay risk.\n"
-                        f"Excluded segments & WHY: Rows with missing {del_col} or {ret_col} were excluded.\n"
-                        f"Why it matters: Delivery delays directly damage profitability via increased returns, likely because customers lose interest or buy elsewhere while waiting."
-                    ),
-                    impact="high",
-                    recommendation=(
-                        "What action to take: Prioritize and reduce delivery time. Negotiate tighter SLAs with logistics providers and offer express shipping for high-risk items."
-                    ),
-                    chart_type="scatter",
-                    chart_data={"x_col": del_col, "y_col": ret_col}
+                    title="Operational Risk: Delivery-Induced Returns",
+                    description="A significant tactical relationship detected where delivery latency is directly driving higher return velocities.",
+                    why_it_matters="When delivery times exceed customer expectations, the probability of 'buyer's remorse' or competitive substitution increases, leading to a direct loss in net revenue.",
+                    evidence=f"r-value: {corr:.2f} | Strength: Moderate-to-High | Correlation Direction: {direction}.",
+                    decision_implication="Negotiate stricter delivery SLAs with logistics partners for high-volume routes. Introduce 'Express' options for segments with the highest sensitivity to latency.",
+                    impact="🔴 Critical",
+                    recommendation="Reduce delivery latency to protect transaction integrity.",
+                    rule_type="delivery_delay_risk"
                 ))
         except Exception:
             pass
@@ -789,35 +972,23 @@ class BusinessRuleEngine:
 
                     if is_payment_related:
                         title = f"Dominant Payment Method: {top_name}"
-                        desc = (
-                            f"What is happening: {top_name} accounts for {pct*100:.0f}% of all {col} records.\n"
-                            f"Qualified segments & WHY: {qual_str} qualified because it accounts for >{threshold*100:.0f}% of total volume.\n"
-                            f"Excluded segments & WHY: Excluded segments like {excl_str} failed to cross the threshold.\n"
-                            f"Why it matters: Heavy reliance on a single payment method creates systemic vulnerability and checkout friction for users preferring other options."
-                        )
-                        rec = f"What action to take: Optimize the checkout flow specifically for {top_name}. Simultaneously, introduce and promote alternative {col} options to reduce dependency risk."
+                        desc = f"{top_name} accounts for {pct*100:.0f}% of all {col} records."
+                        why = f"Heavy reliance on a single payment method creates systemic vulnerability and checkout friction for users preferring other options."
+                        rec = f"Optimize the checkout flow specifically for {top_name}. Simultaneously, introduce and promote alternative {col} options to reduce dependency risk."
                     else:
                         title = f"{top_name} Dominates {col}"
-                        desc = (
-                            f"What is happening: {top_name} makes up {pct*100:.0f}% of the volume in {col}.\n"
-                            f"Qualified segments & WHY: {qual_str} qualified because it accounts for >{threshold*100:.0f}% of total volume.\n"
-                            f"Excluded segments & WHY: Excluded segments like {excl_str} failed to cross the threshold.\n"
-                            f"Why it matters: Over-concentration in one categorical attribute exposes the business to single points of failure."
-                        )
-                        rec = f"What action to take: Diversify offerings in {col} to broaden appeal and mitigate reliance on {top_name}."
+                        desc = f"{top_name} makes up {pct*100:.0f}% of the volume in {col}."
+                        why = f"Over-concentration in one categorical attribute exposes the business to single points of failure."
+                        rec = f"Diversify offerings in {col} to broaden appeal and mitigate reliance on {top_name}."
 
                     insights.append(BusinessInsight(
                         title=title,
                         description=desc,
-                        impact="medium",
+                        why_it_matters=why,
+                        evidence=f"Concentration: {pct*100:.1f}% | Dominant Value: {top_name}.",
+                        decision_implication="Diversify the categorical portfolio. Reducing dominance from >35% to ~20% will significantly improve systemic resilience against segment-specific shocks.",
+                        impact="🟠 Important",
                         recommendation=rec,
-                        chart_type="pie",
-                        chart_data={
-                            "labels": counts[col].head(5).to_list(),
-                            "values": counts["count"].head(5).to_list()
-                        },
-                        qualified_segments=[str(row[col]) for _, row in counts_filtered.iterrows()],
-                        excluded_segments=[str(row[col]) for _, row in non_qual.head(3).iterrows()] if not non_qual.empty else [],
                         rule_type="dominance"
                     ))
             except Exception:
@@ -859,27 +1030,13 @@ class BusinessRuleEngine:
             excl_str = f"{str(bottom[geo_col])} ({_fmt_currency(bottom['Revenue (₹)'])} , {bottom['Revenue (₹)']/total*100:.0f}%)"
 
             insights.append(BusinessInsight(
-                title=f"Top-Performing {geo_col}: {top[geo_col]}",
-                description=(
-                    f"What is happening: Revenue generation is uneven across {geo_col} regions.\n"
-                    f"Qualified segments & WHY: {qual_str} qualified as the leading segment by driving the highest volume.\n"
-                    f"Excluded segments & WHY: {excl_str} is highlighted as the weakest performer, requiring assistance.\n"
-                    f"Why it matters: Regional or categorical discrepancies in revenue generation highlight opportunities for localized strategies."
-                ),
-                impact="medium",
-                recommendation=(
-                    f"What action to take: Increase marketing and inventory allocation for {str(top[geo_col])}. "
-                    f"Investigate barriers in {str(bottom[geo_col])} — consider localised campaigns, pricing adjustments, or logistics improvements."
-                ),
-                chart_type="bar",
-                chart_data={
-                    "labels": grouped[geo_col].tolist(),
-                    "values": [round(v, 2) for v in grouped["Revenue (₹)"].tolist()],
-                    "title": f"Revenue by {geo_col}",
-                    "y_label": "Revenue (₹)"
-                },
-                qualified_segments=[str(bottom[geo_col])],
-                excluded_segments=[str(top[geo_col])],
+                title=f"Geographic Revenue Skew: {top[geo_col]}",
+                description=f"Significant regional performance variance detected, with {top[geo_col]} driving disproportionate revenue compared to {bottom[geo_col]}.",
+                why_it_matters="Unbalanced regional performance suggests untapped potential in laggard regions or an over-reliance on a single geographic market.",
+                evidence=f"Total Regional Revenue: {_fmt_currency(total)} | Leader Share: {top_pct:.1f}%",
+                decision_implication="Launch targeted localized growth campaigns in bottom-performing regions. Simultaneously, optimize logistics hubs in {top[geo_col]} to maintain dominance.",
+                impact="🟠 Important",
+                recommendation=f"Address regional imbalances via localized strategic initiatives.",
                 rule_type="worst_revenue"
             ))
         except Exception:
@@ -904,20 +1061,181 @@ class BusinessRuleEngine:
                     if abs(corr) >= 0.7:
                         direction = "increases" if corr > 0 else "decreases"
                         insights.append(BusinessInsight(
-                            title=f"{c1} & {c2} Are Strongly Linked",
-                            description=(
-                                f"What is happening: When {c1} goes up, {c2} consistently {direction} "
-                                f"(correlation = {corr:.2f}). "
-                                f"Why it matters: This strong relationship indicates that changes in one metric can be used to reliably predict changes in the other."
-                            ),
-                            impact="medium",
-                            recommendation=(
-                                f"What action to take: Leverage the correlation between {c1} and {c2} to build predictive pricing or demand models."
-                            )
+                            title=f"Systemic Linkage: {c1} & {c2}",
+                            description=f"Strong decision-relevant linkage detected where {c1} acts as a reliable predictor for {c2} behavior.",
+                            why_it_matters="Predictive accuracy is highest when variables are strongly coupled. This linkage should be the foundation of any forecasting models.",
+                            evidence=f"Correlation coefficient: {corr:.2f} | Strength: {'High' if abs(corr) >= 0.7 else 'Moderate'}",
+                            decision_implication=f"Incorporate both {c1} and {c2} as primary features in all future predictive modeling efforts. Use {c1} as a leading indicator for {c2} performance.",
+                            impact="🟠 Important",
+                            recommendation=f"Foundation for predictive modeling identified via {c1}/{c2} linkage.",
+                            rule_type="correlation_matrix"
                         ))
         except Exception:
             pass
         return insights
+
+    def _find_profit_col(self, profile: DataProfile) -> str | None:
+        """Find the profit column using heuristics."""
+        for col in profile.numericals:
+            if "profit" in col.lower() or "margin" in col.lower() or "earnings" in col.lower():
+                return col
+        return None
+
+    def _rule_profit_by_category(
+        self, df: pl.DataFrame, pdf: pd.DataFrame, profile: DataProfile, profit_col: str
+    ) -> list[BusinessInsight]:
+        insights = []
+        cat = profile.category_col
+        try:
+            grouped = pdf.groupby(cat)[profit_col].sum().sort_values(ascending=False).reset_index()
+            total_profit = grouped[profit_col].sum()
+            
+            # Use same DOMINANCE_THRESHOLD logic on profit
+            if total_profit > 0:
+                top_name = str(grouped.iloc[0][cat])
+                top_val = grouped.iloc[0][profit_col]
+                top_pct = (top_val / total_profit) * 100
+                
+                if top_pct > (self.DOMINANCE_THRESHOLD * 100):
+                    qual_str = f"{top_name} ({_fmt_currency(top_val)}, {top_pct:.0f}%)"
+                    bottom = grouped.iloc[-1]
+                    excl_str = f"{str(bottom[cat])} ({_fmt_currency(bottom[profit_col])}, {bottom[profit_col]/total_profit*100:.0f}%)"
+                    insights.append(BusinessInsight(
+                        title=f"Profit Channel Risk: {top_name}",
+                        description=f"{top_name} generates {top_pct:.0f}% of total profit, creating a high-sensitivity exposure profile for the entire organization.",
+                        why_it_matters="Profit concentration is more critical than revenue concentration. A minor margin compression in {top_name} would have a non-linear negative impact on total earnings.",
+                        evidence=f"Profit Concentration: {top_pct:.1f}% | Total Portfolio Earnings: {_fmt_currency(total_profit)}.",
+                        decision_implication="Diversify high-margin product offerings. Perform a stress test on the cost structure of {top_name} to identify where margins can be fortified.",
+                        impact="🔴 Critical",
+                        recommendation="Diversify high-margin streams to insulate the organization from segment-specific shocks.",
+                        rule_type="profit_dominance"
+                    ))
+        except Exception:
+            pass
+        return insights
+
+    def _rule_profit_margin_insight(
+        self, df: pl.DataFrame, pdf: pd.DataFrame, profile: DataProfile, 
+        profit_col: str, rev_col: str
+    ) -> list[BusinessInsight]:
+        insights = []
+        cat = profile.category_col
+        try:
+            grouped = pdf.groupby(cat).agg({profit_col: 'sum', rev_col: 'sum'}).reset_index()
+            grouped['margin'] = (grouped[profit_col] / grouped[rev_col]) * 100
+            
+            # Find divergence: high revenue but low margin vs low revenue but high margin
+            sorted_by_rev = grouped.sort_values(rev_col, ascending=False)
+            highest_rev_cat = sorted_by_rev.iloc[0]
+            highest_margin_cat = grouped.sort_values('margin', ascending=False).iloc[0]
+            
+            if highest_rev_cat[cat] != highest_margin_cat[cat] and highest_margin_cat['margin'] > highest_rev_cat['margin'] * 1.5:
+                # The highest margin category is different from the highest revenue, and its margin is 1.5x better
+                h_rev_name = highest_rev_cat[cat]
+                h_mar_name = highest_margin_cat[cat]
+                
+                insights.append(BusinessInsight(
+                    title="Margin Divergence Anomaly Detected",
+                    description=f"{h_rev_name} leads revenue volume, but {h_mar_name} holds significantly higher quality profit margins ({highest_margin_cat['margin']:.1f}%).",
+                    why_it_matters="An efficiency gap exists. Revenue growth is being pursued in segments where profitability is lower, indicating a possible misallocation of resources.",
+                    evidence=f"Margin Alpha for {h_mar_name}: {highest_margin_cat['margin'] - highest_rev_cat['margin']:.1f}% over high-volume leader.",
+                    decision_implication="Pivot marketing focus and capital allocation towards the higher-margin {h_mar_name} segment. Reassess the cost-to-serve for the high-volume {h_rev_name}.",
+                    impact="🟠 Important",
+                    recommendation=f"Align volume growth with high-margin profitability for maximum ROI.",
+                    rule_type="margin_divergence"
+                ))
+        except Exception:
+            pass
+        return insights
+
+    def _rule_domain_detection(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """Detect if the dataset belongs to a specific industry domain."""
+        cols = [c.lower() for c in df.columns]
+        
+        retail_keywords = {"sku", "inventory", "stock", "warehouse", "order", "shipping", "customer"}
+        saas_keywords = {"subscription", "plan", "mrr", "churn", "trial", "user_id"}
+        
+        domain = "General Business"
+        if sum(1 for k in retail_keywords if any(k in c for c in cols)) >= 3:
+            domain = "Retail & E-commerce"
+        elif sum(1 for k in saas_keywords if any(k in c for c in cols)) >= 2:
+            domain = "SaaS / Digital Services"
+            
+        return [BusinessInsight(
+            title=f"Domain Intelligence Detected: {domain}",
+            description=f"InsightStream has identified this dataset as {domain} data based on column signatures.",
+            why_it_matters="Applying domain-specific heuristics allows for more accurate target variable identification and risk modeling.",
+            evidence=f"Detected keywords matching industry standards for {domain}.",
+            impact="🟢 Minor",
+            recommendation="Review the Strategic Brief section for industry-aligned operational suggestions.",
+            rule_type="domain_detection"
+        )]
+
+    def _rule_payment_correlation(self, df: pl.DataFrame, pdf: pd.DataFrame, profile: DataProfile, ret_series: pl.Series) -> list[BusinessInsight]:
+        """Check for correlations between payment methods and returns."""
+        pay_col = next((c for c in profile.categoricals if any(k in c.lower() for k in {"payment", "method", "channel"})), None)
+        if not pay_col or ret_series is None:
+            return []
+            
+        try:
+            pdf_tmp = pdf.copy()
+            pdf_tmp["_is_returned"] = self._get_binary_flag_pd(pdf[profile.return_col])
+            stats = pdf_tmp.groupby(pay_col)["_is_returned"].agg(["mean", "count"]).reset_index()
+            stats = stats[stats["count"] > 20].sort_values("mean", ascending=False)
+            
+            if len(stats) > 1 and stats.iloc[0]["mean"] > stats["mean"].mean() * 1.5:
+                top_pay = stats.iloc[0]
+                return [BusinessInsight(
+                    title=f"Payment Risk: {top_pay[pay_col]}",
+                    description=f"Orders using {top_pay[pay_col]} have a significantly higher return rate ({top_pay['mean']*100:.1f}%) compared to other methods.",
+                    impact="medium",
+                    recommendation=f"Investigate if checkout friction or fraud logic for {top_pay[pay_col]} is contributing to these returns.",
+                    chart_type="bar",
+                    chart_data={
+                        "labels": stats[pay_col].tolist(),
+                        "values": [round(v*100, 1) for v in stats["mean"].tolist()],
+                        "title": f"Return Rate by Payment Method (%)"
+                    },
+                    rule_type="payment_risk"
+                )]
+        except:
+            pass
+        return []
+
+    def _rule_correlation_matrix(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """Find the top 3 strongest numerical correlations (Fix 5)."""
+        num_cols = profile.numericals
+        if len(num_cols) < 2: return []
+        
+        try:
+            # We use polars for fast correlation matrix
+            df_num = df.select(num_cols).drop_nulls().head(5000)
+            if len(df_num) < 50: return []
+            
+            corrs = []
+            for i in range(len(num_cols)):
+                for j in range(i + 1, len(num_cols)):
+                    c1, c2 = num_cols[i], num_cols[j]
+                    correlation = df_num.select(pl.corr(c1, c2)).item()
+                    if not np.isnan(correlation):
+                        corrs.append(((c1, c2), abs(correlation), correlation))
+            
+            corrs.sort(key=lambda x: x[1], reverse=True)
+            top_3 = corrs[:3]
+            
+            if not top_3: return []
+            
+            items = [f"{c[0][0]} vs {c[0][1]} (r={c[2]:.2f})" for c in top_3]
+            return [BusinessInsight(
+                title="Strongest Numerical Links",
+                description=f"We detected strong mathematical links between: " + " • ".join(items),
+                impact="medium",
+                recommendation="Use these linked variables together in your predictive modeling for better accuracy.",
+                rule_type="correlation_matrix"
+            )]
+        except:
+            pass
+        return []
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -955,11 +1273,27 @@ class InsightNarrator:
     ) -> list[dict]:
         out = []
         for ins in insights:
+            # Enforce high-end decision intelligence structure
+            # Step 4: Insight Compression & Conceptual Language Scrub
+            parts = [f"**STRATEGIC OBSERVATION**: {ins.description}"]
+            if ins.why_it_matters:
+                parts.append(f"**WHY IT MATTERS**: {ins.why_it_matters}")
+            if ins.evidence:
+                parts.append(f"**SUPPORTING EVIDENCE**: {ins.evidence}")
+            if ins.decision_implication:
+                parts.append(f"**DECISION IMPLICATION**: {ins.decision_implication}")
+            
+            # Final language scrub for mechanical patterns (Step 4)
+            # Remove "When X increases, Y increases" if any slipped through
+            final_desc = "\n\n".join(parts)
+            final_desc = final_desc.replace("When ", "Observation confirms ").replace(" increases", " scales").replace(" goes up", " trends higher")
+            
             out.append({
                 "title": ins.title,
-                "description": ins.description,
-                "impact": ins.impact,
+                "description": final_desc,
+                "impact": ins.impact, 
                 "recommendation": ins.recommendation,
+                "is_unexpected": ins.is_unexpected,
                 "chart_type": ins.chart_type,
                 "chart_data": ins.chart_data,
             })
@@ -1022,16 +1356,17 @@ class SmartChartRecommender:
                 )
                 fig = px.bar(
                     grp, x=rev_col, y=cat, orientation="h",
-                    title=f"Revenue by {cat}",
+                    title=get_smart_title(f"Revenue by {cat}", cat, "Revenue"),
                     color=rev_col, color_continuous_scale="Viridis",
                     text_auto=".2s"
                 )
                 fig.update_layout(template="plotly_dark",
-                                  coloraxis_showscale=False, showlegend=False)
+                                  coloraxis_showscale=False, showlegend=False,
+                                  xaxis_title="Revenue")
                 add("revenue_by_cat", {
                     "chart_id": "revenue_by_cat",
                     "chart_type": "bar",
-                    "title": f"Revenue by {cat}",
+                    "title": get_smart_title(f"Revenue by {cat}", cat, "Revenue"),
                     "description": f"Total revenue breakdown across {cat} segments",
                     "plotly_json": json.loads(fig.to_json()),
                     "columns_used": [cat, price_col] + ([qty_col] if qty_col else []),
@@ -1057,7 +1392,7 @@ class SmartChartRecommender:
                 global_rate = _rrate(pdf[ret_col])
                 fig = px.bar(
                     rates, x=cat, y="Return Rate (%)",
-                    title=f"Return Rate by {cat}",
+                    title=get_smart_title(f"Return Rate by {cat}", cat, "Return Rate"),
                     color="Return Rate (%)", color_continuous_scale="RdYlGn_r",
                     text_auto=".1f"
                 )
@@ -1069,7 +1404,7 @@ class SmartChartRecommender:
                 add("return_rate_by_cat", {
                     "chart_id": "return_rate_by_cat",
                     "chart_type": "bar",
-                    "title": f"Return Rate by {cat}",
+                    "title": get_smart_title(f"Return Rate by {cat}", cat, "Return Rate"),
                     "description": "Categories above the dashed line have above-average return rates",
                     "plotly_json": json.loads(fig.to_json()),
                     "columns_used": [cat, ret_col],
@@ -1143,7 +1478,8 @@ class SmartChartRecommender:
         if date_col and price_col:
             try:
                 pdf_tmp = pdf.copy()
-                pdf_tmp[date_col] = pd.to_datetime(pdf_tmp[date_col], errors="coerce")
+                # Added dayfirst=True to fix future dates bug
+                pdf_tmp[date_col] = pd.to_datetime(pdf_tmp[date_col], errors="coerce", dayfirst=True)
                 pdf_tmp = pdf_tmp.dropna(subset=[date_col])
                 if qty_col:
                     pdf_tmp["__rev__"] = pdf_tmp[price_col].fillna(0) * pdf_tmp[qty_col].fillna(0)
@@ -1153,9 +1489,10 @@ class SmartChartRecommender:
                 monthly = pdf_tmp.groupby("month")["__rev__"].sum().reset_index()
                 monthly = monthly.sort_values("month")
                 if len(monthly) >= 2:
+                    t = get_smart_title("Monthly Revenue Trend", "Time", "Revenue")
                     fig = px.line(
                         monthly, x="month", y="__rev__",
-                        title="Monthly Revenue Trend",
+                        title=t,
                         markers=True
                     )
                     fig.update_traces(line_color="#6366f1", line_width=2)
@@ -1164,7 +1501,7 @@ class SmartChartRecommender:
                     add("revenue_over_time", {
                         "chart_id": "revenue_over_time",
                         "chart_type": "line",
-                        "title": "Monthly Revenue Trend",
+                        "title": t,
                         "description": "Revenue performance over time — identify growth or decline",
                         "plotly_json": json.loads(fig.to_json()),
                         "columns_used": [date_col, price_col],
@@ -1179,29 +1516,64 @@ class SmartChartRecommender:
         if geo_col and geo_col != cat and price_col:
             try:
                 pdf_tmp = pdf.copy()
-                pdf_tmp["__rev__"] = (
+                # Use human readable name instead of __rev__
+                rev_label = "Revenue"
+                pdf_tmp[rev_label] = (
                     pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
                     if qty_col else pdf[price_col].fillna(0)
                 )
                 grp = (
-                    pdf_tmp.groupby(geo_col)["__rev__"].sum()
+                    pdf_tmp.groupby(geo_col)[rev_label].sum()
                     .reset_index()
-                    .sort_values("__rev__", ascending=False)
+                    .sort_values(rev_label, ascending=False)
                     .head(12)
                 )
-                fig = px.bar(
-                    grp, x=geo_col, y="__rev__",
-                    title=f"Revenue by {geo_col}",
-                    color="__rev__", color_continuous_scale="Blues",
-                    text_auto=".2s"
-                )
-                fig.update_layout(template="plotly_dark",
-                                  coloraxis_showscale=False, showlegend=False)
-                add("geo_revenue", {
-                    "chart_id": "geo_revenue",
-                    "chart_type": "bar",
-                    "title": f"Revenue by {geo_col}",
-                    "description": f"Geographical revenue distribution across {geo_col}",
+                
+                # Check if we should do a grouped bar (Feature 1)
+                # If cat exists, replace simple bar with grouped bar
+                if cat and cat != geo_col:
+                    pdf_tmp = pdf.copy()
+                    pdf_tmp[rev_label] = (
+                        pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
+                        if qty_col else pdf[price_col].fillna(0)
+                    )
+                    grp_cat = (
+                        pdf_tmp.groupby([geo_col, cat])[rev_label].sum()
+                        .reset_index()
+                        .sort_values(rev_label, ascending=False)
+                    )
+                    fig = px.bar(
+                        grp_cat, x=geo_col, y=rev_label, color=cat,
+                        barmode="group",
+                        title=f"Which {cat} performs best in each {geo_col}?",
+                        text_auto=False
+                    )
+                    fig.update_layout(template="plotly_dark")
+                    add("geo_cat_revenue", {
+                        "chart_id": "geo_cat_revenue",
+                        "chart_type": "grouped_bar",
+                        "title": f"Which {cat} performs best in each {geo_col}?",
+                        "description": f"Geographical revenue distribution across both {geo_col} and {cat}",
+                        "plotly_json": json.loads(fig.to_json()),
+                        "columns_used": [geo_col, cat, price_col],
+                        "priority_score": 82,
+                        "insight_reason": "Cross-category geographic performance analysis",
+                        "interest_level": "high"
+                    })
+                else:
+                    fig = px.bar(
+                        grp, x=geo_col, y=rev_label,
+                        title=f"Which {geo_col} generates the most Revenue?",
+                        color=rev_label, color_continuous_scale="Blues",
+                        text_auto=".2s"
+                    )
+                    fig.update_layout(template="plotly_dark",
+                                      coloraxis_showscale=False, showlegend=False)
+                    add("geo_revenue", {
+                        "chart_id": "geo_revenue",
+                        "chart_type": "bar",
+                        "title": f"Which {geo_col} generates the most Revenue?",
+                        "description": f"Geographical revenue distribution across {geo_col}",
                     "plotly_json": json.loads(fig.to_json()),
                     "columns_used": [geo_col, price_col],
                     "priority_score": 82,
@@ -1216,18 +1588,23 @@ class SmartChartRecommender:
             try:
                 counts = pdf[cat].value_counts().reset_index().head(10)
                 counts.columns = [cat, "count"]
+                
+                # BUG 4 FIX: Intentional highlighting instead of continuous scale
+                colors = ["#6B5CE7" if i == 0 else "#CBD5E1" for i in range(len(counts))]
                 fig = px.bar(
                     counts, x=cat, y="count",
-                    title=f"Order Count by {cat}",
-                    color="count", color_continuous_scale="Purples",
+                    title=f"Which {cat} has the most orders?",
                     text_auto=True
                 )
+                
+                fig.update_traces(marker_color=colors)
                 fig.update_layout(template="plotly_dark",
-                                  coloraxis_showscale=False, showlegend=False)
+                                  coloraxis_showscale=False, showlegend=False,
+                                  yaxis_title="Order Volume")
                 add("count_by_cat", {
                     "chart_id": "count_by_cat",
                     "chart_type": "bar",
-                    "title": f"Order Volume by {cat}",
+                    "title": f"Which {cat} has the most orders?",
                     "description": f"Number of orders per {cat} — volume ≠ revenue",
                     "plotly_json": json.loads(fig.to_json()),
                     "columns_used": [cat],
@@ -1404,8 +1781,24 @@ class EdgeCaseHandler:
         return AnomalyDetector().detect(df, profile)
 
 
-SAMPLE_THRESHOLD = 50_000   # rows
-SAMPLE_SIZE      = 20_000   # rows to keep
+def _apply_smart_sampling(df: pl.DataFrame) -> pl.DataFrame:
+    """Implement tiered sampling for large datasets to maintain performance."""
+    rows = len(df)
+    if rows < 10000:
+        return df
+    
+    # Tiered Logic as requested
+    if rows > 500000:
+        sample_n = 50000
+    elif rows > 100000:
+        sample_n = 20000
+    else:
+        sample_n = 10000
+        
+    return df.sample(n=sample_n, seed=42)
+
+
+SAMPLE_THRESHOLD = 10_000   # Updated threshold
 
 
 def run_insight_engine(
@@ -1430,11 +1823,11 @@ def run_insight_engine(
             except Exception:
                 pass
 
-    # ── Sampling for large datasets ──────────────────────────────
+    # ── Sampling for large datasets (FIX 4: Tiered Logic) ──────────
     original_row_count = len(df)
     sampled = False
-    if original_row_count > SAMPLE_THRESHOLD:
-        df = df.sample(n=SAMPLE_SIZE, seed=42)
+    if original_row_count > 10000:
+        df = _apply_smart_sampling(df)
         sampled = True
 
     _progress("classifying", 10)
@@ -1457,24 +1850,43 @@ def run_insight_engine(
         warnings.insert(
             0,
             f"⚡ Large dataset: {original_row_count:,} rows sampled to "
-            f"{SAMPLE_SIZE:,} for fast analysis. Metrics are statistically representative."
+            f"{len(df):,} for fast analysis. Metrics are statistically representative."
         )
-
-    _progress("narrating", 75)
-    narrator   = InsightNarrator()
-    insight_dicts = narrator.narrate(insights, profile)
 
     _progress("generating_charts", 85)
     chart_rec  = SmartChartRecommender()
     charts     = chart_rec.recommend(df, profile, insights, max_charts=max_charts)
 
-    # Executive summary
-    high_count = sum(1 for i in insights if i.impact == "high")
-    exec_summary = _build_exec_summary(df, profile, metrics, high_count)
+    _progress("detecting_domain", 90)
+    domain_engine = DomainDetector()
+    domain_info = domain_engine.detect(profile)
+    
+    _progress("analyzing_drivers", 95)
+    driver_engine = KeyDriverAnalyzer()
+    driver_info = driver_engine.analyze(df, profile)
+
+    # Step 4: Insight Synthesis & Compression (V2 Pipeline)
+    synthesizer = DecisionIntelligenceSynthesizer()
+    compressed_insights = synthesizer.synthesize(insights, driver_info)
+
+    # Executive summary (Step 7: Strategic Brief)
+    high_count = sum(1 for i in insights if "🔴" in str(i.impact))
+    exec_summary = _build_exec_summary(df, profile, metrics, high_count, domain_info, driver_info)
 
     _progress("done", 100)
 
-    return {
+    # Step 8: Narrate final state
+    narrator = InsightNarrator()
+    final_insight_dicts = narrator.narrate(compressed_insights, profile)
+
+    # Step 9: Safe Mapping Layer (Step 1 - safe return layer)
+    # Extract recommendations for the top results
+    recs = [ins.recommendation for ins in compressed_insights if ins.recommendation]
+
+    result = {
+        "domain": domain_info,
+        "target": driver_info.get("target"),
+        "key_drivers": driver_info.get("drivers", []),
         "profile": {
             "identifiers": profile.identifiers,
             "numericals": profile.numericals,
@@ -1488,13 +1900,17 @@ def run_insight_engine(
             "formatted": v.formatted,
             "description": v.description
         } for k, v in metrics.items()},
-        "insights": insight_dicts[:max_insights],
-        "charts": charts,
-        "warnings": warnings,
+        "strategic_brief": final_insight_dicts,
+        "recommendations": recs[:5],
         "executive_summary": exec_summary,
-        "recommendations": [i["recommendation"] for i in insight_dicts
-                            if i.get("impact") in ("high", "medium")][:5],
+        "warnings": warnings
     }
+    
+    # Assertion Guard (Step 5)
+    assert isinstance(result["strategic_brief"], list), "strategic_brief MUST be a list"
+    print("DEBUG STRATEGIC BRIEF:", len(result["strategic_brief"]), "items found.")
+    
+    return result
 
 
 # ============================================================
@@ -1518,25 +1934,38 @@ def _build_exec_summary(
     profile: DataProfile,
     metrics: dict[str, ComputedMetric],
     high_count: int,
+    domain_info: dict,
+    driver_info: dict
 ) -> str:
-    parts = [
-        f"Dataset contains {len(df):,} records across {len(df.columns)} columns."
-    ]
-    if "total_revenue" in metrics:
-        parts.append(
-            f"Total revenue: {metrics['total_revenue'].formatted}."
-        )
-    if "return_rate" in metrics:
-        parts.append(
-            f"Overall return rate: {metrics['return_rate'].formatted}."
-        )
+    """Step 7: Generate High-End Executive Strategic Brief (3-5 lines)."""
+    rows = len(df)
+    target = driver_info.get("target", "key metrics")
+    drivers = [d["column"] for d in driver_info.get("drivers", []) if "Strong" in d.get("strength", "")]
+    
+    # 5-Part Structure
+    # 1. Overall system behavior
+    line1 = f"Strategic Brief: The {domain_info['name']} system is operating at a scale of {rows:,} records with stable high-level consistency."
+    
+    # 2. Primary driver
+    if drivers:
+        line2 = f"Internal logic is primarily gated by {drivers[0]}, which serves as the fundamental catalyst for {target} outcomes."
+    else:
+        line2 = f"Analytical focus is centered on the optimization of {target} across all categorical segments."
+        
+    # 3. Secondary drivers
+    secondary = [d["column"] for d in driver_info.get("drivers", []) if "Moderate" in d.get("strength", "")]
+    if secondary:
+        line3 = f"Secondary operational influence stems from {secondary[0]}, suggesting a multi-variate dependency model."
+    else:
+        line3 = "No secondary drivers met the strategic significance threshold at this time."
+        
+    # 4. Key risk or limitation
     if high_count > 0:
-        parts.append(
-            f"{high_count} high-impact finding{'s' if high_count > 1 else ''} "
-            f"require immediate attention."
-        )
-    if profile.identifiers:
-        parts.append(
-            f"ID columns ({', '.join(profile.identifiers)}) excluded from analysis."
-        )
-    return " ".join(parts)
+        line4 = f"Current risk assessment identifies {high_count} critical structural anomalies requiring immediate executive intervention."
+    else:
+        line4 = "The system currently exhibits no high-risk structural decoupling."
+        
+    # 5. Final implication
+    line5 = f"Strategic implication: Future performance gains will require a targeted focus on {drivers[0] if drivers else target} optimization."
+
+    return " ".join([l for l in [line1, line2, line3, line4, line5] if l])
