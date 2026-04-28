@@ -14,7 +14,10 @@ import {
     GripVertical,
     X,
     Plus,
-    Loader2
+    Loader2,
+    Share2,
+    Calculator,
+    Target
 } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import ChartCard from "@/components/ChartCard";
@@ -27,75 +30,183 @@ import "react-grid-layout/css/styles.css";
 // @ts-ignore
 import "react-resizable/css/styles.css";
 
-// We import react-grid-layout client-side only
 let ResponsiveGrid: any = null;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-interface ChartData {
-    chart_id: string;
-    chart_type: string;
-    title: string;
-    description: string;
-    plotly_json: {
-        data: Plotly.Data[];
-        layout: Partial<Plotly.Layout>;
-    };
-    columns_used: string[];
-    insight_reason?: string;
-}
-
-interface TextBlock {
-    id: string;
-    content: string;
-}
-
-interface LayoutItem {
-    i: string;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-}
-
 export default function DashboardPage() {
     const router = useRouter();
     const [sessionId, setSessionId] = useState<string | null>(null);
-    const [allCharts, setAllCharts] = useState<ChartData[]>([]);
+    const [allCharts, setAllCharts] = useState<any[]>([]);
     const [pinnedIds, setPinnedIds] = useState<string[]>([]);
-    const [layout, setLayout] = useState<LayoutItem[]>([]);
-    const [textBlocks, setTextBlocks] = useState<TextBlock[]>([]);
+    const [layout, setLayout] = useState<any[]>([]);
+    const [textBlocks, setTextBlocks] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
-    const [editingText, setEditingText] = useState<string | null>(null);
-    const [editContent, setEditContent] = useState("");
-    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [gridReady, setGridReady] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const [containerWidth, setContainerWidth] = useState(1200);
 
+    // Custom KPI Modal State
+    const [showKPIModal, setShowKPIModal] = useState(false);
+    const [availableCols, setAvailableCols] = useState<string[]>([]);
+    const [kpiConfig, setKpiConfig] = useState({ column: "", aggregation: "sum", label: "" });
+    const [creatingKPI, setCreatingKPI] = useState(false);
+
+    // Export State
+    const [isExporting, setIsExporting] = useState(false);
+    const [exportProgress, setExportProgress] = useState(0);
+
     useEffect(() => {
-        // Load react-grid-layout on client side
         import("react-grid-layout").then((mod) => {
             ResponsiveGrid = mod.Responsive || mod.default;
             setGridReady(true);
-        }).catch((err) => {
-            console.error("Failed to load react-grid-layout:", err);
         });
     }, []);
 
-    // Measure container width
+    const [exportStatus, setExportStatus] = useState("");
+
+    const handleProfessionalExport = async () => {
+        if (!sessionId) {
+            alert("Session not initialized.");
+            return;
+        }
+        setIsExporting(true);
+        setExportProgress(5);
+        setExportStatus("Initializing report engine...");
+        
+        try {
+            const chartAssets: any[] = [];
+            const chartsToExport = pinnedIds.map(id => allCharts.find(c => c.chart_id === id)).filter(Boolean);
+            
+            setExportProgress(15);
+            setExportStatus("Resolving visuals...");
+
+            // 1. Resolve Plotly Library
+            let Plotly = (window as any).Plotly;
+            if (!Plotly) {
+                try {
+                    const mod = await import('plotly.js-dist-min' as any);
+                    Plotly = mod.default || mod;
+                } catch (e) {
+                    console.warn("Plotly dynamic resolve failed");
+                }
+            }
+            
+            // 2. Capture Charts
+            for (let i = 0; i < (chartsToExport as any[]).length; i++) {
+                const chart = chartsToExport[i];
+                setExportStatus(`Capturing ${chart.title}...`);
+                
+                const container = document.querySelector(`[data-chart-id="${chart.chart_id}"]`);
+                const plotlyEl = container?.querySelector('.js-plotly-plot');
+                
+                let image_base64 = "";
+                let error = "";
+
+                if (plotlyEl && Plotly) {
+                    try {
+                        image_base64 = await Plotly.toImage(plotlyEl, {
+                            format: 'png',
+                            width: 1200,
+                            height: 700,
+                            scale: 2
+                        });
+                    } catch (e: any) {
+                        console.error(`Capture failed: ${chart.chart_id}`, e);
+                        error = e.message;
+                    }
+                } else {
+                    error = !plotlyEl ? "DOM not found" : "Plotly missing";
+                }
+
+                chartAssets.push({
+                    id: chart.chart_id,
+                    title: chart.title,
+                    image_base64,
+                    error,
+                    insight: chart.description || "Segment visualization."
+                });
+
+                setExportProgress(20 + Math.floor(((i + 1) / (chartsToExport as any[]).length) * 50));
+            }
+
+            // 3. Narrative & Context
+            const kpiData: any = {};
+            textBlocks.forEach(t => {
+                if (t.content.includes(":")) {
+                    const [k, v] = t.content.split(":");
+                    kpiData[k.trim()] = v.trim();
+                }
+            });
+
+            const storedInsights = localStorage.getItem(`insights_${sessionId}`);
+            const insightsData = storedInsights ? JSON.parse(storedInsights) : null;
+
+            setExportStatus("Building multi-page PDF...");
+            setExportProgress(80);
+            
+            const template = localStorage.getItem("report_template") || "modern";
+            const res = await fetch(`${API_BASE}/export-dashboard-pdf/${sessionId}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    title: "Executive Strategic Intelligence",
+                    project_name: "InsightStream BI",
+                    template,
+                    kpis: kpiData,
+                    charts: chartAssets,
+                    ai_summary: insightsData?.executive_summary || "",
+                    insights: insightsData?.recommendations || [],
+                    text_blocks: textBlocks
+                })
+            });
+
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.detail || "PDF generation failed");
+            }
+
+            setExportStatus("Downloading report...");
+            setExportProgress(95);
+
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = `InsightStream_Dashboard_Report_${sessionId.slice(0,8)}.pdf`;
+            document.body.appendChild(a);
+            a.click();
+            
+            setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            }, 100);
+
+            setExportProgress(100);
+            setTimeout(() => {
+                // @ts-ignore
+                if (typeof setShowExportModal !== 'undefined') setShowExportModal(false);
+                setIsExporting(false);
+                setExportProgress(0);
+                setExportStatus("");
+            }, 800);
+
+        } catch (err: any) {
+            console.error("Export failure:", err);
+            alert(`Export Failed: ${err.message}`);
+            setIsExporting(false);
+            setExportStatus("");
+        }
+    };
+
     useEffect(() => {
         const el = containerRef.current;
         if (!el) return;
-        const observer = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                setContainerWidth(entry.contentRect.width);
-            }
-        });
+        const observer = new ResizeObserver(() => setContainerWidth(el.clientWidth));
         observer.observe(el);
-        setContainerWidth(el.clientWidth);
         return () => observer.disconnect();
     }, [gridReady]);
 
@@ -106,9 +217,9 @@ export default function DashboardPage() {
         const sid = session.session_id;
         setSessionId(sid);
 
-        const pinned = localStorage.getItem(`pinned_${sid}`);
-        const pinnedList: string[] = pinned ? JSON.parse(pinned) : [];
-        setPinnedIds(pinnedList);
+        fetch(`${API_BASE}/debug-columns/${sid}`)
+            .then(r => r.json())
+            .then(d => setAvailableCols(d.all_columns || []));
 
         Promise.all([
             fetch(`${API_BASE}/generate-viz/${sid}?max_charts=12`).then(r => r.json()),
@@ -117,27 +228,11 @@ export default function DashboardPage() {
             setAllCharts(vizRes.charts || []);
             if (dashRes.layout && dashRes.layout.length > 0) {
                 setLayout(dashRes.layout);
-                setPinnedIds(dashRes.pinned_chart_ids || pinnedList);
+                setPinnedIds(dashRes.pinned_chart_ids || []);
                 setTextBlocks(dashRes.text_blocks || []);
-            } else {
-                const defaultLayout = pinnedList.map((id, i) => ({
-                    i: id,
-                    x: (i % 2) * 6,
-                    y: Math.floor(i / 2) * 4,
-                    w: 6,
-                    h: 4,
-                }));
-                setLayout(defaultLayout);
             }
-        }).catch(console.error).finally(() => setLoading(false));
+        }).finally(() => setLoading(false));
     }, [router]);
-
-    const pinnedCharts = allCharts.filter(c => pinnedIds.includes(c.chart_id));
-
-    const handleLayoutChange = useCallback((newLayout: LayoutItem[]) => {
-        setLayout(newLayout);
-        setSaved(false);
-    }, []);
 
     const handleSave = async () => {
         if (!sessionId) return;
@@ -150,230 +245,189 @@ export default function DashboardPage() {
             });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
-        } catch (err) { console.error("Save failed:", err); }
-        finally { setSaving(false); }
+        } finally { setSaving(false); }
     };
 
-    const addTextBlock = () => {
-        const id = `text_${Date.now()}`;
-        setTextBlocks(prev => [...prev, { id, content: "Click to edit this text block..." }]);
-        setPinnedIds(prev => [...prev, id]);
-        setLayout(prev => [...prev, { i: id, x: 0, y: Infinity, w: 6, h: 2 }]);
-        setSaved(false);
+    const createCustomKPI = async () => {
+        if (!kpiConfig.column) return;
+        setCreatingKPI(true);
+        try {
+            const res = await fetch(`${API_BASE}/kpis/${sessionId}/custom`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(kpiConfig)
+            });
+            const data = await res.json();
+            const kpiId = `kpi_${Date.now()}`;
+            const kpiContent = `${data.kpi.label}: ${data.kpi.formatted} (${data.kpi.trend === 'up' ? '▲' : '▼'} ${data.kpi.change_pct}%)`;
+            setTextBlocks(prev => [...prev, { id: kpiId, content: kpiContent }]);
+            setPinnedIds(prev => [...prev, kpiId]);
+            setLayout(prev => [...prev, { i: kpiId, x: 0, y: 0, w: 3, h: 2 }]);
+            setShowKPIModal(false);
+        } finally { setCreatingKPI(false); }
     };
 
-    const removeItem = (itemId: string) => {
-        setPinnedIds(prev => prev.filter(id => id !== itemId));
-        setLayout(prev => prev.filter(l => l.i !== itemId));
-        setTextBlocks(prev => prev.filter(t => t.id !== itemId));
-        setSaved(false);
+    const removeItem = (id: string) => {
+        setPinnedIds(prev => prev.filter(i => i !== id));
+        setLayout(prev => prev.filter(l => l.i !== id));
+        setTextBlocks(prev => prev.filter(t => t.id !== id));
     };
 
-    const saveTextEdit = (blockId: string) => {
-        setTextBlocks(prev => prev.map(t => t.id === blockId ? { ...t, content: editContent } : t));
-        setEditingText(null);
-        setSaved(false);
-    };
+    if (loading) return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-500" /></div>;
 
-    if (loading) {
-        return (
-            <div className="min-h-screen bg-background">
-                <Navbar />
-                <div className="container mx-auto px-6 py-12">
-                    <div className="flex items-center justify-between mb-8">
-                        <div className="h-8 bg-white/5 rounded w-48 animate-pulse" />
-                        <div className="h-10 bg-white/5 rounded w-32 animate-pulse" />
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {[1, 2, 3, 4, 5, 6].map(i => <SkeletonCard key={i} />)}
-                    </div>
-                </div>
-            </div>
-        );
-    }
-
-    const renderGrid = () => {
-        if (!gridReady || !ResponsiveGrid) return null;
-        const RG = ResponsiveGrid;
-        return (
-            <div ref={containerRef}>
-                <RG
-                    className="layout"
-                    layouts={{ lg: layout }}
-                    breakpoints={{ lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 }}
-                    cols={{ lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 }}
-                    rowHeight={100}
-                    width={containerWidth}
-                    isDraggable
-                    isResizable
-                    onLayoutChange={handleLayoutChange}
-                    draggableHandle=".drag-handle"
-                >
-                    {pinnedIds.map((itemId) => {
-                        const chart = pinnedCharts.find(c => c.chart_id === itemId);
-                        const textBlock = textBlocks.find(t => t.id === itemId);
-
-                        if (chart) {
-                            return (
-                                <div key={itemId} className="flex flex-col group">
-                                    <ChartCard>
-                                        <div className="flex items-center justify-between mb-4">
-                                            <div className="flex items-center gap-2 min-w-0">
-                                                <GripVertical className="drag-handle w-4 h-4 text-muted-foreground/30 cursor-grab flex-shrink-0 hover:text-purple-400 transition-colors" />
-                                                <h3 className="text-sm font-semibold text-foreground truncate">{chart.title}</h3>
-                                            </div>
-                                            <button onClick={() => removeItem(itemId)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-muted-foreground hover:text-red-400 transition-all">
-                                                <X className="w-4 h-4" />
-                                            </button>
-                                        </div>
-                                        <div className="flex-1 min-h-0">
-                                            <Plot
-                                                data={chart.plotly_json.data}
-                                                layout={{
-                                                    ...chart.plotly_json.layout,
-                                                    autosize: true,
-                                                    margin: { l: 40, r: 20, t: 20, b: 40 },
-                                                    paper_bgcolor: 'transparent',
-                                                    plot_bgcolor: 'transparent',
-                                                    font: { color: 'rgba(255,255,255,0.5)', size: 10 },
-                                                    xaxis: { ...chart.plotly_json.layout.xaxis, gridcolor: 'rgba(255,255,255,0.05)', zerolinecolor: 'rgba(255,255,255,0.1)' },
-                                                    yaxis: { ...chart.plotly_json.layout.yaxis, gridcolor: 'rgba(255,255,255,0.05)', zerolinecolor: 'rgba(255,255,255,0.1)' }
-                                                }}
-                                                config={{ displayModeBar: false, responsive: true, displaylogo: false }}
-                                                style={{ width: '100%', height: '100%' }}
-                                                useResizeHandler
-                                            />
-                                        </div>
-                                    </ChartCard>
-                                </div>
-                            );
-                        }
-
-                        if (textBlock) {
-                            return (
-                                <div key={itemId} className="flex flex-col group">
-                                    <div className="rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm p-6 hover:border-white/20 transition-all flex flex-col h-full">
-                                        <div className="flex items-center justify-between mb-4">
-                                            <div className="flex items-center gap-2">
-                                                <GripVertical className="drag-handle w-4 h-4 text-muted-foreground/30 cursor-grab hover:text-purple-400" />
-                                                <Type className="w-4 h-4 text-purple-400" />
-                                                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Note</span>
-                                            </div>
-                                            <button onClick={() => removeItem(itemId)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-muted-foreground hover:text-red-400 transition-all">
-                                                <X className="w-4 h-4" />
-                                            </button>
-                                        </div>
-                                        <div className="flex-1 overflow-auto">
-                                            {editingText === itemId ? (
-                                                <div className="h-full flex flex-col gap-3">
-                                                    <textarea
-                                                        autoFocus
-                                                        value={editContent}
-                                                        onChange={(e) => setEditContent(e.target.value)}
-                                                        className="flex-1 bg-white/5 border border-purple-500/30 rounded-xl p-4 text-sm text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-purple-500/20"
-                                                    />
-                                                    <div className="flex gap-2">
-                                                        <button onClick={() => saveTextEdit(itemId)} className="px-4 py-2 text-xs font-medium bg-purple-600 rounded-lg text-white hover:bg-purple-500 transition-colors">Save</button>
-                                                        <button onClick={() => setEditingText(null)} className="px-4 py-2 text-xs font-medium bg-white/5 rounded-lg text-muted-foreground hover:bg-white/10 transition-colors">Cancel</button>
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div
-                                                    onClick={() => { setEditingText(itemId); setEditContent(textBlock.content); }}
-                                                    className="h-full text-sm text-muted-foreground cursor-text whitespace-pre-wrap hover:text-foreground transition-colors p-2 rounded-lg hover:bg-white/5"
-                                                >
-                                                    {textBlock.content}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            );
-                        }
-
-                        return (
-                            <div key={itemId} className="rounded-xl border border-white/10 bg-white/5 p-4 flex items-center justify-center">
-                                <p className="text-muted-foreground text-sm">Item not found</p>
-                            </div>
-                        );
-                    })}
-                </RG>
-            </div>
-        );
-    };
+    const RG = ResponsiveGrid;
 
     return (
         <div className="min-h-screen bg-background">
             <Navbar />
-
             <main className="container mx-auto px-6 py-8">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                <div className="flex items-center justify-between mb-12">
                     <div className="flex items-center gap-4">
-                        <Link href="/insights" className="p-2 hover:bg-white/5 rounded-lg text-muted-foreground hover:text-foreground transition-all">
-                            <ArrowLeft className="w-5 h-5" />
-                        </Link>
-                        <div>
-                            <div className="flex items-center gap-3">
-                                <h1 className="text-2xl font-bold text-foreground tracking-tight">Executive Dashboard</h1>
-                                {saved && (
-                                    <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-400/10 px-2.5 py-1 rounded-full border border-emerald-400/20 animate-fade-in">
-                                        <Check className="w-3 h-3" />
-                                        Changes Saved
-                                    </span>
-                                )}
-                            </div>
-                            <p className="text-sm text-muted-foreground">Customize your data workspace</p>
-                        </div>
+                        <Link href="/insights" className="p-2 bg-white/5 rounded-xl hover:bg-white/10 transition-all"><ArrowLeft className="w-5 h-5" /></Link>
+                        <h1 className="text-2xl font-black tracking-tight">Executive Workspace</h1>
                     </div>
-                    
                     <div className="flex items-center gap-3">
-                        <button onClick={addTextBlock} className="flex items-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/8 border border-white/10 rounded-xl text-sm font-medium transition-all group">
-                            <Plus className="w-4 h-4 text-purple-400 group-hover:scale-110 transition-transform" />
-                            Add Insight Note
+                        <button onClick={handleProfessionalExport} disabled={isExporting} className="flex items-center gap-2 px-5 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold hover:bg-white/10 transition-all group">
+                            <Target className={`w-4 h-4 text-purple-400 ${isExporting ? 'animate-ping' : 'group-hover:scale-110 transition-transform'}`} />
+                            {isExporting ? "Capturing..." : "Professional Export"}
                         </button>
-                        <button
-                            onClick={handleSave}
-                            disabled={saving}
-                            className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold transition-all ${
-                                saved 
-                                ? "bg-emerald-600/20 text-emerald-400 border border-emerald-600/30" 
-                                : "bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-600/20"
-                            } disabled:opacity-50`}
-                        >
+                        <button onClick={() => setShowKPIModal(true)} className="flex items-center gap-2 px-5 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold hover:bg-white/10 transition-all">
+                            <Calculator className="w-4 h-4 text-emerald-400" /> Custom KPI
+                        </button>
+                        <button onClick={handleSave} disabled={saving} className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold shadow-lg transition-all ${saved ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-500/20"}`}>
                             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                            {saved ? "Layout Secured" : "Save Perspective"}
+                            {saved ? "Synchronized" : "Secure Perspective"}
                         </button>
                     </div>
                 </div>
 
-                {errorMessage && (
-                    <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 mb-8 flex items-center justify-between text-red-400 text-sm animate-fade-in">
-                        <div className="flex items-center gap-3">
-                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-red-500/20 text-xs font-bold">!</span>
-                            {errorMessage}
-                        </div>
-                        <button onClick={() => setErrorMessage(null)} className="p-1 hover:bg-red-500/10 rounded-lg">
-                            <X className="w-4 h-4" />
-                        </button>
-                    </div>
-                )}
-
-                {pinnedIds.length === 0 ? (
-                    <div className="text-center py-32 rounded-3xl border border-dashed border-white/10 bg-white/[0.02]">
-                        <div className="w-20 h-20 bg-white/5 rounded-3xl flex items-center justify-center mx-auto mb-6">
-                            <Pin className="w-10 h-10 text-muted-foreground/20" />
-                        </div>
-                        <h2 className="text-xl font-bold mb-2">Workspace is Empty</h2>
-                        <p className="text-muted-foreground mb-8 max-w-sm mx-auto">Discover key findings in the Insights engine and pin them here to build your narrative.</p>
-                        <Link href="/insights" className="inline-flex items-center gap-2 px-8 py-3.5 bg-purple-600 hover:bg-purple-500 rounded-xl font-bold transition-all shadow-xl shadow-purple-600/25">
-                            Discover Insights
-                        </Link>
-                    </div>
-                ) : (
-                    renderGrid()
-                )}
+                <div ref={containerRef}>
+                    {gridReady && RG && (
+                        <RG
+                            className="layout"
+                            layouts={{ lg: layout }}
+                            breakpoints={{ lg: 1200, md: 996, sm: 768 }}
+                            cols={{ lg: 12, md: 10, sm: 6 }}
+                            rowHeight={100}
+                            width={containerWidth}
+                            onLayoutChange={setLayout}
+                            draggableHandle=".drag-handle"
+                        >
+                            {pinnedIds.map((id) => {
+                                const chart = allCharts.find(c => c.chart_id === id);
+                                const text = textBlocks.find(t => t.id === id);
+                                return (
+                                    <div key={id} className="group" data-chart-id={chart?.chart_id}>
+                                        <div className="h-full rounded-[2rem] bg-slate-900 border border-white/10 p-5 flex flex-col relative">
+                                            <div className="flex items-center justify-between mb-4">
+                                                <div className="flex items-center gap-2 drag-handle cursor-grab active:cursor-grabbing">
+                                                    <GripVertical className="w-4 h-4 text-white/20" />
+                                                    <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{chart ? "Visual" : "Metric"}</span>
+                                                </div>
+                                                <button onClick={() => removeItem(id)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/20 hover:text-red-400 transition-all"><X className="w-4 h-4" /></button>
+                                            </div>
+                                            {chart ? (
+                                                <div className="flex-1 min-h-0">
+                                                    <Plot
+                                                        data={chart.plotly_json.data}
+                                                        layout={{ ...chart.plotly_json.layout, autosize: true, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: { color: 'rgba(255,255,255,0.5)', size: 10 } }}
+                                                        config={{ displayModeBar: false, responsive: true }}
+                                                        style={{ width: '100%', height: '100%' }}
+                                                        useResizeHandler
+                                                    />
+                                                </div>
+                                            ) : (
+                                                <div className="flex-1 flex flex-col justify-center text-center">
+                                                    <div className="p-4 rounded-2xl bg-white/5 border border-white/5 font-bold text-lg">{text?.content}</div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </RG>
+                    )}
+                </div>
             </main>
+
+            {/* Custom KPI Modal */}
+            {showKPIModal && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
+                    <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-10 w-full max-w-lg">
+                        <h2 className="text-2xl font-black mb-8 flex items-center gap-3"><Target className="w-6 h-6 text-emerald-400" /> Forge Custom Metric</h2>
+                        <div className="space-y-6 mb-10">
+                            <div>
+                                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Source Dimension</label>
+                                <select 
+                                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none"
+                                    value={kpiConfig.column}
+                                    onChange={(e) => setKpiConfig({ ...kpiConfig, column: e.target.value })}
+                                >
+                                    <option value="">Select numeric column</option>
+                                    {availableCols.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Aggregation</label>
+                                    <select 
+                                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none"
+                                        value={kpiConfig.aggregation}
+                                        onChange={(e) => setKpiConfig({ ...kpiConfig, aggregation: e.target.value })}
+                                    >
+                                        <option value="sum">Summation</option>
+                                        <option value="avg">Mean Average</option>
+                                        <option value="growth">Growth %</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Metric Label</label>
+                                    <input 
+                                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none"
+                                        placeholder="e.g. Total Revenue"
+                                        value={kpiConfig.label}
+                                        onChange={(e) => setKpiConfig({ ...kpiConfig, label: e.target.value })}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex gap-3">
+                            <button onClick={() => setShowKPIModal(false)} className="flex-1 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-bold transition-all">Abort</button>
+                            <button onClick={createCustomKPI} disabled={creatingKPI || !kpiConfig.column} className="flex-[2] py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-emerald-500/20 disabled:opacity-50">
+                                {creatingKPI ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "Deploy Metric"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Export Progress Modal */}
+            {isExporting && (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/90 backdrop-blur-xl p-6">
+                    <div className="bg-slate-900 border border-white/10 rounded-[3rem] p-12 w-full max-w-xl text-center shadow-2xl shadow-purple-500/10">
+                        <div className="w-24 h-24 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-8 animate-pulse">
+                            <Target className="w-12 h-12 text-indigo-400" />
+                        </div>
+                        <h2 className="text-3xl font-black mb-4">Generating Intelligence</h2>
+                        <p className="text-muted-foreground mb-10 text-sm font-medium leading-relaxed">
+                            We're capturing high-fidelity snapshots of your workspace<br/> 
+                            to build a pixel-perfect professional report.
+                        </p>
+                        
+                        <div className="space-y-4">
+                            <div className="h-3 w-full bg-white/5 rounded-full overflow-hidden border border-white/5">
+                                <div 
+                                    className="h-full bg-gradient-to-r from-indigo-600 to-purple-600 transition-all duration-500 ease-out shadow-[0_0_20px_rgba(99,102,241,0.5)]" 
+                                    style={{ width: `${exportProgress}%` }} 
+                                />
+                            </div>
+                            <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400 px-1">
+                                <span>{exportStatus || 'Generating Intelligence...'}</span>
+                                <span>{exportProgress}%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
-

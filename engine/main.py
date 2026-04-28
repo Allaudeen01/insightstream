@@ -1,4 +1,3 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -28,12 +27,37 @@ from insight_engine import (
     run_insight_engine,
 )
 from session_cache import SessionCache, JobTracker
-from report_generator import ChartGenerator, PDFReportGenerator, ColumnMap, cleanup_temp_files
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks
+from report_generator import ChartGenerator, PDFReportGenerator, ColumnMap, cleanup_temp_files, UnifiedReportGenerator
 
 import tempfile
 from pathlib import Path
 
 SESSION_DIR = Path(tempfile.gettempdir()) / "insightstream_sessions"
+
+import re
+
+def sanitize_insight(text: str, max_length=500) -> str:
+    """Truncate text if too long, replace raw number dumps with warning."""
+    if not text:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    # Detect raw data dumps:
+    #  1) Space-separated number sequences  ("1.5 2.3 3.7 ...")
+    #  2) Comma-separated number lists      ("1.5, 2.3, 3.7, ...")
+    #  3) Lines that are mostly digits (>60% digit characters)
+    if re.search(r'\b\d+(\.\d+)?\s+\d+(\.\d+)?\s+\d+', text):
+        return "[Strategic insight unavailable – raw data suppressed]"
+    if re.search(r'\d+(\.\d+)?,\s*\d+(\.\d+)?,\s*\d+(\.\d+)?,\s*\d+', text):
+        return "[Strategic insight unavailable – raw data suppressed]"
+    # If >60% of characters are digits/dots/commas, it's a data dump
+    digit_chars = sum(1 for c in text if c in '0123456789.,')
+    if len(text) > 50 and digit_chars / max(len(text), 1) > 0.6:
+        return "[Strategic insight unavailable – raw data suppressed]"
+    if len(text) > max_length:
+        text = text[:max_length] + "…"
+    return text
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -184,6 +208,88 @@ def save_dashboard_endpoint(project_id: str, body: DashboardSave):
     db.save_dashboard(project_id, body.layout, body.pinned_chart_ids, body.text_blocks)
     return {"status": "ok"}
 
+class DashboardExportRequest(BaseModel):
+    title: str
+    template: str = "modern"
+    project_name: str = "InsightStream"
+    kpis: dict
+    charts: list[dict] # {id, title, image_base64, error, insight}
+    ai_summary: Optional[str] = ""
+    insights: Optional[list[str]] = []
+    text_blocks: Optional[list[dict]] = []
+
+@app.post("/export-dashboard-pdf/{session_id}")
+async def export_dashboard_pdf(
+    session_id: str,
+    body: DashboardExportRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Unified Pixel-Perfect Export (Multi-page).
+    Receives canonical dashboard assets and assembles a professional PDF.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🚀 [PIPELINE] New Pixel-Perfect Export hit for session: {session_id}")
+    logger.info(f"📦 [PAYLOAD] Received {len(body.charts)} charts, {len(body.insights)} insights.")
+
+    try:
+        out_name = f"Report_{session_id}_{uuid.uuid4().hex[:6]}.pdf"
+        out_path = Path(tempfile.gettempdir()) / out_name
+        
+        # Load session data to get the actual DF for regional charts
+        try:
+            filename, df = load_session(session_id)
+            cols = [c.lower() for c in df.columns]
+            from insight_engine import detect_domain
+            domain_id = detect_domain(cols)
+        except Exception as e:
+            logger.warning(f"Could not load session data for PDF: {e}")
+            df = None
+            domain_id = "general"
+
+        logger.info(f"🛠 [GENERATOR] Instantiating UnifiedReportGenerator with domain: {domain_id}")
+        
+        # SANITIZATION LAYER: Prevent raw data dumps from reaching PDF
+        clean_ai_summary = sanitize_insight(body.ai_summary, max_length=1000)
+        clean_insights = [sanitize_insight(ins, max_length=500) for ins in body.insights]
+        
+        clean_charts = []
+        for ch in body.charts:
+            ch_copy = ch.copy()
+            if "insight" in ch_copy:
+                ch_copy["insight"] = sanitize_insight(ch_copy["insight"], max_length=400)
+            clean_charts.append(ch_copy)
+
+        gen = UnifiedReportGenerator()
+        gen.build_from_assets(
+            output_path=str(out_path),
+            charts=clean_charts,
+            kpis=body.kpis,
+            ai_summary=clean_ai_summary,
+            insights=clean_insights,
+            text_blocks=body.text_blocks,
+            title=body.title,
+            project_name=body.project_name,
+            template=body.template,
+            session_id=session_id,
+            df=df,
+            domain_id=domain_id
+        )
+        logger.info(f"✅ [SUCCESS] PDF generated at: {out_path}")
+        
+        img_dir = Path(tempfile.gettempdir()) / f"insightstream_export_{session_id}"
+        background_tasks.add_task(cleanup_temp_files, str(out_path), str(img_dir))
+        
+        return FileResponse(
+            path=out_path,
+            filename=f"{body.title.replace(' ', '_')}.pdf",
+            media_type="application/pdf"
+        )
+    except Exception as e:
+        logger.error(f"❌ [FAILURE] PDF Export failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/dashboard/{project_id}")
 def load_dashboard_endpoint(project_id: str):
     """Load dashboard layout for a project."""
@@ -191,6 +297,27 @@ def load_dashboard_endpoint(project_id: str):
     if not dashboard:
         return {"project_id": project_id, "layout": [], "pinned_chart_ids": [], "text_blocks": []}
     return dashboard
+
+@app.get("/share/dashboard/{project_id}")
+def load_shared_dashboard(project_id: str):
+    """Public read-only payload for shared dashboard links."""
+    dashboard = db.load_dashboard(project_id)
+    if not dashboard:
+        return {"project_id": project_id, "layout": [], "pinned_chart_ids": [], "text_blocks": [], "charts": []}
+
+    try:
+        viz = generate_visualizations(project_id, max_charts=12)
+        charts = viz.get("charts", [])
+    except Exception:
+        charts = []
+
+    return {
+        "project_id": project_id,
+        "layout": dashboard.get("layout", []),
+        "pinned_chart_ids": dashboard.get("pinned_chart_ids", []),
+        "text_blocks": dashboard.get("text_blocks", []),
+        "charts": charts,
+    }
 
 # ─── Upload (creates project) ───────────────────────────────────
 
@@ -826,6 +953,7 @@ class InsightCard(BaseModel):
     description: str
     impact: str = "medium"   # "high" | "medium" | "low"
     recommendation: str = ""  # Actionable next step
+    decision_implication: str = "" # Strategic next step
     confidence: str = "medium" # "high" | "medium" | "low"
     chart_type: str = "none"  # "bar" | "pie" | "line" | "scatter" | "none"
     chart_data: Optional[dict] = None
@@ -878,6 +1006,7 @@ def get_insights(session_id: str):
             impact=ins.get("impact") or "medium",
             importance=ins.get("impact") or "medium",
             recommendation=ins.get("recommendation") or "",
+            decision_implication=ins.get("decision_implication") or "",
             confidence=ins.get("confidence") or "medium",
             chart_type=ins.get("chart_type") or "none",
             chart_data=ins.get("chart_data"),
@@ -918,8 +1047,84 @@ def get_insights(session_id: str):
 
 # ============== KPI ENGINE ==============
 
-KPI_KEYWORDS = ["revenue", "sales", "profit", "amount", "income", "price", "cost",
-                "total", "quantity", "budget", "expense", "margin"]
+KPI_KEYWORDS = [
+    "revenue", "sales", "profit", "amount", "income", "price", "cost", "total", "quantity", "budget", "expense", "margin",
+    "ltv", "lifetime", "burn", "runway"
+]
+
+class CustomKPIRequest(BaseModel):
+    column: str
+    aggregation: str  # sum | avg | growth
+    label: str
+
+@app.post("/kpis/{session_id}/custom")
+def create_custom_kpi(session_id: str, body: CustomKPIRequest):
+    """Create a user-defined KPI from a selected numeric column and aggregation."""
+    try:
+        _, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if body.column not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Column '{body.column}' not found")
+
+    # Use polars-friendly numeric check
+    if not df[body.column].dtype.is_numeric():
+        raise HTTPException(status_code=400, detail="Custom KPI requires a numeric column")
+
+    aggregation = body.aggregation.lower().strip()
+    if aggregation not in {"sum", "avg", "growth"}:
+        raise HTTPException(status_code=400, detail="aggregation must be one of: sum, avg, growth")
+
+    col_data = df[body.column].drop_nulls()
+    if len(col_data) == 0:
+        raise HTTPException(status_code=400, detail="Column has no non-null values")
+
+    kpi = {
+        "label": body.label.strip() or f"Custom {body.column}",
+        "column": body.column,
+        "avg": round(float(col_data.mean()), 2),
+        "min": round(float(col_data.min()), 2),
+        "max": round(float(col_data.max()), 2),
+        "count": len(col_data),
+    }
+
+    if aggregation == "sum":
+        metric_value = float(col_data.sum())
+        kpi["value"] = metric_value
+        kpi["formatted"] = _format_number(metric_value)
+        kpi["trend"] = "flat"
+        kpi["change_pct"] = 0
+    elif aggregation == "avg":
+        metric_value = float(col_data.mean())
+        kpi["value"] = metric_value
+        kpi["formatted"] = _format_number(metric_value)
+        kpi["trend"] = "flat"
+        kpi["change_pct"] = 0
+    else:
+        # Re-use logic for growth from profile if possible, or simple split
+        metric_value = 0.0
+        change_pct = 0.0
+        # Try to find a temporal column
+        profile = _cache.get(session_id, "profile")
+        date_cols = profile.temporals if profile else []
+        
+        if date_cols:
+            ordered = df.sort(date_cols[0])
+            midpoint = len(ordered) // 2
+            if midpoint > 0:
+                first_half = float(ordered[:midpoint][body.column].drop_nulls().sum())
+                second_half = float(ordered[midpoint:][body.column].drop_nulls().sum())
+                metric_value = second_half
+                if first_half != 0:
+                    change_pct = round(((second_half - first_half) / abs(first_half)) * 100, 1)
+        
+        kpi["value"] = metric_value
+        kpi["formatted"] = f"{change_pct:+.1f}%"
+        kpi["change_pct"] = change_pct
+        kpi["trend"] = "up" if change_pct > 2 else ("down" if change_pct < -2 else "flat")
+
+    return {"session_id": session_id, "kpi": kpi}
 
 def _format_number(val: float) -> str:
     """Format large numbers for display."""
@@ -1330,96 +1535,15 @@ async def debug_columns(session_id: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 @app.get("/export-report/{session_id}")
-async def export_report(session_id: str, background_tasks: BackgroundTasks):
+async def export_report(session_id: str):
     """
-    Generate a professional PDF report with embedded Matplotlib/Seaborn charts.
-    Uses robust ColumnMap logic for dynamic visualization.
+    [DEPRECATED] This endpoint used the old Matplotlib generator.
+    Please use the new 'Professional Export' button in the dashboard/insights UI.
     """
-    try:
-        # 1. Load Data
-        filename, pl_df = load_session(session_id)
-        
-        # Performance: Limit rows if > 10k
-        if len(pl_df) > 10000:
-            df = pl_df.sample(10000, seed=42).to_pandas()
-        else:
-            df = pl_df.to_pandas()
-        
-        if df.empty:
-            raise HTTPException(status_code=400, detail="Dataset is empty")
-            
-        # 2. Get Insights/Brief
-        insights_data_obj = get_insights(session_id)
-        
-        # 3. Generate Charts (Using isolated session directory)
-        chart_gen = ChartGenerator(session_id=session_id)
-        temp_dir = chart_gen.output_dir
-        charts, cm = chart_gen.generate_all(df)   # ← returns (dict, ColumnMap)
-
-        if not charts:
-            log.error(f"No charts generated for session {session_id}")
-            raise HTTPException(status_code=500, detail="No charts could be generated. Check /debug-columns.")
-
-        # 4. Build Insights (Dynamic labels using ColumnMap)
-        num = cm.numeric or "value"
-        cat = cm.category or "category"
-        reg = cm.region or "region"
-        
-        insights_dict = {
-            "executive_summary": getattr(insights_data_obj, 'executive_summary', f"Analysis of {filename} patterns."),
-            "category": f"{cat} breakdown shows clear performance variation. The top {cat.lower()} accounts for a significant share of total {num.lower()}.",
-            "region": f"Regional analysis reveals {reg} as a key differentiator in {num.lower()} performance.",
-            "distribution": f"The {num.lower()} distribution shows the statistical spread and volatility across the dataset.",
-            "correlation": f"Numerical interdependencies highlight how key levers impact {num.lower()}."
-        }
-        
-        # 5. Generate PDF
-        print("Building robust PDF report...")
-        report_filename = f"InsightStream_Report_{session_id[:8]}.pdf"
-        output_pdf_path = os.path.join(temp_dir, report_filename)
-        
-        pdf_gen = PDFReportGenerator()
-        pdf_gen.build(
-            df=df,
-            charts=charts,
-            insights=insights_dict,
-            output_path=output_pdf_path,
-            cm=cm,
-            title=f"Analysis Report - {filename}"
-        )
-        
-        # 6. Schedule Cleanup
-        background_tasks.add_task(cleanup_temp_files, str(temp_dir), output_pdf_path)
-        
-        # 7. Return as FileResponse
-        return FileResponse(
-            output_pdf_path, 
-            media_type="application/pdf",
-            filename=f"InsightStream_Report_{filename.split('.')[0]}.pdf"
-        )
-
-    except Exception as e:
-        import traceback
-        print(f"Export Error: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
-
-        
-        # 5. Schedule Cleanup
-        background_tasks.add_task(cleanup_temp_dir, temp_dir, output_pdf_path)
-        
-        # 6. Return as FileResponse
-        return FileResponse(
-            output_pdf_path, 
-            media_type="application/pdf",
-            filename=f"InsightStream_Report_{filename.split('.')[0]}.pdf"
-        )
-
-    except Exception as e:
-        import traceback
-        print(f"Export Error: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+    raise HTTPException(
+        status_code=410, 
+        detail="This endpoint is deprecated. Use POST /export-dashboard-pdf instead."
+    )
 
 
 
@@ -1441,6 +1565,15 @@ class VizResponse(BaseModel):
     charts: List[ChartData]
     total_generated: int
 
+def _normalize_query_list(value: Optional[List[str]]) -> Optional[List[str]]:
+    """Normalize FastAPI Query defaults when endpoint functions are called directly."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    default = getattr(value, "default", None)
+    return default if isinstance(default, list) or default is None else None
+
 @app.get("/generate-viz/{session_id}")
 def generate_visualizations(
     session_id: str, 
@@ -1456,14 +1589,13 @@ def generate_visualizations(
     """
     print("ENTERED generate_visualizations")
     try:
-        print(f"Calling _internal_gen_viz with session_id={session_id}")
         resp = _internal_gen_viz(
             session_id=session_id,
             max_charts=max_charts,
             groupby=groupby,
-            chart_types=chart_types,
+            chart_types=_normalize_query_list(chart_types),
             focus=focus,
-            exclude_types=exclude_types
+            exclude_types=_normalize_query_list(exclude_types)
         )
         try:
             db.add_history(
@@ -1475,14 +1607,11 @@ def generate_visualizations(
         except Exception as e:
             print(f"Warning: Could not log history: {e}")
         return resp
-    except HTTPException as he:
-        raise he
-    except BaseException as e:
+    except Exception as e:
         import traceback
         trace = traceback.format_exc()
-        print(f"CRITICAL ERROR (BaseException): {e}")
-        print(trace)
-        return JSONResponse(status_code=500, content={"detail": f"Backend Error: {str(e)}", "trace": trace})
+        print(f"CRITICAL VIZ ERROR: {e}\n{trace}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 def _internal_gen_viz(
     session_id: str, 
@@ -1533,8 +1662,12 @@ def _internal_gen_viz(
     _use_smart = not groupby and not chart_types and not focus and not exclude_types
     if _use_smart:
         try:
+            from insight_engine import detect_domain
+            _domain_id = detect_domain(list(df.columns))
             rec = SmartChartRecommender()
-            smart_charts = rec.recommend(df, _profile, [], max_charts=max_charts)
+            smart_charts = rec.recommend(df, _profile, [],
+                                         max_charts=max_charts,
+                                         domain_id=_domain_id)
             return VizResponse(
                 session_id=session_id,
                 charts=[ChartData(**c) for c in smart_charts],
@@ -2842,111 +2975,130 @@ def export_excel_report(session_id: str):
     try:
         # 1. Get Data
         filename, df = load_session(session_id)
+        df_pandas = df.to_pandas()
         
         # 2. Get Insights
         insights_data = get_insights(session_id)
+        insights = insights_data.strategic_brief
         
-        # 3. Get Charts (limit to top 5 for performance)
-        viz_data = _internal_gen_viz(session_id, max_charts=5)
+        # 3. Get Chart Titles from Engine
+        recommender = SmartChartRecommender()
+        chart_titles = recommender.get_chart_titles(df)
         
         # 4. Create Workbook
         wb = Workbook()
         
+        # ========================
         # Sheet 1: Cleaned Data
+        # ========================
         ws_data = wb.active
         ws_data.title = "Cleaned Data"
         
+        # Write dataframe
+        for r_idx, row in enumerate(dataframe_to_rows(df_pandas, index=False, header=True), 1):
+            ws_data.append(row)
+            
         # Write header with style
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-        
-        # Write dataframe
-        pdf = df.to_pandas()
-        for r_idx, row in enumerate(dataframe_to_rows(pdf, index=False, header=True), 1):
-            for c_idx, value in enumerate(row, 1):
-                cell = ws_data.cell(row=r_idx, column=c_idx, value=value)
-                if r_idx == 1:
-                    cell.font = header_font
-                    cell.fill = header_fill
-        
-        # Auto-adjust column widths (simple estimation)
-        for col in ws_data.columns:
-            max_length = 0
-            column = col[0].column_letter # Get the column name
-            for cell in col:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = (max_length + 2)
-            ws_data.column_dimensions[column].width = min(adjusted_width, 50) # Cap width
-
-        # Sheet 2: Insights
-        ws_insights = wb.create_sheet("Insights")
-        ws_insights.column_dimensions['A'].width = 100
-        
-        ws_insights['A1'] = "Executive Summary"
-        ws_insights['A1'].font = Font(size=14, bold=True, color="4F46E5")
-        
-        ws_insights['A2'] = insights_data.executive_summary
-        ws_insights['A2'].alignment = Alignment(wrap_text=True)
-        
-        ws_insights['A4'] = "Key Findings"
-        ws_insights['A4'].font = Font(size=12, bold=True)
-        
-        row = 5
-        for insight in insights_data.strategic_brief:
-            ws_insights[f'A{row}'] = f"• {insight.title}: {insight.description}"
-            ws_insights[f'A{row}'].alignment = Alignment(wrap_text=True)
-            row += 1
+        for cell in ws_data[1]:
+            cell.font = header_font
+            cell.fill = header_fill
             
-        row += 1
-        ws_insights[f'A{row}'] = "Recommendations"
-        ws_insights[f'A{row}'].font = Font(size=12, bold=True)
-        row += 1
-        
-        for rec in insights_data.recommendations:
-            ws_insights[f'A{row}'] = f"• {rec}"
-            row += 1
+        # Freeze top row
+        ws_data.freeze_panes = 'A2'
 
+        # ========================
+        # Sheet 2: Insights
+        # ========================
+        ws_insights = wb.create_sheet("Insights")
+        ws_insights.column_dimensions['A'].width = 110
+        
+        # Executive Summary
+        ws_insights.append(["EXECUTIVE SUMMARY"])
+        ws_insights['A1'].font = Font(size=14, bold=True, color="4F46E5")
+        ws_insights.append([insights_data.executive_summary])
+        ws_insights['A2'].alignment = Alignment(wrap_text=True)
+        ws_insights.append([""])
+        
+        critical_insights = [ins for ins in insights if ins.impact in ("Critical", "High", "🔴 Critical")]
+        if not critical_insights:
+            ws_insights.append(["No Critical/High-impact strategic risks detected."])
+            ws_insights[f'A{ws_insights.max_row}'].font = Font(italic=True)
+        else:
+            ws_insights.append(["PRIORITY STRATEGIC RISKS"])
+            ws_insights[f'A{ws_insights.max_row}'].font = Font(bold=True)
+            for ins in critical_insights:
+                ws_insights.append([f"• [{ins.impact}] {ins.title}"])
+        
+        ws_insights.append([""])
+        ws_insights.append(["KEY ANALYTICAL FINDINGS"])
+        ws_insights[f'A{ws_insights.max_row}'].font = Font(size=12, bold=True)
+        
+        # Group insights by impact
+        from collections import defaultdict
+        by_impact = defaultdict(list)
+        for ins in insights:
+            # Normalize impact string for grouping
+            imp = ins.impact.replace("🔴 ", "").replace("🟠 ", "").replace("🟢 ", "").title()
+            by_impact[imp].append(ins)
+            
+        # Define colors
+        impact_colors = {
+            "Critical": "FF0000",
+            "High": "FF0000",
+            "Important": "FFA500",
+            "Medium": "FFA500",
+            "Minor": "008000",
+            "Low": "008000"
+        }
+        
+        # Sort impacts by severity
+        order = ["Critical", "High", "Important", "Medium", "Minor", "Low"]
+        for impact_key in order:
+            if impact_key not in by_impact:
+                continue
+            
+            # Write impact header
+            ws_insights.append([f"--- {impact_key} Insights ---"])
+            for cell in ws_insights[ws_insights.max_row]:
+                cell.font = Font(bold=True, color=impact_colors.get(impact_key, "000000"))
+            
+            for ins in by_impact[impact_key]:
+                ws_insights.append([f"• {ins.title}"])
+                ws_insights[f'A{ws_insights.max_row}'].font = Font(bold=True)
+                ws_insights.append([ins.description.replace("**", "")])
+                ws_insights[f'A{ws_insights.max_row}'].alignment = Alignment(wrap_text=True)
+                ws_insights.append([f"Recommendation: {ins.recommendation}"])
+                ws_insights[f'A{ws_insights.max_row}'].font = Font(italic=True)
+                ws_insights.append([""])
+                
+        # Recommendations Summary
+        ws_insights.append([""])
+        ws_insights.append(["ACTIONABLE RECOMMENDATIONS"])
+        ws_insights[f'A{ws_insights.max_row}'].font = Font(size=12, bold=True)
+        recs = [ins.recommendation for ins in insights if ins.recommendation and "No specific" not in ins.recommendation]
+        for rec in recs:
+            ws_insights.append([f"• {rec}"])
+
+        # ========================
         # Sheet 3: Visualizations
+        # ========================
         ws_viz = wb.create_sheet("Visualizations")
         ws_viz.column_dimensions['A'].width = 100
         
-        current_row = 1
-        for chart in viz_data.charts:
-            # Title
-            ws_viz[f'A{current_row}'] = chart.title
-            ws_viz[f'A{current_row}'].font = Font(size=14, bold=True)
-            current_row += 1
-            
-            try:
-                # Generate static image
-                # chart.plotly_json is a dict, modify layout for static export
-                fig = go.Figure(chart.plotly_json)
-                fig.update_layout(template="plotly_white") # Better for printing/Excel
-                
-                # Kaleido static image generation
-                img_bytes = fig.to_image(format="png", width=800, height=500, scale=2)
-                
-                img = Image(io.BytesIO(img_bytes))
-                ws_viz.add_image(img, f'A{current_row}')
-                current_row += 26  # Space for image (approx 500px height + margin)
-                
-                # Insight reason
-                ws_viz[f'A{current_row}'] = f"Insight: {chart.insight_reason}"
-                ws_viz[f'A{current_row}'].font = Font(italic=True, color="555555")
-                current_row += 3
-                
-                # Separator
-                ws_viz[f'A{current_row}'] = "" 
-                current_row += 1
-                
-            except Exception as e:
-                # Fallback if image generation fails
-                ws_viz[f'A{current_row}'] = f"[Image could not be generated: {str(e)}]"
-                current_row += 2
+        # List chart titles here
+        ws_viz.append(["DASHBOARD VISUALIZATIONS"])
+        ws_viz['A1'].font = Font(size=14, bold=True, color="4F46E5")
+        ws_viz.append([""])
+        
+        # We reuse _internal_gen_viz for actual images if we wanted, 
+        # but the user patch only lists titles for now.
+        for chart_name, title in chart_titles.items():
+            ws_viz.append([title])
+            ws_viz[f'A{ws_viz.max_row}'].font = Font(bold=True)
+            ws_viz.append(["[Image Asset Placeholder]"])
+            ws_viz.append([""])
 
         # Save to buffer
         output = io.BytesIO()
@@ -2960,6 +3112,10 @@ def export_excel_report(session_id: str):
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename={export_filename}"}
         )
+
+    except Exception as e:
+         print(f"Export Error: {e}")
+         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
     except Exception as e:
          print(f"Export Error: {e}")

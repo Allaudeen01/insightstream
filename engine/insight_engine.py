@@ -17,12 +17,17 @@ Components:
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
 import polars as pl
 import pandas as pd
 import numpy as np
+
+from report_generator import TEMPLATES
+
+log = logging.getLogger(__name__)
 
 pd.set_option('display.max_colwidth', None)
 
@@ -183,6 +188,12 @@ class ColumnClassifier:
                 return ColumnProfile(col, "identifier", n_unique=n_unique,
                                      missing_pct=missing_pct, sample_values=sample)
 
+            # Pure-uniqueness identifier — Country/Patient_ID/Email-style.
+            # Strict 0.95 threshold so 70% comments stay 'text'.
+            if uniqueness_ratio >= 0.95 and n_unique > 50:
+                return ColumnProfile(col, "identifier", n_unique=n_unique,
+                                     missing_pct=missing_pct, sample_values=sample)
+
             # ── Binary ────────────────────────────────────────────────────
             if n_unique <= 2:
                 return ColumnProfile(col, "binary", n_unique=n_unique,
@@ -285,6 +296,21 @@ class ColumnClassifier:
 # 2.5 DOMAIN DETECTION ENGINE (Step 1)
 # ============================================================
 
+def detect_domain(columns: list[str]) -> str:
+    """Identify the dataset domain using strict column keyword matching."""
+    cols = set(c.lower().strip() for c in columns)
+    
+    # Happiness: all three must be present
+    if {"happiness score", "gdp per capita", "life expectancy"}.issubset(cols):
+        return "happiness"
+    
+    # E‑commerce: at least two of these
+    if len({"sales", "revenue", "order", "profit"} & cols) >= 2:
+        return "ecommerce"
+    
+    return "general"
+
+
 class DomainDetector:
     """Identify the dataset domain using column signatures and patterns."""
     
@@ -298,7 +324,10 @@ class DomainDetector:
     }
 
     def detect(self, profile: DataProfile) -> dict:
-        cols = {c.lower() for c in profile.profiles.keys()}
+        cols_list = list(profile.profiles.keys())
+        simple_id = detect_domain(cols_list)
+        
+        cols = {c.lower() for c in cols_list}
         scores = {}
         
         for domain, keywords in self.DOMAINS.items():
@@ -307,7 +336,8 @@ class DomainDetector:
                 scores[domain] = len(overlap)
         
         if not scores:
-            return {"name": "Generic Dataset", "confidence": "low", "reason": "No strong domain-specific keywords detected in column headers."}
+            name = "Socio-economic" if simple_id == 'happiness' else "E-commerce" if simple_id == 'ecommerce' else "Generic Dataset"
+            return {"name": name, "confidence": "low", "reason": "No strong domain-specific keywords detected in column headers.", "id": simple_id}
             
         best_domain = max(scores, key=scores.get)
         count = scores[best_domain]
@@ -318,7 +348,9 @@ class DomainDetector:
         
         reason = f"Detected {count} keyword signals ({', '.join(list(cols.intersection(self.DOMAINS[best_domain]))[:3])}) matching {best_domain} patterns."
         
-        return {"name": best_domain, "confidence": confidence, "reason": reason}
+        log.info(f"DOMAIN_ENGINE: Detected domain '{best_domain}' (id: {simple_id}) with {confidence} confidence.")
+        return {"name": best_domain, "confidence": confidence, "reason": reason, "id": simple_id}
+
 
 # ============================================================
 # 2.6 KEY DRIVER ANALYZER (Step 2)
@@ -327,13 +359,20 @@ class DomainDetector:
 class KeyDriverAnalyzer:
     """Analyze correlations to detect key drivers of main target variables."""
 
-    def analyze(self, df: pl.DataFrame, profile: DataProfile) -> dict:
+    def analyze(self, df: pl.DataFrame, profile: DataProfile, domain_id: str = "general") -> dict:
         num_cols = [c for c in profile.numericals if c not in profile.identifiers]
         if len(num_cols) < 2:
             return {"drivers": [], "matrix": {}}
             
-        # Select target variable (Revenue > Profit > First numerical)
-        target = profile.revenue_col or next((c for c in num_cols if "profit" in c.lower()), num_cols[0])
+        # Get thresholds from TEMPLATES
+        template = TEMPLATES.get(domain_id, TEMPLATES["general"])
+        high_threshold = template.get("high_correlation_threshold", 0.70)
+        secondary_threshold = template.get("secondary_threshold", 0.40)
+
+        # Select target variable (Domain Target > Revenue > Profit > First numerical)
+        target = template.get("target_metric")
+        if not target or target not in df.columns:
+            target = profile.revenue_col or next((c for c in num_cols if "profit" in c.lower()), num_cols[0])
         
         drivers = []
         try:
@@ -347,10 +386,10 @@ class KeyDriverAnalyzer:
                 if col == target: continue
                 
                 raw_corr = corr_matrix.loc[target, col]
-                if abs(r_val) >= 0.7:
+                if abs(r_val) >= high_threshold:
                     strength = "Strong Driver"
                     priority = "🔴"
-                elif abs(r_val) >= 0.4:
+                elif abs(r_val) >= secondary_threshold:
                     strength = "Moderate Driver"
                     priority = "🟠"
                 else:
@@ -409,9 +448,11 @@ class KeyDriverAnalyzer:
 class DecisionIntelligenceSynthesizer:
     """Merge related signals into 2-4 high-quality strategic insights."""
 
-    def synthesize(self, insights: list[BusinessInsight], drivers: dict) -> list[BusinessInsight]:
+    def synthesize(self, insights: list[BusinessInsight], drivers: dict, domain_id: str = "general") -> list[BusinessInsight]:
         if not insights:
             return []
+            
+        template = TEMPLATES.get(domain_id, TEMPLATES["general"])
             
         # 1. Detect Anomalies from Driver Analysis (Step 5)
         for d in drivers.get("drivers", []):
@@ -448,23 +489,41 @@ class DecisionIntelligenceSynthesizer:
                 others = [i.title for i in topic_insights[1:3]]
                 best.evidence += f" | Also supported by secondary signals in: {', '.join(others)}."
             
-        # 3. Fallback logic (Step 1 - Validate Synthesizer Output)
-        if not compressed:
-            print("WARNING SYNT: No insights generated, using fallback.")
+            compressed.append(best)
+            
+        # 3. Fallback logic & Contradiction Guard
+        # Check both emoji impact and string severity for symmetry
+        high_impact_insights = [
+            i for i in compressed 
+            if "🔴" in str(i.impact) 
+            or str(i.impact).lower() == "high" 
+            or str(i.impact).lower() == "critical"
+        ]
+        
+        # Also check for high-impact drivers
+        high_threshold = template.get("high_correlation_threshold", 0.70)
+        has_high_driver = any(abs(d.get('r', 0)) >= high_threshold for d in drivers.get('drivers', []))
+
+        if not compressed and not has_high_driver:
+            print("WARNING SYNT: No high-impact insights or drivers found, using fallback.")
             compressed.append(BusinessInsight(
                 title="No Significant Insights Detected",
                 description="The current analytical session did not exhibit patterns meeting the high-impact strategic threshold.",
                 why_it_matters="Data homogeneity or limited variability may be preventing the isolation of distinct business drivers.",
-                evidence="Statistical variance within acceptable margins.",
+                evidence=f"No correlations exceeded the {high_threshold} domain threshold.",
                 decision_implication="Collect more granular data or refine the analytical focus variables to isolate deeper trends.",
                 impact="🟢 Minor",
                 rule_type="fallback"
             ))
+        elif high_impact_insights or has_high_driver:
+            # If we have high impact insights or drivers, ensure no fallback exists
+            # This "suppress if high-impact" rule is essential for clean narrative
+            compressed = [i for i in compressed if i.rule_type != "fallback"]
             
         return compressed[:4]
 
-
 # ============================================================
+
 # 3. METRIC COMPUTER
 # ============================================================
 
@@ -1060,13 +1119,14 @@ class BusinessRuleEngine:
                         continue
                     if abs(corr) >= 0.7:
                         direction = "increases" if corr > 0 else "decreases"
+                        impact = "Critical" if abs(corr) >= 0.85 else "Important"
                         insights.append(BusinessInsight(
                             title=f"Systemic Linkage: {c1} & {c2}",
                             description=f"Strong decision-relevant linkage detected where {c1} acts as a reliable predictor for {c2} behavior.",
                             why_it_matters="Predictive accuracy is highest when variables are strongly coupled. This linkage should be the foundation of any forecasting models.",
                             evidence=f"Correlation coefficient: {corr:.2f} | Strength: {'High' if abs(corr) >= 0.7 else 'Moderate'}",
                             decision_implication=f"Incorporate both {c1} and {c2} as primary features in all future predictive modeling efforts. Use {c1} as a leading indicator for {c2} performance.",
-                            impact="🟠 Important",
+                            impact=impact,
                             recommendation=f"Foundation for predictive modeling identified via {c1}/{c2} linkage.",
                             rule_type="correlation_matrix"
                         ))
@@ -1149,23 +1209,17 @@ class BusinessRuleEngine:
         return insights
 
     def _rule_domain_detection(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
-        """Detect if the dataset belongs to a specific industry domain."""
-        cols = [c.lower() for c in df.columns]
-        
-        retail_keywords = {"sku", "inventory", "stock", "warehouse", "order", "shipping", "customer"}
-        saas_keywords = {"subscription", "plan", "mrr", "churn", "trial", "user_id"}
-        
-        domain = "General Business"
-        if sum(1 for k in retail_keywords if any(k in c for c in cols)) >= 3:
-            domain = "Retail & E-commerce"
-        elif sum(1 for k in saas_keywords if any(k in c for c in cols)) >= 2:
-            domain = "SaaS / Digital Services"
+        """Detect if the dataset belongs to a specific industry domain using centralized logic."""
+        domain_id = detect_domain(df.columns)
+        domain_name = domain_id.replace("_", " ").title()
+        if domain_id == "general":
+            domain_name = "General Business"
             
         return [BusinessInsight(
-            title=f"Domain Intelligence Detected: {domain}",
-            description=f"InsightStream has identified this dataset as {domain} data based on column signatures.",
+            title=f"Domain Intelligence Detected: {domain_name}",
+            description=f"InsightStream has identified this dataset as {domain_name} data based on specific column signatures and TEMPLATES mapping.",
             why_it_matters="Applying domain-specific heuristics allows for more accurate target variable identification and risk modeling.",
-            evidence=f"Detected keywords matching industry standards for {domain}.",
+            evidence=f"Detected signatures matching '{domain_id}' patterns.",
             impact="🟢 Minor",
             recommendation="Review the Strategic Brief section for industry-aligned operational suggestions.",
             rule_type="domain_detection"
@@ -1293,6 +1347,7 @@ class InsightNarrator:
                 "description": final_desc,
                 "impact": ins.impact, 
                 "recommendation": ins.recommendation,
+                "decision_implication": ins.decision_implication,
                 "is_unexpected": ins.is_unexpected,
                 "chart_type": ins.chart_type,
                 "chart_data": ins.chart_data,
@@ -1316,6 +1371,7 @@ class SmartChartRecommender:
         profile: DataProfile,
         insights: list[BusinessInsight],
         max_charts: int = 8,
+        domain_id: str = "general"
     ) -> list[dict]:
         """Return a list of chart spec dicts ready for the existing Plotly renderer."""
         import plotly.express as px
@@ -1325,6 +1381,26 @@ class SmartChartRecommender:
         pdf = df.to_pandas()
         charts = []
         chart_ids_used: set[str] = set()
+
+        # Re-detect domain when caller passed the default 'general'
+        # but the dataset is clearly a known domain.
+        if domain_id == "general":
+            redetected = detect_domain(list(df.columns))
+            if redetected != "general":
+                domain_id = redetected
+
+        template = TEMPLATES.get(domain_id, TEMPLATES["general"])
+        target_label = template.get("target_metric", "Value")
+
+        # When domain is still 'general' (no template matched), the literal
+        # "Key Performance Indicator" placeholder is meaningless. Use the
+        # actual revenue/price column from the classifier profile instead.
+        if domain_id == "general" and target_label == "Key Performance Indicator":
+            actual_metric = (profile.revenue_col
+                             or profile.price_col
+                             or (profile.numericals[0] if profile.numericals else None))
+            if actual_metric:
+                target_label = actual_metric
 
         def add(chart_id: str, spec: dict) -> None:
             if chart_id not in chart_ids_used and len(charts) < max_charts:
@@ -1356,18 +1432,18 @@ class SmartChartRecommender:
                 )
                 fig = px.bar(
                     grp, x=rev_col, y=cat, orientation="h",
-                    title=get_smart_title(f"Revenue by {cat}", cat, "Revenue"),
+                    title=f"{target_label} by {cat}",
                     color=rev_col, color_continuous_scale="Viridis",
                     text_auto=".2s"
                 )
                 fig.update_layout(template="plotly_dark",
                                   coloraxis_showscale=False, showlegend=False,
-                                  xaxis_title="Revenue")
+                                  xaxis_title=target_label)
                 add("revenue_by_cat", {
                     "chart_id": "revenue_by_cat",
                     "chart_type": "bar",
-                    "title": get_smart_title(f"Revenue by {cat}", cat, "Revenue"),
-                    "description": f"Total revenue breakdown across {cat} segments",
+                    "title": f"{target_label} by {cat}",
+                    "description": f"Total {target_label} breakdown across {cat} segments",
                     "plotly_json": json.loads(fig.to_json()),
                     "columns_used": [cat, price_col] + ([qty_col] if qty_col else []),
                     "priority_score": 90,
@@ -1584,32 +1660,30 @@ class SmartChartRecommender:
                 pass
 
         # ── 7. Top N Categorical count (bar) ────────────────────────────────
+        # Shows record COUNT per category, NOT the metric.
         if cat:
             try:
                 counts = pdf[cat].value_counts().reset_index().head(10)
                 counts.columns = [cat, "count"]
-                
-                # BUG 4 FIX: Intentional highlighting instead of continuous scale
                 colors = ["#6B5CE7" if i == 0 else "#CBD5E1" for i in range(len(counts))]
                 fig = px.bar(
                     counts, x=cat, y="count",
-                    title=f"Which {cat} has the most orders?",
+                    title=f"Records per {cat}",
                     text_auto=True
                 )
-                
                 fig.update_traces(marker_color=colors)
                 fig.update_layout(template="plotly_dark",
                                   coloraxis_showscale=False, showlegend=False,
-                                  yaxis_title="Order Volume")
+                                  yaxis_title="Records")
                 add("count_by_cat", {
                     "chart_id": "count_by_cat",
                     "chart_type": "bar",
-                    "title": f"Which {cat} has the most orders?",
-                    "description": f"Number of orders per {cat} — volume ≠ revenue",
+                    "title": f"Records per {cat}",
+                    "description": f"Number of records in each {cat}",
                     "plotly_json": json.loads(fig.to_json()),
                     "columns_used": [cat],
                     "priority_score": 70,
-                    "insight_reason": "Order volume distribution by category",
+                    "insight_reason": "Volume distribution by category",
                     "interest_level": "recommended"
                 })
             except Exception:
@@ -1853,21 +1927,23 @@ def run_insight_engine(
             f"{len(df):,} for fast analysis. Metrics are statistically representative."
         )
 
-    _progress("generating_charts", 85)
-    chart_rec  = SmartChartRecommender()
-    charts     = chart_rec.recommend(df, profile, insights, max_charts=max_charts)
-
-    _progress("detecting_domain", 90)
+    # Move Domain Detection BEFORE chart recommendation (Fix for UnboundLocalError)
+    _progress("detecting_domain", 75)
     domain_engine = DomainDetector()
     domain_info = domain_engine.detect(profile)
-    
-    _progress("analyzing_drivers", 95)
+    domain_id = domain_info.get("id", "general")
+
+    _progress("analyzing_drivers", 80)
     driver_engine = KeyDriverAnalyzer()
-    driver_info = driver_engine.analyze(df, profile)
+    driver_info = driver_engine.analyze(df, profile, domain_id=domain_id)
 
     # Step 4: Insight Synthesis & Compression (V2 Pipeline)
     synthesizer = DecisionIntelligenceSynthesizer()
-    compressed_insights = synthesizer.synthesize(insights, driver_info)
+    compressed_insights = synthesizer.synthesize(insights, driver_info, domain_id=domain_id)
+
+    _progress("generating_charts", 85)
+    chart_rec  = SmartChartRecommender()
+    charts     = chart_rec.recommend(df, profile, compressed_insights, max_charts=max_charts, domain_id=domain_id)
 
     # Executive summary (Step 7: Strategic Brief)
     high_count = sum(1 for i in insights if "🔴" in str(i.impact))
@@ -1939,25 +2015,40 @@ def _build_exec_summary(
 ) -> str:
     """Step 7: Generate High-End Executive Strategic Brief (3-5 lines)."""
     rows = len(df)
-    target = driver_info.get("target", "key metrics")
-    drivers = [d["column"] for d in driver_info.get("drivers", []) if "Strong" in d.get("strength", "")]
-    
+    domain_id = domain_info.get("id", "general")
+    template = TEMPLATES.get(domain_id, TEMPLATES["general"])
+    target = template["target_metric"]
+
+    # When domain is 'general', substitute real values for the placeholder
+    # phrases so the brief reads naturally on unknown-domain datasets.
+    domain_name = domain_info.get("name", "Generic Dataset")
+    if domain_id == "general":
+        if target == "Key Performance Indicator":
+            actual_metric = (profile.revenue_col
+                             or profile.price_col
+                             or (profile.numericals[0] if profile.numericals else "the primary metric"))
+            target = actual_metric
+        if domain_name == "Generic Dataset":
+            domain_name = "data"
+
     # 5-Part Structure
     # 1. Overall system behavior
-    line1 = f"Strategic Brief: The {domain_info['name']} system is operating at a scale of {rows:,} records with stable high-level consistency."
+    line1 = f"Strategic Brief: The {domain_name} system is operating at a scale of {rows:,} records with stable high-level consistency."
     
-    # 2. Primary driver
-    if drivers:
-        line2 = f"Internal logic is primarily gated by {drivers[0]}, which serves as the fundamental catalyst for {target} outcomes."
+    # 2. Primary driver (Strict Logic: Absolute r >= 0.8)
+    drivers = driver_info.get("drivers", [])
+    primary = next((d for d in drivers if abs(d.get('r', 0)) >= 0.8), None)
+    if primary:
+        line2 = f"Internal logic is primarily gated by {primary['column']}, which serves as the fundamental catalyst for {target} outcomes."
     else:
         line2 = f"Analytical focus is centered on the optimization of {target} across all categorical segments."
         
-    # 3. Secondary drivers
-    secondary = [d["column"] for d in driver_info.get("drivers", []) if "Moderate" in d.get("strength", "")]
+    # 3. Secondary drivers (Absolute r >= 0.4)
+    secondary = next((d for d in drivers if abs(d.get('r', 0)) >= 0.4 and d != primary), None)
     if secondary:
-        line3 = f"Secondary operational influence stems from {secondary[0]}, suggesting a multi-variate dependency model."
+        line3 = f"Secondary operational influence stems from {secondary['column']}, suggesting a multi-variate dependency model."
     else:
-        line3 = "No secondary drivers met the strategic significance threshold at this time."
+        line3 = "No secondary drivers reach the significance threshold."
         
     # 4. Key risk or limitation
     if high_count > 0:
@@ -1966,6 +2057,7 @@ def _build_exec_summary(
         line4 = "The system currently exhibits no high-risk structural decoupling."
         
     # 5. Final implication
-    line5 = f"Strategic implication: Future performance gains will require a targeted focus on {drivers[0] if drivers else target} optimization."
+    line5 = f"Strategic implication: Future performance gains will require a targeted focus on {primary['column'] if primary else target} optimization."
 
     return " ".join([l for l in [line1, line2, line3, line4, line5] if l])
+
