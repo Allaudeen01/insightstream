@@ -188,11 +188,27 @@ class ColumnClassifier:
                 return ColumnProfile(col, "identifier", n_unique=n_unique,
                                      missing_pct=missing_pct, sample_values=sample)
 
-            # Pure-uniqueness identifier — Country/Patient_ID/Email-style.
-            # Strict 0.95 threshold so 70% comments stay 'text'.
             if uniqueness_ratio >= 0.95 and n_unique > 50:
                 return ColumnProfile(col, "identifier", n_unique=n_unique,
                                      missing_pct=missing_pct, sample_values=sample)
+
+            # If the column NAME suggests it's numeric (price/amount/cost/etc.)
+            # AND most values can be parsed as numbers after stripping currency
+            # symbols, treat it as numeric. This handles "price_string" columns
+            # in messy CSVs where prices were stored as strings.
+            numeric_name_kws = ("price", "amount", "cost", "value", "revenue",
+                                "salary", "fee", "rate")
+            if any(kw in col_lower for kw in numeric_name_kws):
+                try:
+                    cleaned = (series.dropna().astype(str)
+                                     .str.replace(r"[^\d.\-]", "", regex=True))
+                    parsed = pd.to_numeric(cleaned, errors="coerce")
+                    parse_rate = parsed.notna().sum() / max(len(cleaned), 1)
+                    if parse_rate >= 0.8:
+                        return ColumnProfile(col, "numerical", n_unique=n_unique,
+                                             missing_pct=missing_pct, sample_values=sample)
+                except Exception:
+                    pass
 
             # ── Binary ────────────────────────────────────────────────────
             if n_unique <= 2:
@@ -533,9 +549,14 @@ class MetricComputer:
     def compute(self, df: pl.DataFrame, profile: DataProfile) -> dict[str, ComputedMetric]:
         metrics: dict[str, ComputedMetric] = {}
 
-        # ── Revenue ───────────────────────────────────────────────────────
+        # ── Revenue / value summary ──────────────────────────────────────
         revenue_series = self._compute_revenue_series(df, profile)
-        if revenue_series is not None:
+        # Only call it "Revenue" when we have evidence of transactions
+        # (explicit revenue column OR price * quantity). If we only have
+        # a price column, it's a catalog — call it differently.
+        is_true_revenue = (profile.revenue_col is not None
+                           or (profile.price_col is not None and profile.qty_col is not None))
+        if revenue_series is not None and is_true_revenue:
             total_rev = float(revenue_series.sum())
             avg_rev   = float(revenue_series.mean())
             metrics["total_revenue"] = ComputedMetric(
@@ -549,6 +570,24 @@ class MetricComputer:
                 value=avg_rev,
                 formatted=_fmt_currency(avg_rev),
                 description="Revenue per transaction"
+            )
+        elif revenue_series is not None and profile.price_col:
+            # Catalog data: report sum/avg of the price column honestly,
+            # without calling it revenue.
+            total_val = float(revenue_series.sum())
+            avg_val   = float(revenue_series.mean())
+            price_label = profile.price_col.replace("_", " ").title()
+            metrics["catalog_total"] = ComputedMetric(
+                name=f"Total {price_label}",
+                value=total_val,
+                formatted=_fmt_currency(total_val),
+                description=f"Sum of {profile.price_col} across {len(df):,} catalog items"
+            )
+            metrics["catalog_average"] = ComputedMetric(
+                name=f"Average {price_label}",
+                value=avg_val,
+                formatted=_fmt_currency(avg_val),
+                description=f"Average {profile.price_col} per item"
             )
             # Attach the series to the profile for downstream use
             profile._revenue_series = revenue_series  # type: ignore[attr-defined]

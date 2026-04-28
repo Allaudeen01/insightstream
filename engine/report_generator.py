@@ -38,6 +38,27 @@ import seaborn as sns
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# Register a Unicode-capable TrueType font so currency/non-Latin glyphs
+# (₹ € £ ¥ etc.) render instead of black squares. Try common system fonts;
+# fall back silently to default Helvetica if none are available.
+_UNICODE_FONT = None
+for _font_path, _name in [
+    (r"C:\Windows\Fonts\seguiemj.ttf", "SegoeUIEmoji"),  # Windows
+    (r"C:\Windows\Fonts\arial.ttf", "Arial"),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans"),
+    ("/System/Library/Fonts/Helvetica.ttc", "AppleHelvetica"),
+]:
+    try:
+        import os as _os
+        if _os.path.exists(_font_path):
+            pdfmetrics.registerFont(TTFont(_name, _font_path))
+            _UNICODE_FONT = _name
+            break
+    except Exception:
+        continue
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -88,8 +109,8 @@ TEMPLATE_CONFIGS = {
         "brand_dark": "#1A1A2E",
         "brand_light": "#F0F4FF",
         "purple": "#4B0082",
-        "font_main": "Helvetica",
-        "font_bold": "Helvetica-Bold"
+        "font_main": _UNICODE_FONT or "Helvetica",
+        "font_bold": _UNICODE_FONT or "Helvetica-Bold"
     },
     "executive": {
         "brand_dark": "#000000",
