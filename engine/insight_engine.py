@@ -572,22 +572,23 @@ class MetricComputer:
                 description="Revenue per transaction"
             )
         elif revenue_series is not None and profile.price_col:
-            # Catalog data: report sum/avg of the price column honestly,
-            # without calling it revenue.
+            # Catalog data: use same keys as transactional path so the
+            # frontend KPI serialization stays consistent. Only the labels
+            # and descriptions differ to be honest about the data shape.
             total_val = float(revenue_series.sum())
             avg_val   = float(revenue_series.mean())
             price_label = profile.price_col.replace("_", " ").title()
-            metrics["catalog_total"] = ComputedMetric(
+            metrics["total_revenue"] = ComputedMetric(
                 name=f"Total {price_label}",
                 value=total_val,
                 formatted=_fmt_currency(total_val),
-                description=f"Sum of {profile.price_col} across {len(df):,} catalog items"
+                description=f"Sum of {profile.price_col} across {len(df):,} records"
             )
-            metrics["catalog_average"] = ComputedMetric(
+            metrics["avg_order_value"] = ComputedMetric(
                 name=f"Average {price_label}",
                 value=avg_val,
                 formatted=_fmt_currency(avg_val),
-                description=f"Average {profile.price_col} per item"
+                description=f"Average {profile.price_col} per record"
             )
             # Attach the series to the profile for downstream use
             profile._revenue_series = revenue_series  # type: ignore[attr-defined]

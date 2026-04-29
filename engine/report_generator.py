@@ -10,6 +10,8 @@ ROOT-CAUSE FIX:
 
   This version uses _fuzzy_col() — a contains-based resolver that finds
   "Sales Amount" when you ask for "sales", "Product Category" when you ask
+
+  
   for "category", etc.  Every resolution decision is logged so you can
   diagnose any remaining mismatches instantly.
 """
@@ -38,27 +40,6 @@ import seaborn as sns
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
-# Register a Unicode-capable TrueType font so currency/non-Latin glyphs
-# (₹ € £ ¥ etc.) render instead of black squares. Try common system fonts;
-# fall back silently to default Helvetica if none are available.
-_UNICODE_FONT = None
-for _font_path, _name in [
-    (r"C:\Windows\Fonts\seguiemj.ttf", "SegoeUIEmoji"),  # Windows
-    (r"C:\Windows\Fonts\arial.ttf", "Arial"),
-    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans"),
-    ("/System/Library/Fonts/Helvetica.ttc", "AppleHelvetica"),
-]:
-    try:
-        import os as _os
-        if _os.path.exists(_font_path):
-            pdfmetrics.registerFont(TTFont(_name, _font_path))
-            _UNICODE_FONT = _name
-            break
-    except Exception:
-        continue
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -109,8 +90,8 @@ TEMPLATE_CONFIGS = {
         "brand_dark": "#1A1A2E",
         "brand_light": "#F0F4FF",
         "purple": "#4B0082",
-        "font_main": _UNICODE_FONT or "Helvetica",
-        "font_bold": _UNICODE_FONT or "Helvetica-Bold"
+        "font_main": "Helvetica",
+        "font_bold": "Helvetica-Bold"
     },
     "executive": {
         "brand_dark": "#000000",
@@ -638,7 +619,8 @@ class PDFReportGenerator:
                 label = str(raw_key).replace("_", " ").title()
             else:
                 display = str(raw_val)
-                label = str(raw_key).replace("_", " ").title() if raw_key.islower() else str(raw_key)
+                # Always humanize snake_case keys regardless of case
+                label = str(raw_key).replace("_", " ").title()
             if display.startswith("{") and display.endswith("}"):
                 display = "—"
             out[label] = display
@@ -904,8 +886,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 # Add Markdown Table
                 region_stats_df = df.groupby(region_col)[target_metric].median().reset_index()
                 region_stats_df.columns = [region_col, f"Median {target_metric}"]
-                if pd.api.types.is_numeric_dtype(region_stats_df[f"Median {target_metric}"]):
-                    region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].round(2)
                 md_table = generate_markdown_table(region_stats_df)
                 if md_table:
                     elements.append(Spacer(1, 20))
@@ -954,24 +934,24 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(Spacer(1, 20))
 
         valid_charts = 0
-        general_placeholder = TEMPLATES["general"]["target_metric"]
-        should_substitute = target_metric != general_placeholder
-
         for i, chart in enumerate(charts):
             img_path = self._decode_image(chart.get("image_base64", ""), session_id)
             err = chart.get("error")
-            chart_title = chart.get("title", "Visualization Segment")
-            chart_insight = chart.get("insight", "Segmented data analysis.")
-            if should_substitute:
-                chart_title = chart_title.replace(general_placeholder, target_metric)
-                chart_insight = chart_insight.replace(general_placeholder, target_metric)
+            
             if err:
+                # Suppress raw data dumps - only show error if it's not a data dump
                 if "{" not in str(err) and "[" not in str(err):
-                    elements.append(Paragraph(f"⚠ {chart_title}: {err}", self.S["Fallback"]))
+                    elements.append(Paragraph(f"⚠ {chart.get('title')}: {err}", self.S["Fallback"]))
                     elements.append(Spacer(1, 20))
             else:
-                self.embed_chart_safely(elements, img_path, chart_title, chart_insight)
+                self.embed_chart_safely(
+                    elements,
+                    img_path,
+                    chart.get("title", "Visualization Segment"),
+                    chart.get("insight", "Segmented data analysis.")
+                )
                 valid_charts += 1
+            
             if (valid_charts > 0 and valid_charts % 2 == 0):
                 elements.append(PageBreak())
 
