@@ -1733,42 +1733,46 @@ class BusinessRuleEngine:
 
     def _self_diagnostic(self) -> None:
         """Prints a diagnostic report of which rules and guards are wired up."""
-        print("\n" + "=" * 70)
-        print("🔬 INSIGHT ENGINE SELF-DIAGNOSTIC")
-        print("=" * 70)
-
-        has_tautology_guard = hasattr(self, "is_derived_column")
-        print(f"  [{'✅' if has_tautology_guard else '❌'}] is_derived_column() method exists")
-
-        has_skew_rule = hasattr(self, "_rule_skewed_distribution_alert")
-        print(f"  [{'✅' if has_skew_rule else '❌'}] _rule_skewed_distribution_alert() exists")
-
-        rule_methods = [m for m in dir(self) if m.startswith("_rule_")]
-        print(f"  📋 Found {len(rule_methods)} rule methods:")
-        for m in rule_methods:
-            method = getattr(self, m)
-            is_wrapped = hasattr(method, "__wrapped__")
-            marker = "✅ wrapped" if is_wrapped else "❌ NOT wrapped"
-            print(f"     {marker}: {m}")
-
-        import inspect
+        ok  = "[OK]"
+        nok = "[--]"
         try:
-            src = inspect.getsource(self._rule_strong_correlation_insight)
-            calls_guard = "is_derived_column" in src or "_rule_numeric_correlations" in src
-            print(f"  [{'✅' if calls_guard else '❌'}] _rule_strong_correlation_insight wired to guard")
-        except Exception as e:
-            print(f"  ⚠ Could not inspect: {e}")
+            print("\n" + "=" * 70)
+            print("[DIAG] INSIGHT ENGINE SELF-DIAGNOSTIC")
+            print("=" * 70)
 
-        try:
-            src = inspect.getsource(self.generate_insights)
-            for rule in rule_methods:
-                wired = rule in src
-                marker = "✅" if wired else "❌"
-                print(f"     {marker} generate_insights() calls {rule}()")
-        except Exception as e:
-            print(f"  ⚠ Could not inspect generate_insights: {e}")
+            has_tautology_guard = hasattr(self, "is_derived_column")
+            print(f"  [{ok if has_tautology_guard else nok}] is_derived_column() method exists")
 
-        print("=" * 70 + "\n")
+            has_skew_rule = hasattr(self, "_rule_skewed_distribution_alert")
+            print(f"  [{ok if has_skew_rule else nok}] _rule_skewed_distribution_alert() exists")
+
+            rule_methods = [m for m in dir(self) if m.startswith("_rule_")]
+            print(f"  [>>] Found {len(rule_methods)} rule methods:")
+            for m in rule_methods:
+                method = getattr(self, m)
+                is_wrapped = hasattr(method, "__wrapped__")
+                marker = f"{ok} wrapped" if is_wrapped else f"{nok} NOT wrapped"
+                print(f"     {marker}: {m}")
+
+            import inspect
+            try:
+                src = inspect.getsource(self._rule_strong_correlation_insight)
+                calls_guard = "is_derived_column" in src or "_rule_numeric_correlations" in src
+                print(f"  [{ok if calls_guard else nok}] _rule_strong_correlation_insight wired to guard")
+            except Exception as e:
+                print(f"  [!!] Could not inspect: {e}")
+
+            try:
+                src = inspect.getsource(self.generate_insights)
+                for rule in rule_methods:
+                    wired = rule in src
+                    print(f"     [{ok if wired else nok}] generate_insights() calls {rule}()")
+            except Exception as e:
+                print(f"  [!!] Could not inspect generate_insights: {e}")
+
+            print("=" * 70 + "\n")
+        except Exception as e:
+            print(f"[DIAG] self-diagnostic failed: {e}")
 
 
 class StrategicBriefBuilder:
