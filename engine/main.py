@@ -24,7 +24,7 @@ import database as db
 from insight_engine import (
     ColumnClassifier, MetricComputer, BusinessRuleEngine,
     InsightNarrator, SmartChartRecommender, AnomalyDetector,
-    run_insight_engine,
+    run_insight_engine, RecommendationEngine, StrategicBriefBuilder
 )
 from session_cache import SessionCache, JobTracker
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks
@@ -34,6 +34,18 @@ import tempfile
 from pathlib import Path
 
 SESSION_DIR = Path(tempfile.gettempdir()) / "insightstream_sessions"
+
+# Global chart layout base to prevent duplicate titles and ensure styling
+CHART_LAYOUT_BASE = {
+    "title": {"text": ""},  # ← KEY FIX: empty title in chart itself
+    "paper_bgcolor": "rgba(0,0,0,0)",
+    "plot_bgcolor": "rgba(0,0,0,0)",
+    "font": {"color": "#94a3b8"},
+    "xaxis": {"gridcolor": "rgba(255,255,255,0.05)"},
+    "yaxis": {"gridcolor": "rgba(255,255,255,0.05)"},
+    "legend": {"bgcolor": "rgba(0,0,0,0)"},
+    "margin": {"l": 60, "r": 30, "t": 20, "b": 60},
+}
 
 import re
 
@@ -58,6 +70,28 @@ def sanitize_insight(text: str, max_length=500) -> str:
     if len(text) > max_length:
         text = text[:max_length] + "…"
     return text
+
+def is_chart_informative(values: list[float], min_variance_pct: float = 1.0) -> bool:
+    """
+    Returns False if all values are within min_variance_pct% of each other.
+    Useful for suppressing flat-line charts that show no information.
+    """
+    if not values or len(values) < 2:
+        return False
+    
+    import numpy as np
+    arr = np.array(values, dtype=float)
+    
+    if np.all(arr == 0):
+        return False
+    
+    mean = np.mean(arr)
+    if mean == 0:
+        return False
+    
+    # Coefficient of variation as percentage
+    cv_pct = (np.std(arr) / abs(mean)) * 100
+    return cv_pct >= min_variance_pct
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -960,11 +994,19 @@ class InsightCard(BaseModel):
     # Keep legacy field for backward compat
     importance: str = "medium"
 
+class RecommendationCard(BaseModel):
+    priority: int
+    action: str
+    timeframe: str
+    owner: str
+    linked_insight: str = ""
+    impact: str = "Medium"
+
 class InsightsResponse(BaseModel):
     session_id: str
     executive_summary: str
     strategic_brief: list[InsightCard]
-    recommendations: list[str]
+    recommendations: list[RecommendationCard]
     warnings: list[str] = []       # NEW — edge case / data quality alerts
     computed_metrics: Optional[dict] = None  # NEW — Revenue, Return Rate, AOV
 
@@ -1127,15 +1169,16 @@ def create_custom_kpi(session_id: str, body: CustomKPIRequest):
     return {"session_id": session_id, "kpi": kpi}
 
 def _format_number(val: float) -> str:
-    """Format large numbers for display."""
+    """Format number as Indian Rupee with smart scaling."""
     abs_val = abs(val)
-    if abs_val >= 1_000_000_000:
-        return f"${val/1_000_000_000:.2f}B" if val >= 0 else f"-${abs_val/1_000_000_000:.2f}B"
-    if abs_val >= 1_000_000:
-        return f"${val/1_000_000:.2f}M" if val >= 0 else f"-${abs_val/1_000_000:.2f}M"
+    sign = "" if val >= 0 else "-"
+    if abs_val >= 1_00_00_000:      # 1 crore
+        return f"{sign}₹{abs_val/1_00_00_000:.2f} Cr"
+    if abs_val >= 1_00_000:          # 1 lakh
+        return f"{sign}₹{abs_val/1_00_000:.2f} L"
     if abs_val >= 1_000:
-        return f"${val/1_000:.1f}K" if val >= 0 else f"-${abs_val/1_000:.1f}K"
-    return f"${val:,.2f}" if val >= 0 else f"-${abs_val:,.2f}"
+        return f"{sign}₹{abs_val/1_000:.1f}K"
+    return f"{sign}₹{abs_val:,.0f}"
 
 @app.get("/kpis/{session_id}")
 def get_kpis(session_id: str):
@@ -1272,7 +1315,7 @@ def get_kpis(session_id: str):
         except Exception:
             continue
 
-    resp = {"session_id": session_id, "kpis": kpis[:6]}
+    resp = {"session_id": session_id, "kpis": kpis[:6], "currency": "INR"}
     _cache.put(session_id, "kpi_response", resp)
     return resp
 
@@ -1663,7 +1706,7 @@ def _internal_gen_viz(
     if _use_smart:
         try:
             from insight_engine import detect_domain
-            _domain_id = detect_domain(list(df.columns))
+            _domain_id = detect_domain(df)
             rec = SmartChartRecommender()
             smart_charts = rec.recommend(df, _profile, [],
                                          max_charts=max_charts,
@@ -1803,7 +1846,7 @@ def _internal_gen_viz(
                         chart_type="histogram",
                         title=f"{col} Distribution",
                     description=f"Frequency distribution" + (f" colored by {color_col}" if color_col else ""),
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=[col] + ([color_col] if color_col else []),
                     priority_score=score,
                     insight_reason=" • ".join(reasons) if reasons else "Distribution analysis",
@@ -1826,33 +1869,38 @@ def _internal_gen_viz(
                 agg_df.columns = [cat_col, f'Median {num_col}']
                 agg_df = agg_df.sort_values(f'Median {num_col}', ascending=True)
                 
-                # Use horizontal for many categories or long labels
-                use_horizontal = n_categories > 6 or pdf[cat_col].astype(str).str.len().max() > 10
-                
-                fig = px.bar(
-                    agg_df, 
-                    x=f'Median {num_col}' if use_horizontal else cat_col,
-                    y=cat_col if use_horizontal else f'Median {num_col}',
-                    orientation='h' if use_horizontal else 'v',
-                    title=f"Median {num_col} by {cat_col}",
-                    text_auto='.1f',
-                    color=f'Median {num_col}',
-                    color_continuous_scale='Viridis'
-                )
-                fig.update_layout(template="plotly_dark", showlegend=False, coloraxis_showscale=False)
-                score = (column_scores.get(cat_col, 50) + column_scores.get(num_col, 50)) / 2
-                reasons = column_insights.get(cat_col, []) + column_insights.get(num_col, [])
-                charts.append(ChartData(
-                    chart_id=f"bar_{num_col}_{cat_col}",
-                    chart_type="bar",
-                    title=f"{num_col} by {cat_col}",
-                    description=f"Median {num_col} comparison (robust to outliers)",
-                    plotly_json=json.loads(fig.to_json()),
-                    columns_used=[cat_col, num_col],
-                    priority_score=score,
-                    insight_reason=" • ".join(reasons[:2]) if reasons else "Category comparison",
-                    interest_level=get_interest_level(score)
-                ))
+                # Zero-variance suppression
+                if not is_chart_informative(agg_df[f'Median {num_col}'].tolist()):
+                    print(f"[CHART SUPPRESSED] {num_col} by {cat_col} — all values flat")
+                else:
+                    # Use horizontal for many categories or long labels
+                    use_horizontal = n_categories > 6 or pdf[cat_col].astype(str).str.len().max() > 10
+                    
+                    fig = px.bar(
+                        agg_df, 
+                        x=f'Median {num_col}' if use_horizontal else cat_col,
+                        y=cat_col if use_horizontal else f'Median {num_col}',
+                        orientation='h' if use_horizontal else 'v',
+                        title=f"Median {num_col} by {cat_col}",
+                        text_auto='.1f',
+                        color=f'Median {num_col}',
+                        color_continuous_scale='Viridis'
+                    )
+                    fig.update_layout(template="plotly_dark", showlegend=False, coloraxis_showscale=False)
+                    score = (column_scores.get(cat_col, 50) + column_scores.get(num_col, 50)) / 2
+                    reasons = column_insights.get(cat_col, []) + column_insights.get(num_col, [])
+                    charts.append(ChartData(
+                        chart_id=f"bar_{num_col}_{cat_col}",
+                        chart_type="bar",
+                        title=f"{num_col} by {cat_col}",
+                        description=f"Median {num_col} comparison (robust to outliers)",
+                        plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                        columns_used=[cat_col, num_col],
+                        priority_score=score,
+                        insight_reason=" • ".join(reasons[:2]) if reasons else "Category comparison",
+                        interest_level=get_interest_level(score)
+                    ))
+
         except Exception as e:
             print(f"Bar Chart Error: {e}")
     
@@ -1900,7 +1948,7 @@ def _internal_gen_viz(
                     chart_type="pie",
                     title=f"{cat_col} Breakdown",
                     description=f"Percentage distribution (small slices grouped as 'Other')",
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=[cat_col],
                     priority_score=column_scores.get(cat_col, 50) + 5  # Pie charts popular
                 ))
@@ -1923,7 +1971,7 @@ def _internal_gen_viz(
                     chart_type="count_bar",
                     title=f"{cat1} by {cat2}",
                     description=f"Frequency counts of {cat1} grouped by {cat2}",
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=[cat1, cat2]
                 ))
         except Exception as e:
@@ -1983,7 +2031,7 @@ def _internal_gen_viz(
                 chart_type="violin",
                 title=f"{best_num} by {best_cat}",
                 description=f"Full distribution with box stats and individual points",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=[best_num, best_cat],
                 priority_score=score,
                 insight_reason=" • ".join(reasons[:3]),
@@ -2016,7 +2064,7 @@ def _internal_gen_viz(
                 chart_type="scatter_marginals",
                 title=f"{col1} vs {col2}",
                 description=f"Bivariate relationship with marginal distributions",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=[col1, col2] + ([color_col] if color_col else []),
                 priority_score=score,
                 insight_reason=f"Strongest correlation (r = {corr_val:.2f})",
@@ -2039,7 +2087,7 @@ def _internal_gen_viz(
                 chart_type="scatter_marginals",
                 title=f"{col1} vs {col2}",
                 description=f"Bivariate analysis with marginal distributions",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=[col1, col2],
                 priority_score=55,
                 insight_reason="Numeric relationship exploration",
@@ -2065,7 +2113,7 @@ def _internal_gen_viz(
                 chart_type="box",
                 title=f"{best_num} Summary",
                 description=f"Quartiles, median, and confidence intervals with data points",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=[best_num, best_cat],
                 priority_score=score,
                 insight_reason="Statistical summary with confidence notches",
@@ -2094,7 +2142,7 @@ def _internal_gen_viz(
                 chart_type="density_heatmap",
                 title=f"Joint Distribution",
                 description=f"Density concentration showing where data clusters",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=[col1, col2],
                 priority_score=58,
                 insight_reason="Shows concentration patterns in joint distribution",
@@ -2153,7 +2201,7 @@ def _internal_gen_viz(
                     chart_type="treemap",
                     title=f"Hierarchical Breakdown",
                     description=f"Part-to-whole analysis across {depth} levels",
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=path_cols[:2] + ([val_col] if val_col else []),
                     priority_score=score,
                     insight_reason=f"{depth}-level hierarchy detected • Good cardinality",
@@ -2196,7 +2244,7 @@ def _internal_gen_viz(
                     chart_type="sunburst",
                     title=f"Radial Hierarchy",
                     description=f"Nested breakdown in radial format",
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=path_cols[:2] + ([val_col] if val_col else []),
                     priority_score=score,
                     insight_reason="Compact labels suit radial display",
@@ -2245,7 +2293,7 @@ def _internal_gen_viz(
                 chart_type="funnel",
                 title=f"{funnel_col} Funnel",
                 description="Stage-by-stage breakdown showing progression",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=[funnel_col],
                 priority_score=funnel_score,
                 insight_reason="Stage-like column detected" if funnel_score > 75 else "Ordinal values suggest progression",
@@ -2260,35 +2308,49 @@ def _internal_gen_viz(
         val_col = best_num if best_num else None
         
         try:
+            # Limit to 2 levels max, and filter to top segments per level (Fix 6)
+            cols_to_use = path_cols[:2]
+            
             if val_col:
-                icicle_df = pdf.dropna(subset=path_cols + [val_col])
+                icicle_df = pdf.dropna(subset=cols_to_use + [val_col])
                 fig = px.icicle(
                     icicle_df,
-                    path=path_cols,
+                    path=cols_to_use,
                     values=val_col,
-                    title=f"Deep Hierarchy: {' → '.join(path_cols)}",
-                    color_continuous_scale="Blues"
+                    title=f"Hierarchy: {' → '.join(cols_to_use)}",
+                    color=val_col,
+                    color_continuous_scale="Viridis"
                 )
             else:
-                icicle_df = pdf.dropna(subset=path_cols)
+                icicle_df = pdf.dropna(subset=cols_to_use)
                 icicle_df['_count'] = 1
                 fig = px.icicle(
                     icicle_df,
-                    path=path_cols,
+                    path=cols_to_use,
                     values='_count',
-                    title=f"Deep Hierarchy: {' → '.join(path_cols)}"
+                    title=f"Hierarchy: {' → '.join(cols_to_use)}"
                 )
-            fig.update_layout(template="plotly_dark")
-            score = 55 + (len(path_cols) * 10)
+            
+            fig.update_traces(
+                textinfo="label+percent parent",
+                textfont=dict(size=12),       # ← Improved legibility
+                marker=dict(line=dict(width=2, color="white")),
+            )
+            fig.update_layout(
+                template="plotly_dark",
+                height=460,                   # ← taller so text breathes
+                margin=dict(l=10, r=10, t=10, b=10)
+            )
+            score = 55 + (len(cols_to_use) * 10)
             charts.append(ChartData(
-                chart_id=f"icicle_{'_'.join(path_cols)}",
+                chart_id=f"icicle_{'_'.join(cols_to_use)}",
                 chart_type="icicle",
                 title=f"Icicle Chart",
-                description=f"Deep {len(path_cols)}-level hierarchical breakdown",
-                plotly_json=json.loads(fig.to_json()),
-                columns_used=path_cols + ([val_col] if val_col else []),
+                description=f"Hierarchical breakdown across {len(cols_to_use)} levels",
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                columns_used=cols_to_use + ([val_col] if val_col else []),
                 priority_score=score,
-                insight_reason=f"{len(path_cols)}-level deep hierarchy",
+                insight_reason=f"{len(cols_to_use)}-level hierarchy",
                 interest_level=get_interest_level(score)
             ))
         except:
@@ -2301,31 +2363,51 @@ def _internal_gen_viz(
         dims = numeric_cols[:6]  # Limit to 6 dimensions
         color_col = best_cat if best_cat else (categorical_cols[0] if categorical_cols else None)
         try:
+            cols_to_plot = numeric_cols[:5]
+            dimensions = []
+            for col in cols_to_plot:
+                col_data = pdf[col].dropna()
+                if len(col_data) == 0: continue
+                dimensions.append(dict(
+                    range=[col_data.min(), col_data.max()],
+                    label=col,                   # ← axis name shown clearly
+                    values=pdf[col],
+                    tickformat=".0f",
+                ))
+
             if color_col and pdf[color_col].nunique() <= 8:
-                pdf_temp = pdf.copy()
-                pdf_temp[f"{color_col}_encoded"] = pdf_temp[color_col].astype('category').cat.codes
-                fig = px.parallel_coordinates(
-                    pdf_temp, dimensions=dims,
-                    color=f"{color_col}_encoded",
-                    title=f"Multi-Dimensional Comparison (colored by {color_col})",
-                    color_continuous_scale="Viridis"
+                codes, _ = pd.factorize(pdf[color_col])
+                line_config = dict(
+                    color=codes,
+                    colorscale="Viridis",
+                    showscale=True,
+                    colorbar=dict(title=color_col),
                 )
             else:
-                fig = px.parallel_coordinates(
-                    pdf, dimensions=dims,
-                    title="Multi-Dimensional Analysis"
-                )
-            fig.update_layout(template="plotly_dark")
-            score = 50 + len(dims) * 8  # More dimensions = more interesting
+                line_config = dict(color="#6366f1")
+
+            fig = go.Figure(data=go.Parcoords(
+                line=line_config,
+                dimensions=dimensions,
+            ))
+
+            fig.update_layout(
+                title=dict(text=""),
+                template="plotly_dark",
+                font=dict(size=12, color="#94a3b8"),
+                margin=dict(l=80, r=80, t=40, b=40),   # ← extra margin for axis labels
+                height=420,
+            )
+            score = 50 + len(cols_to_plot) * 8
             charts.append(ChartData(
                 chart_id="parallel_coords",
                 chart_type="parallel_coordinates",
                 title="Parallel Coordinates",
-                description=f"Compare {len(dims)} numeric dimensions simultaneously",
-                plotly_json=json.loads(fig.to_json()),
-                columns_used=dims,
+                description=f"Compare {len(cols_to_plot)} numeric dimensions simultaneously",
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                columns_used=cols_to_plot,
                 priority_score=score,
-                insight_reason=f"{len(dims)} numeric columns suitable for parallel comparison",
+                insight_reason=f"{len(cols_to_plot)} numeric columns suitable for parallel comparison",
                 interest_level=get_interest_level(score)
             ))
         except:
@@ -2347,50 +2429,49 @@ def _internal_gen_viz(
                     if flow_score > best_flow_score:
                         best_flow_score = flow_score
                         source_col, target_col = col1, col2
-        
         if source_col and target_col:
             try:
                 # Create source-target-value aggregation
                 flow_df = pdf.groupby([source_col, target_col]).size().reset_index(name='count')
                 
-                # Create node labels (truncate long names with ellipsis)
-                def truncate_label(name, max_len=12):
-                    s = str(name).replace('_target', '')
-                    return s[:max_len-1] + '…' if len(s) > max_len else s
+                # HUMAN-READABLE LABELS (Fix 6)
+                src_values = sorted(pdf[source_col].dropna().unique().tolist())
+                tgt_values = sorted(pdf[target_col].dropna().unique().tolist())
                 
-                sources = flow_df[source_col].unique().tolist()
-                targets = flow_df[target_col].unique().tolist()
-                all_nodes = sources + [f"{t}_target" for t in targets]
+                src_labels = [f"{source_col}: {v}" for v in src_values]
+                tgt_labels = [f"{target_col}: {v}" for v in tgt_values]
+                all_labels = src_labels + tgt_labels
                 
-                # Generate gradient colors for nodes
-                n_nodes = len(all_nodes)
-                node_colors = [f'hsl({i * 360 // n_nodes}, 70%, 50%)' for i in range(n_nodes)]
+                src_idx_map = {v: i for i, v in enumerate(src_values)}
+                tgt_idx_map = {v: i + len(src_values) for i, v in enumerate(tgt_values)}
                 
-                # Create link indices
-                source_idx = [sources.index(s) for s in flow_df[source_col]]
-                target_idx = [len(sources) + targets.index(t) for t in flow_df[target_col]]
+                # Generate link indices
+                source_idx = [src_idx_map[s] for s in flow_df[source_col]]
+                target_idx = [tgt_idx_map[t] for t in flow_df[target_col]]
                 
                 fig = go.Figure(go.Sankey(
                     node=dict(
-                        pad=15,
-                        thickness=20,
+                        pad=18,
+                        thickness=22,
                         line=dict(color="rgba(255,255,255,0.3)", width=0.5),
-                        label=[truncate_label(n) for n in all_nodes],
-                        color=node_colors,
+                        label=all_labels,
+                        color="#6366f1",
                         hovertemplate='%{label}<br>Total: %{value}<extra></extra>'
                     ),
                     link=dict(
                         source=source_idx,
                         target=target_idx,
                         value=flow_df['count'].tolist(),
-                        color='rgba(99, 102, 241, 0.6)',
+                        color='rgba(139, 92, 246, 0.4)',
                         hovertemplate='%{source.label} → %{target.label}<br>Count: %{value}<extra></extra>'
                     )
                 ))
                 fig.update_layout(
                     title=f"Flow: {source_col} → {target_col}",
                     template="plotly_dark",
-                    hovermode="closest"
+                    font=dict(size=12, color="#94a3b8"),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    height=420,
                 )
                 score = 70 + min(best_flow_score, 20)  # High boost for Sankey
                 charts.append(ChartData(
@@ -2398,7 +2479,7 @@ def _internal_gen_viz(
                     chart_type="sankey",
                     title=f"Flow Diagram",
                     description=f"Flow relationships between {source_col} and {target_col}",
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=[source_col, target_col],
                     priority_score=score,
                     insight_reason=f"Flow structure detected between {source_col} and {target_col}",
@@ -2446,7 +2527,7 @@ def _internal_gen_viz(
                 chart_type="radar",
                 title=f"Attribute Radar",
                 description=f"Multi-attribute comparison across {len(radar_cols)} dimensions",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=radar_cols,
                 priority_score=score,
                 insight_reason=f"{len(radar_cols)} numeric attributes suitable for radar comparison",
@@ -2508,7 +2589,7 @@ def _internal_gen_viz(
                     chart_type="waterfall",
                     title=f"Waterfall Chart",
                     description=f"Cumulative {waterfall_col} changes by {cat_col}",
-                    plotly_json=json.loads(fig.to_json()),
+                    plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     columns_used=[waterfall_col, cat_col],
                     priority_score=waterfall_score,
                     insight_reason="Clear positive/negative value pattern detected",
@@ -2543,7 +2624,7 @@ def _internal_gen_viz(
                 chart_type="heatmap",
                 title="Correlation Matrix",
                 description="Pairwise correlations between numeric columns",
-                plotly_json=json.loads(fig.to_json()),
+                plotly_json=json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                 columns_used=numeric_cols,
                 priority_score=score,
                 insight_reason=f"{int(strong_corr_count)} strong correlations found" if strong_corr_count > 0 else "Overview of variable relationships",

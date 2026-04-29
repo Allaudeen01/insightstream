@@ -8,6 +8,21 @@ interface KPICardProps {
   trend?: string;
 }
 
+/**
+ * Format a numeric value as Indian Rupee with smart scaling.
+ * Handles both raw numbers and pre-formatted strings from the backend.
+ */
+function formatINR(value: string | number): string {
+  if (typeof value === 'number') {
+    if (value >= 1_00_00_000) return `₹${(value / 1_00_00_000).toFixed(2)} Cr`;
+    if (value >= 1_00_000)    return `₹${(value / 1_00_000).toFixed(2)} L`;
+    if (value >= 1_000)       return `₹${(value / 1_000).toFixed(1)}K`;
+    return `₹${value.toLocaleString('en-IN')}`;
+  }
+  // String pass-through: swap any leading $ → ₹, leave ₹ and non-currency as-is
+  return value.replace(/^-?\$/, (m) => m.startsWith('-') ? '-₹' : '₹');
+}
+
 const KPICard = ({ title, value, subtitle, icon, trend }: KPICardProps) => (
   <div className="
     rounded-xl border border-white/10 
@@ -29,7 +44,7 @@ const KPICard = ({ title, value, subtitle, icon, trend }: KPICardProps) => (
       )}
     </div>
     <div className="text-3xl font-bold text-foreground tracking-tight select-none">
-      {value}
+      {formatINR(value)}
     </div>
     {subtitle && (
       <p className="text-xs text-muted-foreground">

@@ -32,7 +32,13 @@ import SkeletonCard from "@/components/SkeletonCard";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
+
+function getConfidenceTier(rowCount: number): { label: string; color: string; emoji: string } {
+    if (rowCount < 100)  return { label: "Low Confidence",    color: "text-red-400",    emoji: "⚠" };
+    if (rowCount < 500)  return { label: "Medium Confidence", color: "text-yellow-400", emoji: "•" };
+    return                      { label: "High Confidence",   color: "text-green-400",  emoji: "✓" };
+}
 
 interface InsightData {
     title: string;
@@ -43,11 +49,20 @@ interface InsightData {
     recommendation?: string;
 }
 
+interface RecommendationCard {
+    priority: number;
+    action: string;
+    timeframe: string;
+    owner: string;
+    linked_insight?: string;
+    impact?: string;
+}
+
 interface InsightsData {
     session_id: string;
     executive_summary: string;
     strategic_brief: InsightData[];
-    recommendations: string[];
+    recommendations: RecommendationCard[];
     computed_metrics?: Record<string, any>;
 }
 
@@ -187,14 +202,22 @@ export default function InsightsPage() {
                     kpis: data.computed_metrics || {},
                     charts: chartAssets,
                     ai_summary: data.executive_summary || "",
-                    insights: data.recommendations || [],
+                    insights: (data.recommendations || []).map((r: any) =>
+                        typeof r === "string" ? r : r.action || r.linked_insight || ""
+                    ).filter(Boolean),
                     text_blocks: []
                 })
             });
 
             if (!res.ok) {
                 const errData = await res.json();
-                throw new Error(errData.detail || "Backend assembly failed");
+                const detail = errData.detail;
+                const msg = Array.isArray(detail)
+                    ? detail.map((e: any) => e.msg ?? JSON.stringify(e)).join("; ")
+                    : typeof detail === "string"
+                    ? detail
+                    : JSON.stringify(detail) ?? "Backend assembly failed";
+                throw new Error(msg || "Backend assembly failed");
             }
 
             setExportStatus("Ready for download!");
@@ -265,6 +288,37 @@ export default function InsightsPage() {
                     </div>
                 </div>
 
+                {data?.executive_summary && (
+                    <div className="mb-10 p-8 bg-indigo-600/10 border border-indigo-500/20 rounded-[2rem] relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-500">
+                            <Sparkles className="w-24 h-24 text-indigo-400" />
+                        </div>
+                        <div className="relative z-10">
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className="p-2 bg-indigo-500 rounded-lg text-white shadow-lg shadow-indigo-500/30">
+                                    <Sparkles className="w-4 h-4" />
+                                </div>
+                                <h2 className="text-sm font-black uppercase tracking-[0.2em] text-indigo-400">AI Strategic Brief</h2>
+                            </div>
+                            <p className="text-xl font-medium leading-relaxed text-white/90 max-w-4xl">
+                                {data.executive_summary}
+                            </p>
+                            
+                            <div className="mt-6 flex items-center gap-2 text-xs font-bold uppercase tracking-wider">
+                                {(() => {
+                                    const totalRecords = data.computed_metrics?.Records?.value || 0;
+                                    const tier = getConfidenceTier(totalRecords);
+                                    return (
+                                        <span className={`flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 ${tier.color}`}>
+                                            {tier.emoji} Based on {totalRecords.toLocaleString('en-IN')} records — {tier.label}
+                                        </span>
+                                    );
+                                })()}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 <div className="flex p-1.5 bg-white/5 rounded-2xl border border-white/10 w-fit mb-12">
                     <button onClick={() => setActiveTab("charts")} className={`px-8 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === 'charts' ? 'bg-indigo-600 text-white' : 'text-muted-foreground hover:text-white'}`}>Visualizations</button>
                     <button onClick={() => setActiveTab("insights")} className={`px-8 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === 'insights' ? 'bg-indigo-600 text-white' : 'text-muted-foreground hover:text-white'}`}>Strategic Insights</button>
@@ -272,21 +326,27 @@ export default function InsightsPage() {
 
                 {activeTab === "charts" ? (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-page-enter">
-                        {vizData?.charts?.map((chart: any, i: number) => (
-                            <div key={i} data-chart-id={chart.chart_id}>
-                                <ChartCard title={chart.title}>
-                                    <div className="h-[350px]">
-                                    <Plot
-                                        data={chart.plotly_json.data}
-                                        layout={{ ...chart.plotly_json.layout, autosize: true, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: { color: '#94a3b8' } }}
-                                        config={{ displayModeBar: false, responsive: true }}
-                                        style={{ width: '100%', height: '100%' }}
-                                        useResizeHandler
-                                    />
+                        {vizData?.charts?.map((chart: any, i: number) => {
+                            const isLast = i === vizData.charts.length - 1;
+                            const isOddCount = vizData.charts.length % 2 === 1;
+                            const shouldSpan = isLast && isOddCount;
+                            
+                            return (
+                                <div key={i} data-chart-id={chart.chart_id} className={shouldSpan ? "lg:col-span-2" : ""}>
+                                    <ChartCard title={chart.title}>
+                                        <div className="h-[350px]">
+                                            <Plot
+                                                data={chart.plotly_json.data}
+                                                layout={{ ...chart.plotly_json.layout, autosize: true, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: { color: '#94a3b8' } }}
+                                                config={{ displayModeBar: false, responsive: true }}
+                                                style={{ width: '100%', height: '100%' }}
+                                                useResizeHandler
+                                            />
+                                        </div>
+                                    </ChartCard>
                                 </div>
-                            </ChartCard>
-                        </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 ) : (
                     <div className="space-y-6 animate-page-enter">

@@ -29,7 +29,92 @@ from pathlib import Path
 from typing import Optional
 
 import matplotlib
-matplotlib.use("Agg")          # ← MUST precede all other matplotlib imports
+matplotlib.use('Agg')
+
+# ============================================================
+# UNICODE FONT REGISTRATION (for ₹ symbol support)
+# ============================================================
+import os
+import urllib.request
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+os.makedirs(FONT_DIR, exist_ok=True)
+
+# Common DejaVu Sans paths across operating systems
+DEJAVU_PATHS_TO_TRY = [
+    # Windows
+    r"C:\Windows\Fonts\DejaVuSans.ttf",
+    # Linux
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    # macOS (after install via Homebrew/font-dejavu)
+    "/Library/Fonts/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/DejaVuSans.ttf",
+    # Local fallback (we download here if all else fails)
+    os.path.join(FONT_DIR, "DejaVuSans.ttf"),
+    os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"),
+    os.path.join(FONT_DIR, "DejaVuSans-Oblique.ttf"),
+]
+
+DEJAVU_DOWNLOAD_URL = (
+    "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+)
+DEJAVU_BOLD_DOWNLOAD_URL = (
+    "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf"
+)
+DEJAVU_OBLIQUE_DOWNLOAD_URL = (
+    "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Oblique.ttf"
+)
+
+
+def _ensure_font_available(filename: str, url: str) -> str:
+    """Find or download a TTF font. Returns absolute path."""
+    # Try system paths first
+    for path in DEJAVU_PATHS_TO_TRY:
+        if filename.lower() in path.lower() and os.path.isfile(path):
+            print(f"[FONT] Found system font: {path}")
+            return path
+
+    # Fallback: download into local fonts dir
+    local_path = os.path.join(FONT_DIR, filename)
+    if not os.path.isfile(local_path):
+        print(f"[FONT] Downloading {filename} from {url}...")
+        try:
+            urllib.request.urlretrieve(url, local_path)
+            print(f"[FONT] Downloaded to {local_path}")
+        except Exception as e:
+            print(f"[FONT ERROR] Could not download {filename}: {e}")
+            return None
+    return local_path
+
+
+# Register fonts ONCE at module load
+try:
+    regular_path = _ensure_font_available("DejaVuSans.ttf", DEJAVU_DOWNLOAD_URL)
+    bold_path = _ensure_font_available("DejaVuSans-Bold.ttf", DEJAVU_BOLD_DOWNLOAD_URL)
+    oblique_path = _ensure_font_available("DejaVuSans-Oblique.ttf", DEJAVU_OBLIQUE_DOWNLOAD_URL)
+
+    if regular_path:
+        pdfmetrics.registerFont(TTFont("DejaVuSans", regular_path))
+        print("[FONT] ✅ Registered DejaVuSans (₹ supported)")
+    if bold_path:
+        pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", bold_path))
+        print("[FONT] ✅ Registered DejaVuSans-Bold")
+    if oblique_path:
+        pdfmetrics.registerFont(TTFont("DejaVuSans-Oblique", oblique_path))
+        print("[FONT] ✅ Registered DejaVuSans-Oblique")
+
+    PDF_FONT_REGULAR = "DejaVuSans" if regular_path else "Helvetica"
+    PDF_FONT_BOLD = "DejaVuSans-Bold" if bold_path else "Helvetica-Bold"
+    PDF_FONT_OBLIQUE = "DejaVuSans-Oblique" if oblique_path else "Helvetica-Oblique"
+except Exception as e:
+    print(f"[FONT ERROR] Falling back to Helvetica (no ₹ support): {e}")
+    PDF_FONT_REGULAR = "Helvetica"
+    PDF_FONT_BOLD = "Helvetica-Bold"
+    PDF_FONT_OBLIQUE = "Helvetica-Oblique"
+# ============================================================
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -90,8 +175,8 @@ TEMPLATE_CONFIGS = {
         "brand_dark": "#1A1A2E",
         "brand_light": "#F0F4FF",
         "purple": "#4B0082",
-        "font_main": "Helvetica",
-        "font_bold": "Helvetica-Bold"
+        "font_main": PDF_FONT_REGULAR,
+        "font_bold": PDF_FONT_BOLD
     },
     "executive": {
         "brand_dark": "#000000",
@@ -104,8 +189,8 @@ TEMPLATE_CONFIGS = {
         "brand_dark": "#8E44AD",
         "brand_light": "#F5EEF8",
         "purple": "#9B59B6",
-        "font_main": "Courier",
-        "font_bold": "Courier-Bold"
+        "font_main": PDF_FONT_REGULAR,
+        "font_bold": PDF_FONT_BOLD
     }
 }
 
@@ -120,13 +205,13 @@ TEMPLATES = {
         "high_correlation_threshold": 0.80,
         "secondary_threshold": 0.40,
         "regional_insight_threshold": 0.15,
-        "correlation_primary_label": "fundamental catalyst",
+        "correlation_primary_label": "primary driver",
         "regional_chart_title": "Regional Happiness Variance Analysis",
         "executive_summary_header": "Happiness Index Strategic Overview"
     },
     "ecommerce": {
         "report_title": "Strategic Commerce & Revenue Report",
-        "target_metric": "Sales Amount",
+        "target_metric": "Revenue",
         "high_correlation_threshold": 0.70,
         "secondary_threshold": 0.35,
         "regional_insight_threshold": 0.10,
@@ -364,7 +449,7 @@ class ChartGenerator:
                          fontsize=13, fontweight="bold")
             ax.set_xlabel(cm.category); ax.set_ylabel(cm.numeric)
             ax.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"${v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
+                mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
             plt.xticks(rotation=30, ha="right")
             for bar in bp.patches:
                 h = bar.get_height()
@@ -395,7 +480,7 @@ class ChartGenerator:
                              fontsize=13, fontweight="bold")
             ax.set_xlabel(cm.region); ax.set_ylabel(cm.numeric)
             ax.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"${v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
+                mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
             plt.xticks(rotation=20, ha="right")
             fig.tight_layout()
         return self._verify(fname)
@@ -648,6 +733,132 @@ class PDFReportGenerator:
         ]))
         return tbl
 
+    def _build_section_6_deep_insights(self, insights: list) -> list:
+        """Section 6: Deep Insights with WHAT / WHY / DECISION format."""
+        elements = []
+        header_style = ParagraphStyle(
+            'Section6Header',
+            fontSize=18, textColor=colors.HexColor('#6366f1'),
+            spaceAfter=14, fontName=PDF_FONT_BOLD,
+        )
+        elements.append(Paragraph("Deep Insights", header_style))
+        elements.append(Spacer(1, 0.1 * inch))
+
+        if not insights:
+            elements.append(Paragraph(
+                "No deep insights met the qualification threshold for this dataset.",
+                ParagraphStyle('Body', fontSize=10, textColor=colors.grey)
+            ))
+            return elements
+
+        title_style = ParagraphStyle(
+            'InsightTitle', fontSize=13, fontName=PDF_FONT_BOLD,
+            textColor=colors.HexColor('#1e293b'), spaceAfter=6
+        )
+        impact_style_high = ParagraphStyle(
+            'ImpactHigh', fontSize=9, fontName=PDF_FONT_BOLD,
+            textColor=colors.HexColor('#dc2626'), spaceAfter=8
+        )
+        impact_style_medium = ParagraphStyle(
+            'ImpactMed', fontSize=9, fontName=PDF_FONT_BOLD,
+            textColor=colors.HexColor('#d97706'), spaceAfter=8
+        )
+        body_style = ParagraphStyle(
+            'InsightBody', fontSize=10, textColor=colors.HexColor('#334155'),
+            leading=14, spaceAfter=6, fontName=PDF_FONT_REGULAR
+        )
+        decision_style = ParagraphStyle(
+            'Decision', fontSize=10, fontName=PDF_FONT_OBLIQUE,
+            textColor=colors.HexColor('#6366f1'), leading=14,
+            leftIndent=12, spaceAfter=14
+        )
+
+        for i, insight in enumerate(insights, 1):
+            if isinstance(insight, str):
+                title = "Metric Observation"
+                description = insight
+                impact = "Medium"
+                recommendation = ""
+            else:
+                title = insight.get('title', 'Metric Observation')
+                description = insight.get('description', '')
+                impact = insight.get('impact', 'Medium')
+                recommendation = insight.get('recommendation', '')
+
+            elements.append(Paragraph(f"{i:02d}. {title}", title_style))
+            impact_label = f"[{impact.upper()} IMPACT]"
+            elements.append(Paragraph(impact_label, impact_style_high if 'high' in impact.lower() else impact_style_medium))
+            elements.append(Paragraph(description, body_style))
+            if recommendation:
+                elements.append(Paragraph(f"→ DECISION: {recommendation}", decision_style))
+            elements.append(Spacer(1, 0.15 * inch))
+        return elements
+
+    def _build_section_7_recommendations(self, recommendations: list) -> list:
+        elements = []
+        elements.append(PageBreak())
+
+        header_style = ParagraphStyle(
+            'Section7Header', fontSize=18, textColor=colors.HexColor('#6366f1'),
+            spaceAfter=14, fontName=PDF_FONT_BOLD,
+        )
+        elements.append(Paragraph("Strategic Recommendations", header_style))
+        elements.append(Spacer(1, 0.15 * inch))
+
+        if not recommendations:
+            elements.append(Paragraph(
+                "Insufficient signal in the dataset to generate strategic recommendations.",
+                ParagraphStyle('Body', fontSize=10, textColor=colors.grey)
+            ))
+            return elements
+
+        num_style = ParagraphStyle(
+            'RecNum', fontSize=22, fontName=PDF_FONT_BOLD,
+            textColor=colors.HexColor('#8b5cf6'),
+        )
+        action_style = ParagraphStyle(
+            'RecAction', fontSize=11, fontName=PDF_FONT_REGULAR,
+            textColor=colors.HexColor('#1e293b'), leading=15
+        )
+        meta_style = ParagraphStyle(
+            'RecMeta', fontSize=9, fontName=PDF_FONT_REGULAR,
+            textColor=colors.HexColor('#64748b'), leading=12, spaceBefore=4
+        )
+
+        for rec in recommendations:
+            # Handle legacy string format or new dict format
+            if isinstance(rec, str):
+                action = rec
+                priority = "?"
+                timeframe = "—"
+                owner = "—"
+                impact = "Medium"
+            else:
+                priority = rec.get("priority", "?")
+                action = rec.get("action", "")
+                timeframe = rec.get("timeframe", "—")
+                owner = rec.get("owner", "—")
+                impact = rec.get("impact", "Medium")
+
+            meta_line = f"⏱ {timeframe}  •  👤 {owner}  •  📊 {impact} Impact"
+
+            row = [
+                Paragraph(f"{priority:02d}" if isinstance(priority, int) else priority, num_style),
+                [
+                    Paragraph(action, action_style),
+                    Paragraph(meta_line, meta_style),
+                ],
+            ]
+            tbl = Table([row], colWidths=[0.7 * inch, 5.5 * inch])
+            tbl.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 16),
+            ]))
+            elements.append(tbl)
+
+        return elements
+
     def build(self, df: pd.DataFrame, charts: dict[str, str],
               insights: dict[str, str], output_path: str,
               cm: Optional[ColumnMap] = None,
@@ -757,6 +968,12 @@ class PDFReportGenerator:
                     insights.get(key, "Strategic AI narrative pending for this segment.")
                 )
 
+        # ✅ ADD MISSING SECTIONS 6 & 7
+        if isinstance(insights, list):
+            elements.extend(self._build_section_6_deep_insights(insights))
+            # If recommendations are not passed explicitly, we could derive them or leave empty
+            # For now, we assume insights might contain them or they are passed elsewhere
+        
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]
 
@@ -771,8 +988,8 @@ class PDFReportGenerator:
         kpis: dict = {}
         if cm and cm.numeric and cm.numeric in df.columns:
             total = df[cm.numeric].sum()
-            kpis[f"Total {cm.numeric}"] = f"${total:,.0f}" if total > 100 else f"{total:,.2f}"
-            kpis[f"Avg {cm.numeric}"]   = f"${df[cm.numeric].mean():,.0f}"
+            kpis[f"Total {cm.numeric}"] = f"\u20b9{total:,.0f}" if total > 100 else f"{total:,.2f}"
+            kpis[f"Avg {cm.numeric}"]   = f"\u20b9{df[cm.numeric].mean():,.0f}"
         if cm and cm.numeric2 and cm.numeric2 in df.columns:
             kpis[f"Total {cm.numeric2}"] = f"{df[cm.numeric2].sum():,.0f}"
         if cm and cm.category and cm.category in df.columns:
@@ -954,6 +1171,13 @@ class UnifiedReportGenerator(PDFReportGenerator):
             
             if (valid_charts > 0 and valid_charts % 2 == 0):
                 elements.append(PageBreak())
+
+        # ✅ ADD MISSING SECTIONS 6 & 7
+        elements.extend(self._build_section_6_deep_insights(insights))
+        # Use provided text_blocks or other source for recommendations if available
+        recs = [b.get("content") for b in text_blocks if "recommendation" in b.get("content", "").lower()]
+        if not recs: recs = insights[:3] # Fallback to top insights
+        elements.extend(self._build_section_7_recommendations(recs))
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]
