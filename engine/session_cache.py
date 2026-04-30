@@ -67,6 +67,10 @@ class SessionCache:
         entry = self._store.get(f"{session_id}:{key}")
         return entry is not None and not entry.is_expired()
 
+    def delete(self, session_id: str, key: str) -> None:
+        """Remove a single cache key for a session."""
+        self._store.pop(f"{session_id}:{key}", None)
+
     def invalidate(self, session_id: str) -> None:
         """Remove all cached data for a session (e.g. on re-upload)."""
         to_delete = [k for k in self._store if k.startswith(f"{session_id}:")]

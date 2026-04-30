@@ -253,7 +253,7 @@ class DashboardExportRequest(BaseModel):
     kpis: dict
     charts: list[dict] # {id, title, image_base64, error, insight}
     ai_summary: Optional[str] = ""
-    insights: Optional[list[str]] = []
+    insights: Optional[list] = []
     text_blocks: Optional[list[dict]] = []
 
 @app.post("/export-dashboard-pdf/{session_id}")
@@ -299,13 +299,23 @@ async def export_dashboard_pdf(
                 ch_copy["insight"] = sanitize_insight(ch_copy["insight"], max_length=400)
             clean_charts.append(ch_copy)
 
+        # Prefer structured insight dicts from the engine cache (have real titles/descriptions)
+        # over the plain action strings sent by the frontend.
+        insight_result = _cache.get(session_id, "insight_result")
+        structured_insights = []
+        structured_recs = []
+        if insight_result and isinstance(insight_result, dict):
+            structured_insights = insight_result.get("strategic_brief", [])
+            structured_recs = insight_result.get("recommendations", [])
+
         gen = UnifiedReportGenerator()
         gen.build_from_assets(
             output_path=str(out_path),
             charts=clean_charts,
             kpis=body.kpis,
             ai_summary=clean_ai_summary,
-            insights=clean_insights,
+            insights=structured_insights if structured_insights else clean_insights,
+            recommendations=structured_recs,
             text_blocks=body.text_blocks,
             title=body.title,
             project_name=body.project_name,
@@ -437,7 +447,9 @@ async def upload_dataset(
         
         # Store dataframe in session (file-based for production)
         save_session(session_id, file.filename, df)
-        
+        _cache.delete(session_id, "insight_result")
+        _cache.delete(session_id, "insight_response")
+
         # Persist as a project in the database
         data_path = str(SESSION_DIR / session_id)
         try:
@@ -1359,6 +1371,9 @@ def start_analysis(session_id: str):
     Kick off the full insight pipeline in a background thread.
     Returns 202 immediately; frontend polls /analyze-status for progress.
     """
+    _cache.delete(session_id, "insight_result")
+    _cache.delete(session_id, "insight_response")
+
     # Don't start if already running
     if _jobs.is_running(session_id):
         job = _jobs.get(session_id)

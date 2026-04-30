@@ -530,13 +530,26 @@ class DecisionIntelligenceSynthesizer:
         # 1. Detect Anomalies from Driver Analysis (Step 5)
         for d in drivers.get("drivers", []):
             if d.get("is_surprise"):
+                # Build human-readable title from the column pair and r-value
+                raw_col = d.get("column", "Variable A vs Variable B")
+                col_parts = raw_col.split(" vs ")
+                c1_label = col_parts[0].replace("_", " ").title() if col_parts else "Variable A"
+                c2_label = col_parts[1].replace("_", " ").title() if len(col_parts) > 1 else "Variable B"
+                r_val = d.get("r", 0)
+                if d.get("type") == "Inverted Logic":
+                    insight_title = f"{c1_label} Moves Inversely with {c2_label} (r={r_val:.2f})"
+                else:
+                    direction = "negative link" if r_val < 0 else "weak positive link"
+                    insight_title = f"{c1_label} and {c2_label} Are Decoupled ({direction}, r={r_val:.2f})"
+
                 insights.append(BusinessInsight(
-                    title=f"Unexpected Intelligence: {d['type']}",
+                    title=insight_title,
                     description=d["description"],
                     why_it_matters="When core variables decouple, it usually indicates either a data quality issue or a fundamental breakdown in expected business logic.",
-                    evidence=f"r-value: {d['r']} (Expected strong positive)",
+                    evidence=f"Correlation r={r_val:.2f} (expected strong positive)",
                     decision_implication="Audit the data ingestion pipeline for these two variables. If valid, investigate why standard drivers are failing to influence outcomes.",
-                    impact="🔴 Critical",
+                    recommendation="Exclude these decoupled variables from predictive models to reduce noise. Audit data ingestion for this variable pair before the next planning cycle.",
+                    impact="Critical",
                     is_unexpected=True,
                     rule_type="surprise"
                 ))
@@ -544,25 +557,41 @@ class DecisionIntelligenceSynthesizer:
         # 2. Insight Compression (Merge by Topic)
         compressed = []
         topics = {
-            "revenue": ["revenue_dominance", "worst_revenue", "profit_dominance", "margin_divergence"],
+            "revenue": [
+                "revenue_dominance", "worst_revenue", "profit_dominance", "margin_divergence",
+                "revenue_by_region", "revenue_by_category", "revenue_by_product",
+                "revenue_by_customer_gender", "revenue_by_discount",
+                "top_performers_product", "top_performers_category", "top_performers_region",
+            ],
             "quality": ["perfect_quality", "high_return_rate", "payment_risk", "delivery_delay_risk"],
-            "discovery": ["dominance", "correlation_matrix", "domain_detection"]
+            "discovery": ["dominance", "correlation_matrix", "domain_detection"],
+            "distribution": ["skewed_distribution"],
+            "discount": ["discount_impact"],
+            "demographic": ["demographic_split_gender", "demographic_split_customer_gender"],
         }
-        
+
         for name, rules in topics.items():
             topic_insights = [i for i in insights if i.rule_type in rules]
             if not topic_insights: continue
-            
+
             # Pick the single highest impact/score insight for each topic
             topic_insights.sort(key=lambda x: x.score, reverse=True)
             best = topic_insights[0]
-            
+
             # Enrich the best insight with context from others if they exist
             if len(topic_insights) > 1:
                 others = [i.title for i in topic_insights[1:3]]
                 best.evidence += f" | Also supported by secondary signals in: {', '.join(others)}."
-            
+
             compressed.append(best)
+
+        # Universal passthrough: rule_types not covered by any topic get through as-is
+        # This ensures future rules are never silently dropped by the topic map.
+        claimed_rule_types = {rt for rules in topics.values() for rt in rules}
+        already_compressed = {id(i) for i in compressed}
+        for ins in insights:
+            if ins.rule_type not in claimed_rule_types and id(ins) not in already_compressed:
+                compressed.append(ins)
             
         # 3. Fallback logic & Contradiction Guard
         # Check both emoji impact and string severity for symmetry
@@ -685,7 +714,7 @@ class MetricComputer:
             profile._return_count_series = None  # type: ignore[attr-defined]
 
         # ── Total Orders ──────────────────────────────────────────────────
-        metrics["total_orders"] = ComputedMetric(
+        metrics["Records"] = ComputedMetric(
             name="Total Records",
             value=float(len(df)),
             formatted=f"{len(df):,}",
@@ -742,6 +771,19 @@ class BusinessRuleEngine:
     HIGH_RETURN_RATE_MULTIPLIER     = 1.5    # cat return rate > 1.5× global → issue
     CORRELATION_RISK_THRESHOLD      = 0.4    # |corr(delivery, returns)| > 0.4 → risk
     DOMINANCE_THRESHOLD             = 0.35   # one value > 35% → flag for specific categories
+
+    @staticmethod
+    def _smart_plural(word: str) -> str:
+        """Naive English pluralizer for column-name labels."""
+        w = word.strip()
+        if not w:
+            return w
+        lower = w.lower()
+        if lower.endswith('y') and lower[-2] not in 'aeiou':
+            return w[:-1] + 'ies'
+        if lower.endswith(('s', 'sh', 'ch', 'x', 'z')):
+            return w + 'es'
+        return w + 's'
 
     # ── Tautology Detector ──────────────────────────────────────────────
     def is_derived_column(self, df: pl.DataFrame, col_a: str, col_b: str) -> bool:
@@ -1506,11 +1548,13 @@ class BusinessRuleEngine:
                 if top3_share < 35: continue
 
                 top3_names = ", ".join(str(r[col]) for r in top3)
+                col_label = col.replace('_', ' ').title()
+                col_plural = self._smart_plural(col_label)
                 insights.append(BusinessInsight(
-                    title=f"Top 3 {col}s Drive {top3_share:.0f}% of Revenue",
-                    impact="🔴 Critical" if top3_share > 60 else "🟠 Important",
+                    title=f"Top 3 {col_plural} Drive {top3_share:.0f}% of Revenue",
+                    impact="Critical" if top3_share > 60 else "Important",
                     description=(
-                        f"WHAT: Out of {n_unique} {col.lower()}s, just 3 ({top3_names}) "
+                        f"WHAT: Out of {n_unique} {col_plural.lower()}, just 3 ({top3_names}) "
                         f"account for {top3_share:.1f}% of total revenue. "
                         f"EVIDENCE: Top 3 = {self._format_inr(sum(r['total_rev'] for r in top3))} "
                         f"out of {self._format_inr(total)} total."
@@ -1952,7 +1996,7 @@ class RecommendationEngine:
                 score += 1
             # Penalize derived/correlation insights (less actionable)
             if "correlation" in rule_type.lower():
-                score -= 1
+                score -= 2
 
             scored.append((score, {
                 "impact": impact,
@@ -2033,6 +2077,12 @@ class RecommendationEngine:
                 return (
                     f"Allocate 30-day paid-acquisition test budget specifically to {excluded[0]} segment. "
                     f"If conversion lags {qualified[0]}, accept the gap and double down on {qualified[0]}."
+                )
+            if "correlation" in rule_type:
+                return (
+                    f"Include this relationship as a leading indicator in your forecasting model. "
+                    f"Set a monitoring alert if the correlation drops below 0.3 — it signals a structural shift "
+                    f"that requires immediate investigation."
                 )
             return f"Investigate the underlying drivers of: {title}"
 

@@ -42,9 +42,16 @@ from reportlab.pdfbase.ttfonts import TTFont
 FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 os.makedirs(FONT_DIR, exist_ok=True)
 
+# Matplotlib bundles DejaVuSans — use it if present (avoids download on any machine with matplotlib)
+try:
+    import matplotlib as _mpl
+    _MPL_FONT_DIR = os.path.join(_mpl.get_data_path(), "fonts", "ttf")
+except Exception:
+    _MPL_FONT_DIR = ""
+
 # Common DejaVu Sans paths across operating systems
 DEJAVU_PATHS_TO_TRY = [
-    # Windows
+    # Windows system fonts
     r"C:\Windows\Fonts\DejaVuSans.ttf",
     # Linux
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -52,6 +59,10 @@ DEJAVU_PATHS_TO_TRY = [
     # macOS (after install via Homebrew/font-dejavu)
     "/Library/Fonts/DejaVuSans.ttf",
     "/System/Library/Fonts/Supplemental/DejaVuSans.ttf",
+    # Matplotlib's bundled copies — present on any machine that has matplotlib installed
+    os.path.join(_MPL_FONT_DIR, "DejaVuSans.ttf"),
+    os.path.join(_MPL_FONT_DIR, "DejaVuSans-Bold.ttf"),
+    os.path.join(_MPL_FONT_DIR, "DejaVuSans-Oblique.ttf"),
     # Local fallback (we download here if all else fails)
     os.path.join(FONT_DIR, "DejaVuSans.ttf"),
     os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"),
@@ -98,19 +109,43 @@ try:
 
     if regular_path:
         pdfmetrics.registerFont(TTFont("DejaVuSans", regular_path))
-        print("[FONT] ✅ Registered DejaVuSans (₹ supported)")
+        print("[FONT] OK Registered DejaVuSans (INR supported)")
     if bold_path:
         pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", bold_path))
-        print("[FONT] ✅ Registered DejaVuSans-Bold")
+        print("[FONT] OK Registered DejaVuSans-Bold")
     if oblique_path:
         pdfmetrics.registerFont(TTFont("DejaVuSans-Oblique", oblique_path))
-        print("[FONT] ✅ Registered DejaVuSans-Oblique")
+        print("[FONT] OK Registered DejaVuSans-Oblique")
+
+    # Register family so <b>/<i> tags in Paragraph work with TTF fonts
+    if regular_path and bold_path:
+        pdfmetrics.registerFontFamily(
+            "DejaVuSans",
+            normal="DejaVuSans",
+            bold="DejaVuSans-Bold",
+            italic="DejaVuSans-Oblique" if oblique_path else "DejaVuSans",
+            boldItalic="DejaVuSans-Oblique" if oblique_path else "DejaVuSans",
+        )
+        print("[FONT] OK Registered DejaVuSans font family (<b>/<i> tags enabled)")
 
     PDF_FONT_REGULAR = "DejaVuSans" if regular_path else "Helvetica"
     PDF_FONT_BOLD = "DejaVuSans-Bold" if bold_path else "Helvetica-Bold"
     PDF_FONT_OBLIQUE = "DejaVuSans-Oblique" if oblique_path else "Helvetica-Oblique"
+
+    # Patch every getSampleStyleSheet() style to use DejaVuSans.
+    # This prevents any base style inheriting Helvetica from overriding our font.
+    if regular_path:
+        from reportlab.lib.styles import getSampleStyleSheet as _gss
+        _sheet = _gss()
+        for _sname, _sobj in _sheet.byName.items():
+            if hasattr(_sobj, "fontName") and (
+                "Helvetica" in str(_sobj.fontName) or "Times" in str(_sobj.fontName)
+            ):
+                _sobj.fontName = PDF_FONT_REGULAR
+        print("[FONT] OK Patched all getSampleStyleSheet() styles to DejaVuSans")
+
 except Exception as e:
-    print(f"[FONT ERROR] Falling back to Helvetica (no ₹ support): {e}")
+    print(f"[FONT ERROR] Falling back to Helvetica (no INR support): {e}")
     PDF_FONT_REGULAR = "Helvetica"
     PDF_FONT_BOLD = "Helvetica-Bold"
     PDF_FONT_OBLIQUE = "Helvetica-Oblique"
@@ -182,8 +217,8 @@ TEMPLATE_CONFIGS = {
         "brand_dark": "#000000",
         "brand_light": "#F5F5F5",
         "purple": "#333333",
-        "font_main": "Times-Roman",
-        "font_bold": "Times-Bold"
+        "font_main": PDF_FONT_REGULAR,
+        "font_bold": PDF_FONT_BOLD
     },
     "creative": {
         "brand_dark": "#8E44AD",
@@ -605,8 +640,31 @@ class PDFReportGenerator:
             "Fallback": ParagraphStyle("RFall", parent=base["Normal"],
                 fontSize=8, textColor=colors.HexColor(C.TEXT_MUTED),
                 fontName=cfg["font_main"]),
-            "Normal": base["Normal"],
+            "Normal": ParagraphStyle("RNorm", parent=base["Normal"],
+                fontName=cfg["font_main"]),
         }
+
+    @staticmethod
+    def _strip_emoji(text: str) -> str:
+        """Remove emoji and non-ASCII/₹ characters that ReportLab cannot render."""
+        return re.sub(r'[^\x00-\x7E₹]', '', str(text)).strip()
+
+    @staticmethod
+    def _md_to_rl(text: str) -> str:
+        """XML-escape text first, then convert markdown bold/italic to ReportLab XML tags.
+
+        Must escape BEFORE substituting so that financial strings like ">25%" or
+        "Q1 & Q2" don't break ReportLab's XML parser and cause the whole Paragraph
+        to fall back to plain-text rendering (showing the original asterisks).
+        """
+        from xml.sax.saxutils import escape as _xml_escape
+        safe = _xml_escape(str(text))
+        safe = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', safe)
+        safe = re.sub(r'\*(.+?)\*', r'<i>\1</i>', safe)
+        # CHANGE 5 — wrap any ₹ in an explicit font tag so the glyph is always
+        # sourced from DejaVuSans, regardless of the surrounding Paragraph style.
+        safe = re.sub(r'(₹[^<\s]*)', r'<font name="DejaVuSans">\1</font>', safe)
+        return safe
 
     def _clean_insights_dict(self, insights: dict) -> dict:
         """Sanitise insight strings — strip raw data dumps before they reach PDF."""
@@ -712,17 +770,37 @@ class PDFReportGenerator:
         return out
 
     def _kpi_table(self, kpis: dict) -> Table:
+        # CHANGE 4 — Runtime font verification
+        from reportlab.pdfbase import pdfmetrics as _pm
+        registered = list(_pm._fonts.keys())
+        print(f"[FONT_VERIFY] Registered fonts at KPI build time: {registered}")
+        print(f"[FONT_VERIFY] PDF_FONT_REGULAR = '{PDF_FONT_REGULAR}'")
+        print(f"[FONT_VERIFY] PDF_FONT_BOLD = '{PDF_FONT_BOLD}'")
+
         kpis = self._normalize_kpis(kpis)
         if not kpis:
             kpis = {"Status": "No KPI data"}
         col_w = (C.PAGE_W - 2 * C.MARGIN) / max(len(kpis), 1)
         cfg = self.config
-        hdr = [Paragraph(k, ParagraphStyle("kh", fontName=cfg["font_bold"],
+
+        # Hardcode DejaVuSans — PDF_FONT_REGULAR may resolve to Helvetica if
+        # font registration fails silently; ₹ glyph only exists in DejaVuSans.
+        def _rupee_wrap(s: str) -> str:
+            from xml.sax.saxutils import escape as _xe
+            return f'<font name="DejaVuSans">{_xe(str(s))}</font>'
+
+        kpi_val_style = ParagraphStyle(
+            'KPIVal',
+            fontName='DejaVuSans',
+            fontSize=22,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#1e293b'),
+        )
+
+        hdr = [Paragraph(k, ParagraphStyle("kh2", fontName=PDF_FONT_BOLD,
                fontSize=8, textColor=colors.white, alignment=TA_CENTER))
                for k in kpis]
-        val = [Paragraph(str(v), ParagraphStyle("kv", fontName=cfg["font_bold"],
-               fontSize=15, textColor=colors.HexColor(cfg["brand_dark"]),
-               alignment=TA_CENTER)) for v in kpis.values()]
+        val = [Paragraph(_rupee_wrap(v), kpi_val_style) for v in kpis.values()]
         tbl = Table([hdr, val], colWidths=[col_w] * len(kpis))
         tbl.setStyle(TableStyle([
             ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(cfg["purple"])),
@@ -730,6 +808,8 @@ class PDFReportGenerator:
             ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(C.RULE_GREY)),
             ("TOPPADDING",    (0, 0), (-1, -1), 8),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("FONTNAME",      (0, 1), (-1, 1),  'DejaVuSans'),
+            ("FONTNAME",      (1, 0), (-1, -1), 'DejaVuSans'),
         ]))
         return tbl
 
@@ -747,7 +827,7 @@ class PDFReportGenerator:
         if not insights:
             elements.append(Paragraph(
                 "No deep insights met the qualification threshold for this dataset.",
-                ParagraphStyle('Body', fontSize=10, textColor=colors.grey)
+                ParagraphStyle('Body', fontSize=10, textColor=colors.grey, fontName=PDF_FONT_REGULAR)
             ))
             return elements
 
@@ -775,20 +855,21 @@ class PDFReportGenerator:
 
         for i, insight in enumerate(insights, 1):
             if isinstance(insight, str):
-                title = "Metric Observation"
+                title = "Strategic Finding"
                 description = insight
                 impact = "Medium"
                 recommendation = ""
             else:
-                title = insight.get('title', 'Metric Observation')
+                title = insight.get('title', '') or insight.get('rule_type', 'Strategic Finding')
                 description = insight.get('description', '')
                 impact = insight.get('impact', 'Medium')
                 recommendation = insight.get('recommendation', '')
 
             elements.append(Paragraph(f"{i:02d}. {title}", title_style))
-            impact_label = f"[{impact.upper()} IMPACT]"
+            impact_clean = self._strip_emoji(impact)
+            impact_label = f"[{impact_clean.upper()} IMPACT]"
             elements.append(Paragraph(impact_label, impact_style_high if 'high' in impact.lower() else impact_style_medium))
-            elements.append(Paragraph(description, body_style))
+            elements.append(Paragraph(self._md_to_rl(description), body_style))
             if recommendation:
                 elements.append(Paragraph(f"→ DECISION: {recommendation}", decision_style))
             elements.append(Spacer(1, 0.15 * inch))
@@ -808,7 +889,7 @@ class PDFReportGenerator:
         if not recommendations:
             elements.append(Paragraph(
                 "Insufficient signal in the dataset to generate strategic recommendations.",
-                ParagraphStyle('Body', fontSize=10, textColor=colors.grey)
+                ParagraphStyle('Body', fontSize=10, textColor=colors.grey, fontName=PDF_FONT_REGULAR)
             ))
             return elements
 
@@ -825,27 +906,29 @@ class PDFReportGenerator:
             textColor=colors.HexColor('#64748b'), leading=12, spaceBefore=4
         )
 
-        for rec in recommendations:
+        for idx, rec in enumerate(recommendations, 1):
             # Handle legacy string format or new dict format
             if isinstance(rec, str):
                 action = rec
-                priority = "?"
+                priority_val = idx
                 timeframe = "—"
                 owner = "—"
                 impact = "Medium"
             else:
-                priority = rec.get("priority", "?")
+                priority_val = rec.get("priority") or idx
                 action = rec.get("action", "")
                 timeframe = rec.get("timeframe", "—")
                 owner = rec.get("owner", "—")
                 impact = rec.get("impact", "Medium")
 
-            meta_line = f"⏱ {timeframe}  •  👤 {owner}  •  📊 {impact} Impact"
+            priority_str = f"{int(priority_val):02d}"
+            impact_clean = self._strip_emoji(impact)
+            meta_line = f"Timeframe: {timeframe}  |  Owner: {owner}  |  Impact: {impact_clean}"
 
             row = [
-                Paragraph(f"{priority:02d}" if isinstance(priority, int) else priority, num_style),
+                Paragraph(priority_str, num_style),
                 [
-                    Paragraph(action, action_style),
+                    Paragraph(self._md_to_rl(action), action_style),
                     Paragraph(meta_line, meta_style),
                 ],
             ]
@@ -1025,12 +1108,13 @@ class UnifiedReportGenerator(PDFReportGenerator):
             log.error("Base64 decode failed: %s", exc)
             return None
 
-    def build_from_assets(self, 
+    def build_from_assets(self,
                           output_path: str,
                           charts: list[dict], # [{id, title, image_base64, error, insight}]
                           kpis: dict,
                           ai_summary: str = "",
-                          insights: list[str] = [],
+                          insights: list = [],
+                          recommendations: list = [],
                           text_blocks: list[dict] = [],
                           title: str = "Executive Intelligence Report",
                           project_name: str = "InsightStream",
@@ -1129,10 +1213,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
 
             if insights:
                 for ins in insights:
-                    # Clean up any potential raw data strings in insights
-                    clean_ins = str(ins).split('[')[0].split('{')[0] if '[' in str(ins) or '{' in str(ins) else str(ins)
-                    elements.append(Paragraph(f"• {clean_ins}", self.S["Insight"]))
-                    elements.append(Spacer(1, 8))
+                    if isinstance(ins, dict):
+                        clean_ins = ins.get("title") or ins.get("description", "")[:120]
+                    else:
+                        s = str(ins)
+                        clean_ins = s.split('[')[0].split('{')[0] if '[' in s or '{' in s else s
+                    if clean_ins:
+                        elements.append(Paragraph(f"• {clean_ins}", self.S["Insight"]))
+                        elements.append(Spacer(1, 8))
                 elements.append(Spacer(1, 20))
 
             if text_blocks:
@@ -1174,9 +1262,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
 
         # ✅ ADD MISSING SECTIONS 6 & 7
         elements.extend(self._build_section_6_deep_insights(insights))
-        # Use provided text_blocks or other source for recommendations if available
-        recs = [b.get("content") for b in text_blocks if "recommendation" in b.get("content", "").lower()]
-        if not recs: recs = insights[:3] # Fallback to top insights
+        recs = recommendations or [
+            b.get("content") for b in text_blocks
+            if "recommendation" in b.get("content", "").lower()
+        ]
         elements.extend(self._build_section_7_recommendations(recs))
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
