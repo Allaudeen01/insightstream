@@ -366,6 +366,12 @@ class DomainDetector:
                 "delivery", "returned", "product", "category",
                 "discount", "quantity", "customer", "shipping", "sku"
             ],
+            "sales": [
+                "sale", "profit", "salesperson",
+                "sale_date", "quantity_sold",
+                "quantity sold", "product_category",
+                "sales_amount", "sales amount",
+            ],
             "healthcare": [
                 "patient", "diagnosis", "blood", "bio", "clinical",
                 "insurance", "doctor", "hospital", "treatment",
@@ -393,9 +399,27 @@ class DomainDetector:
             # Score = hits / total keywords for that domain
             scores[domain] = hits / len(keywords)
 
-        # Sort domains by score descending
-        sorted_domains = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        best_domain, best_score = sorted_domains[0]
+        # Tie-breaking: boost sales score using column-level evidence
+        actual_cols_lower = [c.lower() for c in df.columns]
+
+        # "profit" is a strong sales/retail signal, absent from ecommerce
+        if "profit" in actual_cols_lower:
+            scores["sales"] = scores.get("sales", 0) + 0.3
+
+        # "salesperson" / "sales_person" → definitively sales domain
+        if any("salesperson" in c or "sales_person" in c for c in actual_cols_lower):
+            scores["sales"] = scores.get("sales", 0) + 0.5
+
+        # "order" + "discount" without "product" → ecommerce signal
+        has_order   = any("order"    in c for c in actual_cols_lower)
+        has_product = any("product"  in c for c in actual_cols_lower)
+        has_discount = any("discount" in c for c in actual_cols_lower)
+        if has_order and has_discount and not has_product:
+            scores["ecommerce"] = scores.get("ecommerce", 0) + 0.2
+
+        # Re-pick winner after tie-breaking adjustments
+        best_domain = max(scores, key=scores.get)
+        best_score  = scores[best_domain]
 
         # Log for debugging
         print(f"[DOMAIN DETECTOR] Scores: {scores}")
@@ -568,6 +592,7 @@ class DecisionIntelligenceSynthesizer:
             "distribution": ["skewed_distribution"],
             "discount": ["discount_impact"],
             "demographic": ["demographic_split_gender", "demographic_split_customer_gender"],
+            "temporal": ["temporal_peaks"],
         }
 
         for name, rules in topics.items():
@@ -899,6 +924,7 @@ class BusinessRuleEngine:
         all_insights.extend(self._rule_skewed_distribution_alert(df, domain))
         all_insights.extend(self._rule_discount_impact(df, domain))
         all_insights.extend(self._rule_demographic_split(df, domain))
+        all_insights.extend(self._rule_temporal_peaks(df))
 
         # ── Post-Processing ──────────────────────────────────────────────
         all_insights = self._deduplicate(all_insights)
@@ -1712,6 +1738,111 @@ class BusinessRuleEngine:
         return f"₹{value:,.0f}"
 
     @log_rule
+    def _rule_temporal_peaks(self, df: pl.DataFrame) -> list[BusinessInsight]:
+        """Detect monthly revenue peaks and troughs from date + revenue columns."""
+        date_col = next(
+            (c for c in df.columns if any(k in c.lower() for k in ["date", "time", "month", "period", "day"])),
+            None,
+        )
+        rev_col = next(
+            (c for c in df.columns if any(k in c.lower() for k in ["revenue", "sales", "amount", "total", "value"])),
+            None,
+        )
+        if not date_col or not rev_col:
+            return []
+        try:
+            # Parse date — handle both native date types and strings
+            if df.schema.get(date_col) in (pl.Date, pl.Datetime):
+                df_parsed = df.with_columns(pl.col(date_col).cast(pl.Date).alias("_parsed_date"))
+            else:
+                df_parsed = df.with_columns(
+                    pl.col(date_col).cast(pl.Utf8).str.to_date(strict=False).alias("_parsed_date")
+                )
+            df_parsed = df_parsed.filter(pl.col("_parsed_date").is_not_null())
+            if df_parsed.height < 30:
+                return []
+
+            monthly = (
+                df_parsed
+                .with_columns(pl.col("_parsed_date").dt.truncate("1mo").alias("_month"))
+                .group_by("_month")
+                .agg(pl.col(rev_col).cast(pl.Float64).sum().alias("monthly_rev"))
+                .sort("_month")
+            )
+            if monthly.height < 2:
+                return []
+
+            months   = monthly["_month"].to_list()
+            revenues = monthly["monthly_rev"].to_list()
+
+            # Peak/trough on FULL data
+            peak_idx   = revenues.index(max(revenues))
+            trough_idx = revenues.index(min(revenues))
+            peak_month   = months[peak_idx].strftime("%B")
+            trough_month = months[trough_idx].strftime("%B")
+            peak_val   = revenues[peak_idx]
+            trough_val = revenues[trough_idx]
+            pct_gap = ((peak_val - trough_val) / peak_val) * 100
+
+            # Center the chart window on the peak month
+            MAX_CHART_MONTHS = 12
+            half  = MAX_CHART_MONTHS // 2
+            start = max(0, peak_idx - half)
+            end   = min(len(months), start + MAX_CHART_MONTHS)
+            start = max(0, end - MAX_CHART_MONTHS)
+            display_months   = months[start:end]
+            display_revenues = revenues[start:end]
+
+            mom_parts = [
+                f"{m.strftime('%b')}={self._format_inr(r)}"
+                for m, r in zip(display_months, display_revenues)
+            ]
+            mom_str = ("..." if len(months) > MAX_CHART_MONTHS else "") + " → ".join(mom_parts)
+
+            # Chart uses display window only; full data kept in evidence string
+            chart_monthly_data = [
+                (m.strftime("%Y-%m"), r) for m, r in zip(display_months, display_revenues)
+            ]
+
+            return [BusinessInsight(
+                title=f"Revenue Peaked in {peak_month}, Troughed in {trough_month}",
+                description=(
+                    f"Monthly revenue shows clear peaks and troughs. "
+                    f"{peak_month} was the strongest month at {self._format_inr(peak_val)}, "
+                    f"while {trough_month} was the weakest at {self._format_inr(trough_val)} "
+                    f"({pct_gap:.0f}% gap). Trend: {mom_str}."
+                ),
+                why_it_matters=(
+                    "Temporal concentration creates cash flow risk and signals seasonality "
+                    "that should inform inventory and marketing planning."
+                ),
+                evidence=(
+                    f"Peak: {peak_month} ({self._format_inr(peak_val)}) | "
+                    f"Trough: {trough_month} ({self._format_inr(trough_val)}) | "
+                    f"Gap: {pct_gap:.1f}%"
+                ),
+                impact="Important",
+                recommendation=(
+                    f"Investigate the {trough_month} dip — determine if it is seasonal, "
+                    f"promotional, or operational. Pre-position inventory and marketing "
+                    f"spend ahead of {peak_month} next cycle."
+                ),
+                rule_type="temporal_peaks",
+                score=7.5,
+                chart_data={
+                    "monthly_data": chart_monthly_data,
+                    "peak_month": peak_month,
+                    "peak_val": peak_val,
+                    "trough_month": trough_month,
+                    "trough_val": trough_val,
+                    "pct_gap": round(pct_gap, 1),
+                },
+            )]
+        except Exception as e:
+            print(f"[temporal_peaks] error: {e}")
+            return []
+
+    @log_rule
     def _rule_high_return_rate_alert(self, df: pl.DataFrame, profile: DataProfile, ret_series: pl.Series) -> list[BusinessInsight]:
         """Fires when overall return rate exceeds 15%."""
         if ret_series is None: return []
@@ -1825,10 +1956,12 @@ class StrategicBriefBuilder:
 
     DOMAIN_LABELS = {
         "ecommerce": "Ecommerce",
+        "sales":     "Sales",
+        "retail":    "Retail",
         "healthcare": "Healthcare",
-        "finance": "Finance",
-        "hr": "Human Resources",
-        "general": "General Business",
+        "finance":   "Finance",
+        "hr":        "Human Resources",
+        "general":   "General Business",
     }
 
     def __init__(self, domain: str, df: pl.DataFrame, insights: list, corr_matrix=None):
@@ -2084,6 +2217,16 @@ class RecommendationEngine:
                     f"Set a monitoring alert if the correlation drops below 0.3 — it signals a structural shift "
                     f"that requires immediate investigation."
                 )
+            if "temporal" in rule_type:
+                peak = insight.get("chart_data", {}) and insight.get("chart_data", {}).get("peak_month", "peak month")
+                trough = insight.get("chart_data", {}) and insight.get("chart_data", {}).get("trough_month", "trough month")
+                peak = peak if isinstance(peak, str) else "peak month"
+                trough = trough if isinstance(trough, str) else "trough month"
+                return (
+                    f"Pre-position inventory and marketing budget ahead of {peak}. "
+                    f"Diagnose the {trough} dip — run a post-mortem on promotions, "
+                    f"stockouts, and demand signals from that period."
+                )
             return f"Investigate the underlying drivers of: {title}"
 
         return rec
@@ -2172,12 +2315,13 @@ class InsightNarrator:
             out.append({
                 "title": ins.title,
                 "description": final_desc,
-                "impact": ins.impact, 
+                "impact": ins.impact,
                 "recommendation": ins.recommendation,
                 "decision_implication": ins.decision_implication,
                 "is_unexpected": ins.is_unexpected,
                 "chart_type": ins.chart_type,
                 "chart_data": ins.chart_data,
+                "rule_type": ins.rule_type,
             })
         return out
 
@@ -2879,7 +3023,7 @@ def _fmt_currency(val: float) -> str:
 def _build_exec_summary(df: pl.DataFrame, profile: DataProfile, metrics: dict, high_impact_count: int, domain_info: dict, driver_info: dict, insights: list = None) -> str:
     """Step 7: Generate High-End Executive Strategic Brief (3-5 lines)."""
     domain_id = domain_info.get("id", "general")
-    
+
     # Use the new deterministic builder
     builder = StrategicBriefBuilder(
         domain=domain_id,
@@ -2888,4 +3032,127 @@ def _build_exec_summary(df: pl.DataFrame, profile: DataProfile, metrics: dict, h
         corr_matrix=driver_info.get("corr_matrix")
     )
     return builder.build()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA QUALITY VALIDATOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Keywords for column type inference (case-insensitive, snake_case or Title Case)
+_NUMERIC_KW = {"amount", "quantity", "profit", "price", "revenue",
+               "sales", "cost", "total", "count", "units", "value", "income"}
+_DATE_KW    = {"date", "time", "day", "when", "created", "updated"}
+
+
+def validate_dataframe(df: pl.DataFrame) -> dict:
+    """
+    Runs full data quality audit on uploaded DataFrame.
+    Returns a structured report the frontend can render.
+    Column matching is case-insensitive and supports both snake_case and Title Case.
+    """
+    import pandas as pd
+
+    issues: list[dict] = []
+    summary: dict = {"total_rows": len(df), "clean_rows": 0, "issue_count": 0}
+    pdf = df.to_pandas()
+
+    # ── 1. MISSING VALUES ─────────────────────────────────────────────────────
+    for col in pdf.columns:
+        count = int(pdf[col].isnull().sum())
+        if count > 0:
+            issues.append({
+                "type":     "MISSING_VALUES",
+                "severity": "medium",
+                "column":   col,
+                "count":    count,
+                "message":  f"{count} missing values in '{col}'",
+                "rows":     [int(r) for r in pdf[pdf[col].isnull()].index[:100]],
+            })
+
+    # ── 2. NON-NUMERIC IN NUMERIC-LIKE COLUMNS ────────────────────────────────
+    for col in pdf.columns:
+        if not any(kw in col.lower() for kw in _NUMERIC_KW):
+            continue
+        if pdf[col].dtype != object:
+            continue
+        bad_mask = pd.to_numeric(pdf[col], errors="coerce").isna() & pdf[col].notna()
+        bad_rows = pdf[bad_mask]
+        if len(bad_rows):
+            issues.append({
+                "type":     "NON_NUMERIC",
+                "severity": "critical",
+                "column":   col,
+                "count":    len(bad_rows),
+                "message":  f"{len(bad_rows)} non-numeric values in '{col}'",
+                "rows":     [int(r) for r in bad_rows.index[:100]],
+                "values":   [str(v) for v in bad_rows[col].tolist()[:20]],
+            })
+
+    # ── 3. UNPARSEABLE DATES ──────────────────────────────────────────────────
+    for col in pdf.columns:
+        if not any(kw in col.lower() for kw in _DATE_KW):
+            continue
+        if pdf[col].dtype in ("int64", "float64"):
+            continue
+        bad_dates = pdf[
+            pd.to_datetime(pdf[col], errors="coerce").isna() & pdf[col].notna()
+        ]
+        if len(bad_dates):
+            issues.append({
+                "type":     "BAD_DATE",
+                "severity": "critical",
+                "column":   col,
+                "count":    len(bad_dates),
+                "message":  f"{len(bad_dates)} unparseable dates in '{col}'",
+                "rows":     [int(r) for r in bad_dates.index[:100]],
+                "values":   [str(v) for v in bad_dates[col].tolist()[:20]],
+            })
+
+    # ── 4. DUPLICATE ROWS ─────────────────────────────────────────────────────
+    dup_count = int(pdf.duplicated().sum())
+    if dup_count > 0:
+        issues.append({
+            "type":     "DUPLICATES",
+            "severity": "medium",
+            "column":   "ALL",
+            "count":    dup_count,
+            "message":  f"{dup_count} fully duplicate rows detected",
+            "rows":     [int(r) for r in pdf[pdf.duplicated()].index[:100]],
+        })
+
+    # ── SUMMARY ───────────────────────────────────────────────────────────────
+    critical = sum(1 for i in issues if i["severity"] == "critical")
+    medium   = sum(1 for i in issues if i["severity"] == "medium")
+
+    summary["issue_count"] = len(issues)
+    summary["critical"]    = critical
+    summary["medium"]      = medium
+    summary["clean_rows"]  = max(0, len(pdf.dropna()) - dup_count)
+    summary["can_analyze"] = critical == 0
+
+    return {"summary": summary, "issues": issues}
+
+
+def auto_clean_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Auto-fix medium issues (nulls, duplicates).
+    Returns cleaned DataFrame — critical issues must be fixed by user.
+    """
+    import pandas as pd
+
+    pdf = df.to_pandas()
+    pdf = pdf.dropna()
+    pdf = pdf.drop_duplicates()
+
+    for col in pdf.columns:
+        if pdf[col].dtype == object and any(kw in col.lower() for kw in _NUMERIC_KW):
+            pdf[col] = pd.to_numeric(pdf[col], errors="coerce")
+    pdf = pdf.dropna()
+
+    for col in pdf.columns:
+        if pdf[col].dtype == object and any(kw in col.lower() for kw in _DATE_KW):
+            pdf[col] = pd.to_datetime(pdf[col], errors="coerce")
+    pdf = pdf.dropna()
+
+    return pl.from_pandas(pdf)
 

@@ -1,54 +1,64 @@
+// web/app/insights/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
-    ArrowLeft,
-    Lightbulb,
     Loader2,
-    TrendingUp,
-    TrendingDown,
-    Minus,
     Download,
-    X,
-    Pin,
     Sparkles,
-    FileText,
-    MessageSquare,
-    ChevronRight,
-    ArrowRight,
-    Send,
-    RefreshCw,
     Share2,
-    Check
+    Check,
+    ChevronRight,
+    TrendingUp,
+    Lightbulb,
+    AlertCircle,
 } from "lucide-react";
-import Navbar from "@/components/Navbar";
-import KPICard from "@/components/KPICard";
-import InsightCard from "@/components/InsightCard";
-import ChartCard from "@/components/ChartCard";
-import SkeletonCard from "@/components/SkeletonCard";
+import Sidebar from "@/components/Sidebar";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
-function getConfidenceTier(rowCount: number): { label: string; color: string; emoji: string } {
-    if (rowCount < 100)  return { label: "Low Confidence",    color: "text-red-400",    emoji: "⚠" };
-    if (rowCount < 500)  return { label: "Medium Confidence", color: "text-yellow-400", emoji: "•" };
-    return                      { label: "High Confidence",   color: "text-green-400",  emoji: "✓" };
+// ----- Plotly light theme (shared with /dashboard) -----
+const PLOT_LAYOUT = {
+    autosize: true,
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "#fafafa",
+    margin: { t: 12, r: 16, b: 36, l: 44 },
+    font: { family: "Inter, system-ui, sans-serif", color: "#3f3f46", size: 12 },
+    xaxis: {
+        gridcolor: "#e4e4e7",
+        zerolinecolor: "#d4d4d8",
+        tickfont: { color: "#52525b" },
+        linecolor: "#d4d4d8"
+    },
+    yaxis: {
+        gridcolor: "#e4e4e7",
+        zerolinecolor: "#d4d4d8",
+        tickfont: { color: "#52525b" },
+        linecolor: "#d4d4d8"
+    },
+    colorway: ["#6d5ef5", "#0ea5e9", "#f59e0b", "#ec4899", "#10b981", "#8b5cf6"],
+};
+
+// ----- Confidence based on row count (plain copy) -----
+function getConfidenceTier(rowCount: number) {
+    if (rowCount < 100) return { label: "Low confidence", tone: "text-red-700", dot: "bg-red-500" };
+    if (rowCount < 500) return { label: "Medium confidence", tone: "text-amber-700", dot: "bg-amber-500" };
+    return { label: "High confidence", tone: "text-emerald-700", dot: "bg-emerald-500" };
 }
 
+// ----- Types -----
 interface InsightData {
     title: string;
     description: string;
     chart_type: string;
-    impact: string;
+    impact: "High" | "Medium" | "Low";
     decision_implication: string;
     recommendation?: string;
 }
-
 interface RecommendationCard {
     priority: number;
     action: string;
@@ -57,7 +67,6 @@ interface RecommendationCard {
     linked_insight?: string;
     impact?: string;
 }
-
 interface InsightsData {
     session_id: string;
     executive_summary: string;
@@ -68,112 +77,108 @@ interface InsightsData {
 
 export default function InsightsPage() {
     const router = useRouter();
+
     const [loading, setLoading] = useState(true);
     const [data, setData] = useState<InsightsData | null>(null);
     const [vizData, setVizData] = useState<any>(null);
-    const [loadingViz, setLoadingViz] = useState(true);
     const [activeTab, setActiveTab] = useState<"insights" | "charts">("charts");
-    const [isExporting, setIsExporting] = useState(false);
-    const [exportProgress, setExportProgress] = useState(0);
-    const [showExportModal, setShowExportModal] = useState(false);
     const [copied, setCopied] = useState(false);
 
-    // Branding state
+    // Branding inputs (used by export)
     const [projectName, setProjectName] = useState("");
-    const [reportTitle, setReportTitle] = useState("InsightStream Analysis Report");
+    const [reportTitle, setReportTitle] = useState("InsightStream analysis report");
 
+    // Export state
+    const [showExportModal, setShowExportModal] = useState(false);
+    const [isExporting, setIsExporting] = useState(false);
+    const [exportProgress, setExportProgress] = useState(0);
+    const [exportStatus, setExportStatus] = useState("");
+
+    // ----- Load session + data -----
     useEffect(() => {
         const stored = localStorage.getItem("analysis_session");
         if (!stored) { router.push("/upload"); return; }
         const session = JSON.parse(stored);
-        setProjectName(session.filename?.split('.')[0] || "Project");
+        setProjectName(session.filename?.split(".")[0] || "Project");
         fetchData(session.session_id);
     }, [router]);
 
     const fetchData = async (sid: string) => {
         try {
             setLoading(true);
-            setLoadingViz(true);
-            
             const [insightsRes, vizRes] = await Promise.all([
                 fetch(`${API_BASE}/insights/${sid}`),
                 fetch(`${API_BASE}/generate-viz/${sid}?max_charts=12`),
             ]);
-
             if (!insightsRes.ok) throw new Error(`Insights fetch failed: ${insightsRes.status}`);
             if (!vizRes.ok) throw new Error(`Viz fetch failed: ${vizRes.status}`);
 
-            setData(await insightsRes.json());
+            const insightsJson = await insightsRes.json();
+            setData(insightsJson);
             setVizData(await vizRes.json());
-        } catch (error) {
-            console.error('Fetch error:', error);
-            // Optionally set error state to show in UI
+
+            // Persist for the dashboard PDF export
+            localStorage.setItem(`insights_${sid}`, JSON.stringify(insightsJson));
+        } catch (err) {
+            console.error("Insights fetch error:", err);
         } finally {
             setLoading(false);
-            setLoadingViz(false);
         }
     };
 
-    const [exportStatus, setExportStatus] = useState("");
+    // ----- Share link -----
+    const copyShareLink = () => {
+        const sid = data?.session_id;
+        if (!sid) return;
+        const link = `${window.location.origin}/share/dashboard/${sid}`;
+        navigator.clipboard.writeText(link);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
 
+    // ----- PDF export (logic preserved) -----
     const handleProfessionalExport = async () => {
         if (!data?.session_id) {
-            alert("Analysis session not fully loaded. Please refresh or wait.");
+            alert("Analysis session not loaded yet. Please wait.");
             return;
         }
         setIsExporting(true);
         setExportProgress(5);
-        setExportStatus("Initializing engine...");
-        
+        setExportStatus("Preparing report…");
+
         try {
             const sid = data.session_id;
             const chartAssets: any[] = [];
             const chartsToExport = vizData?.charts || [];
-            
+
             setExportProgress(15);
-            setExportStatus("Resolving visual dependencies...");
-            
-            // 1. Resolve Plotly Library
+            setExportStatus("Loading chart engine…");
+
             let Plotly = (window as any).Plotly;
             if (!Plotly) {
                 try {
-                    const mod = await import('plotly.js-dist-min' as any);
+                    const mod = await import("plotly.js-dist-min" as any);
                     Plotly = mod.default || mod;
-                } catch (e) {
-                    console.warn("Plotly dynamic resolve failed");
-                }
+                } catch {/* per-chart error */ }
             }
 
-            // 2. Capture Charts
             for (let i = 0; i < chartsToExport.length; i++) {
                 const chart = chartsToExport[i];
-                setExportStatus(`Capturing ${chart.title}...`);
-                
-                console.log('CAPTURE', i, 'looking for', chart.chart_id,
-                            'container:', !!document.querySelector(`[data-chart-id="${chart.chart_id}"]`),
-                            'plotly child:', !!document.querySelector(`[data-chart-id="${chart.chart_id}"] .js-plotly-plot`),
-                            'all chart_ids in DOM:', Array.from(document.querySelectorAll('[data-chart-id]')).map(el => el.getAttribute('data-chart-id')));
+                setExportStatus(`Capturing ${chart.title}…`);
+
                 const container = document.querySelector(`[data-chart-id="${chart.chart_id}"]`);
-                const plotlyEl = container?.querySelector('.js-plotly-plot');
-                
+                const plotlyEl = container?.querySelector(".js-plotly-plot");
                 let image_base64 = "";
                 let error = "";
 
                 if (plotlyEl && Plotly) {
                     try {
                         image_base64 = await Plotly.toImage(plotlyEl, {
-                            format: 'png',
-                            width: 1200,
-                            height: 700,
-                            scale: 2
+                            format: "png", width: 1200, height: 700, scale: 2,
                         });
-                    } catch (e: any) { 
-                        console.error(`Capture failed for ${chart.chart_id}:`, e);
-                        error = e.message; 
-                    }
-                } else { 
-                    error = !plotlyEl ? "Element not found" : "Plotly library missing";
-                    console.warn(`Skipping capture for ${chart.chart_id}: ${error}`);
+                    } catch (e: any) { error = e.message; }
+                } else {
+                    error = !plotlyEl ? "Element not found" : "Plotly missing";
                 }
 
                 chartAssets.push({
@@ -181,16 +186,15 @@ export default function InsightsPage() {
                     title: chart.title,
                     image_base64,
                     error,
-                    insight: chart.description || "Narrative segment."
+                    insight: chart.description || "",
                 });
 
                 setExportProgress(20 + Math.floor(((i + 1) / chartsToExport.length) * 50));
             }
 
-            // 3. Prepare Payload & Submit
-            setExportStatus("Assembling professional report...");
+            setExportStatus("Building PDF…");
             setExportProgress(80);
-            
+
             const template = localStorage.getItem("report_template") || "modern";
             const res = await fetch(`${API_BASE}/export-dashboard-pdf/${sid}`, {
                 method: "POST",
@@ -202,37 +206,34 @@ export default function InsightsPage() {
                     kpis: data.computed_metrics || {},
                     charts: chartAssets,
                     ai_summary: data.executive_summary || "",
-                    insights: (data.recommendations || []).map((r: any) =>
-                        typeof r === "string" ? r : r.action || r.linked_insight || ""
-                    ).filter(Boolean),
-                    text_blocks: []
-                })
+                    insights: (data.recommendations || [])
+                        .map((r: any) => typeof r === "string" ? r : r.action || r.linked_insight || "")
+                        .filter(Boolean),
+                    text_blocks: [],
+                }),
             });
 
             if (!res.ok) {
-                const errData = await res.json();
+                const errData = await res.json().catch(() => ({}));
                 const detail = errData.detail;
                 const msg = Array.isArray(detail)
                     ? detail.map((e: any) => e.msg ?? JSON.stringify(e)).join("; ")
                     : typeof detail === "string"
-                    ? detail
-                    : JSON.stringify(detail) ?? "Backend assembly failed";
-                throw new Error(msg || "Backend assembly failed");
+                        ? detail
+                        : "Report generation failed";
+                throw new Error(msg);
             }
 
-            setExportStatus("Ready for download!");
+            setExportStatus("Downloading…");
             setExportProgress(95);
-            
+
             const blob = await res.blob();
             const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
+            const a = document.createElement("a");
             a.href = url;
-            a.download = `InsightStream_${projectName.replace(/\s+/g, '_')}_Report.pdf`;
+            a.download = `InsightStream_${projectName.replace(/\s+/g, "_")}_Report.pdf`;
             document.body.appendChild(a);
             a.click();
-            
-            // Cleanup
             setTimeout(() => {
                 window.URL.revokeObjectURL(url);
                 document.body.removeChild(a);
@@ -244,173 +245,402 @@ export default function InsightsPage() {
                 setIsExporting(false);
                 setExportProgress(0);
                 setExportStatus("");
-            }, 800);
-
+            }, 600);
         } catch (err: any) {
-            console.error("Export Critical Failure:", err);
-            alert(`Report Export Failed: ${err.message}`);
+            alert(`Export failed: ${err.message}`);
             setIsExporting(false);
             setExportStatus("");
         }
     };
 
-    const copyShareLink = () => {
-        const sid = data?.session_id;
-        const link = `${window.location.origin}/share/dashboard/${sid}`;
-        navigator.clipboard.writeText(link);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-    };
+    // ----- Loading -----
+    if (loading) {
+        return (
+            <div className="flex h-screen bg-white">
+                <Sidebar />
+                <div className="flex flex-1 items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-zinc-400" strokeWidth={1.75} />
+                </div>
+            </div>
+        );
+    }
 
-    if (loading) return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-500" /></div>;
+    const charts = vizData?.charts || [];
+    const totalRecords = data?.computed_metrics?.Records?.value || 0;
+    const tier = getConfidenceTier(totalRecords);
 
     return (
-        <div className="min-h-screen bg-background pb-20">
-            <Navbar />
-            <main className="container mx-auto px-6 py-10 max-w-7xl">
-                <div className="flex items-center justify-between mb-8">
-                    <h1 className="text-3xl font-black tracking-tight">{projectName} <span className="text-muted-foreground font-normal">/ Insights</span></h1>
-                    <div className="flex items-center gap-3">
-                        <button 
+        <div className="flex h-screen bg-white text-zinc-900 antialiased">
+            <Sidebar />
+
+            <div className="flex min-w-0 flex-1 flex-col">
+                {/* Top bar */}
+                <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-zinc-200 bg-white/85 px-6 backdrop-blur">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <h1 className="truncate text-[17px] font-semibold tracking-[-0.01em]">
+                            {projectName}
+                        </h1>
+                        <span className="text-zinc-300">/</span>
+                        <span className="text-[13px] text-zinc-500">Insights</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <button
                             onClick={copyShareLink}
-                            className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
                         >
-                            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5" />}
-                            {copied ? "Link Copied" : "Share Dashboard"}
+                            {copied
+                                ? <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2} />
+                                : <Share2 className="h-3.5 w-3.5" strokeWidth={1.75} />}
+                            {copied ? "Copied" : "Share"}
                         </button>
-                        <button 
+                        <button
                             onClick={() => setShowExportModal(true)}
-                            className="flex items-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-500/20 transition-all"
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-3 text-[13px] font-medium text-white hover:bg-[#5b4be0]"
                         >
-                            <Download className="w-4 h-4" />
-                            Export Professional Report
+                            <Download className="h-3.5 w-3.5" strokeWidth={1.75} />
+                            Export PDF
                         </button>
                     </div>
-                </div>
+                </header>
 
-                {data?.executive_summary && (
-                    <div className="mb-10 p-8 bg-indigo-600/10 border border-indigo-500/20 rounded-[2rem] relative overflow-hidden group">
-                        <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-500">
-                            <Sparkles className="w-24 h-24 text-indigo-400" />
-                        </div>
-                        <div className="relative z-10">
-                            <div className="flex items-center gap-3 mb-4">
-                                <div className="p-2 bg-indigo-500 rounded-lg text-white shadow-lg shadow-indigo-500/30">
-                                    <Sparkles className="w-4 h-4" />
+                {/* Body */}
+                <main className="flex-1 overflow-auto">
+                    <div className="mx-auto max-w-[1200px] px-6 py-6">
+                        {/* Executive summary */}
+                        {data?.executive_summary && (
+                            <section className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm">
+                                <div className="flex items-center gap-2 text-[12px] font-medium text-[#6d5ef5]">
+                                    <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
+                                    AI summary
                                 </div>
-                                <h2 className="text-sm font-black uppercase tracking-[0.2em] text-indigo-400">AI Strategic Brief</h2>
-                            </div>
-                            <p className="text-xl font-medium leading-relaxed text-white/90 max-w-4xl">
-                                {data.executive_summary}
-                            </p>
-                            
-                            <div className="mt-6 flex items-center gap-2 text-xs font-bold uppercase tracking-wider">
-                                {(() => {
-                                    const totalRecords = data.computed_metrics?.Records?.value || 0;
-                                    const tier = getConfidenceTier(totalRecords);
-                                    return (
-                                        <span className={`flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 ${tier.color}`}>
-                                            {tier.emoji} Based on {totalRecords.toLocaleString('en-IN')} records — {tier.label}
-                                        </span>
-                                    );
-                                })()}
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                <div className="flex p-1.5 bg-white/5 rounded-2xl border border-white/10 w-fit mb-12">
-                    <button onClick={() => setActiveTab("charts")} className={`px-8 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === 'charts' ? 'bg-indigo-600 text-white' : 'text-muted-foreground hover:text-white'}`}>Visualizations</button>
-                    <button onClick={() => setActiveTab("insights")} className={`px-8 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === 'insights' ? 'bg-indigo-600 text-white' : 'text-muted-foreground hover:text-white'}`}>Strategic Insights</button>
-                </div>
-
-                {activeTab === "charts" ? (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-page-enter">
-                        {vizData?.charts?.map((chart: any, i: number) => {
-                            const isLast = i === vizData.charts.length - 1;
-                            const isOddCount = vizData.charts.length % 2 === 1;
-                            const shouldSpan = isLast && isOddCount;
-                            
-                            return (
-                                <div key={i} data-chart-id={chart.chart_id} className={shouldSpan ? "lg:col-span-2" : ""}>
-                                    <ChartCard title={chart.title}>
-                                        <div className="h-[350px]">
-                                            <Plot
-                                                data={chart.plotly_json.data}
-                                                layout={{ ...chart.plotly_json.layout, autosize: true, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: { color: '#94a3b8' } }}
-                                                config={{ displayModeBar: false, responsive: true }}
-                                                style={{ width: '100%', height: '100%' }}
-                                                useResizeHandler
-                                            />
-                                        </div>
-                                    </ChartCard>
+                                <p className="mt-3 text-[15px] leading-relaxed text-zinc-800">
+                                    {data.executive_summary}
+                                </p>
+                                <div className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[12px] font-medium text-zinc-700">
+                                    <span className={`h-1.5 w-1.5 rounded-full ${tier.dot}`} />
+                                    <span className={tier.tone}>{tier.label}</span>
+                                    <span className="text-zinc-400">·</span>
+                                    <span className="text-zinc-500">
+                                        Based on {totalRecords.toLocaleString("en-IN")} records
+                                    </span>
                                 </div>
-                            );
-                        })}
-                    </div>
-                ) : (
-                    <div className="space-y-6 animate-page-enter">
-                        {data?.strategic_brief.map((insight, i) => (
-                            <InsightCard key={i} {...insight} impact={insight.impact as any} recommendation={insight.decision_implication} />
-                        ))}
-                    </div>
-                )}
-            </main>
-
-            {/* Professional Export Modal */}
-            {showExportModal && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
-                    <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-10 w-full max-w-xl animate-scale-up">
-                        <div className="flex items-center justify-between mb-8">
-                            <div className="flex items-center gap-3">
-                                <div className="p-3 rounded-2xl bg-indigo-500/20 text-indigo-400"><FileText className="w-6 h-6" /></div>
-                                <h2 className="text-2xl font-black">Export Settings</h2>
-                            </div>
-                            <button onClick={() => setShowExportModal(false)}><X className="w-6 h-6 text-muted-foreground" /></button>
-                        </div>
-
-                        <div className="space-y-6 mb-10">
-                            <div>
-                                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Project Name</label>
-                                <input 
-                                    type="text" 
-                                    value={projectName} 
-                                    onChange={(e) => setProjectName(e.target.value)}
-                                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:border-indigo-500 focus:outline-none transition-all"
-                                />
-                            </div>
-                            <div>
-                                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Report Title</label>
-                                <input 
-                                    type="text" 
-                                    value={reportTitle} 
-                                    onChange={(e) => setReportTitle(e.target.value)}
-                                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:border-indigo-500 focus:outline-none transition-all"
-                                />
-                            </div>
-                        </div>
-
-                        {isExporting ? (
-                            <div className="space-y-4">
-                                <div className="h-2 w-full bg-white/5 rounded-full overflow-hidden">
-                                    <div className="h-full bg-indigo-500 transition-all duration-500" style={{ width: `${exportProgress}%` }} />
-                                </div>
-                                <div className="flex justify-between items-center">
-                                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-400 animate-pulse">{exportStatus || "Generating PDF Intelligence..."}</p>
-                                    <p className="text-[10px] font-bold text-muted-foreground">{exportProgress}%</p>
-                                </div>
-                            </div>
-                        ) : (
-                            <button 
-                                onClick={handleProfessionalExport}
-                                className="w-full py-5 bg-indigo-600 hover:bg-indigo-500 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-indigo-500/20 transition-all"
-                            >
-                                Generate PDF Report
-                            </button>
+                            </section>
                         )}
+
+                        {/* Tabs */}
+                        <div className="mt-6 flex h-9 items-center gap-1 border-b border-zinc-200">
+                            <TabBtn active={activeTab === "charts"} onClick={() => setActiveTab("charts")}>
+                                Visualizations
+                                <Pill>{charts.length}</Pill>
+                            </TabBtn>
+                            <TabBtn active={activeTab === "insights"} onClick={() => setActiveTab("insights")}>
+                                Insights
+                                <Pill>{data?.strategic_brief?.length ?? 0}</Pill>
+                            </TabBtn>
+                        </div>
+
+                        {/* Tab content */}
+                        <div className="pt-6">
+                            {activeTab === "charts" ? (
+                                charts.length === 0 ? (
+                                    <EmptyState
+                                        icon={TrendingUp}
+                                        title="No charts generated"
+                                        body="We couldn't generate any visualizations from this dataset. Try uploading a file with at least one numeric column."
+                                    />
+                                ) : (
+                                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                        {charts.map((chart: any, i: number) => {
+                                            const isLast = i === charts.length - 1;
+                                            const isOdd = charts.length % 2 === 1;
+                                            const span = isLast && isOdd ? "lg:col-span-2" : "";
+                                            return (
+                                                <div
+                                                    key={chart.chart_id}
+                                                    data-chart-id={chart.chart_id}
+                                                    className={`rounded-xl border border-zinc-200 bg-white shadow-sm ${span}`}
+                                                >
+                                                    <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
+                                                        <h3 className="truncate text-[14px] font-medium text-zinc-900">
+                                                            {chart.title}
+                                                        </h3>
+                                                    </div>
+                                                    <div className="p-3">
+                                                        <div className="h-[340px]">
+                                                            <Plot
+                                                                data={chart.plotly_json.data.map((trace: any) => ({
+                                                                    ...trace,
+                                                                    marker: {
+                                                                        ...trace.marker,
+                                                                        color: trace.marker?.color ?? "#6d5ef5",
+                                                                        opacity: 1,
+                                                                    },
+                                                                }))}
+                                                                layout={{ ...chart.plotly_json.layout, ...PLOT_LAYOUT }}
+                                                                config={{ displayModeBar: false, responsive: true }}
+                                                                style={{ width: "100%", height: "100%" }}
+                                                                useResizeHandler
+                                                            />
+                                                        </div>
+                                                        {chart.description && (
+                                                            <p className="mt-2 px-1 text-[13px] leading-relaxed text-zinc-600">
+                                                                {chart.description}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )
+                            ) : (
+                                (data?.strategic_brief?.length ?? 0) === 0 ? (
+                                    <EmptyState
+                                        icon={Lightbulb}
+                                        title="No insights yet"
+                                        body="Insights appear once the analysis finishes processing your data."
+                                    />
+                                ) : (
+                                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                        {data!.strategic_brief.map((ins, i) => (
+                                            <InsightCard
+                                                key={i}
+                                                title={ins.title}
+                                                impact={ins.impact}
+                                                description={ins.description}
+                                                recommendation={ins.recommendation || ins.decision_implication}
+                                            />
+                                        ))}
+                                    </div>
+                                )
+                            )}
+
+                            {/* Recommendations strip */}
+                            {activeTab === "insights" && (data?.recommendations?.length ?? 0) > 0 && (
+                                <section className="mt-8">
+                                    <h2 className="mb-3 text-[14px] font-semibold tracking-[-0.01em] text-zinc-900">
+                                        Recommended actions
+                                    </h2>
+                                    <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white">
+                                        {data!.recommendations.map((rec, i) => (
+                                            <div
+                                                key={i}
+                                                className={[
+                                                    "flex items-start gap-4 px-5 py-4",
+                                                    i > 0 && "border-t border-zinc-100",
+                                                ].filter(Boolean).join(" ")}
+                                            >
+                                                <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-[12px] font-semibold text-zinc-700">
+                                                    {rec.priority || i + 1}
+                                                </div>
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="text-[14px] font-medium text-zinc-900">
+                                                        {rec.action}
+                                                    </div>
+                                                    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-500">
+                                                        {rec.owner && <span>Owner: {rec.owner}</span>}
+                                                        {rec.timeframe && <span>Timeframe: {rec.timeframe}</span>}
+                                                        {rec.impact && <span>Impact: {rec.impact}</span>}
+                                                    </div>
+                                                </div>
+                                                <ChevronRight className="mt-1 h-4 w-4 text-zinc-300" strokeWidth={1.75} />
+                                            </div>
+                                        ))}
+                                    </div>
+                                </section>
+                            )}
+                        </div>
                     </div>
+                </main>
+            </div>
+
+            {/* Export modal */}
+            {showExportModal && (
+                <Modal title="Export report" onClose={() => !isExporting && setShowExportModal(false)}>
+                    <div className="space-y-4">
+                        <Field label="Project name">
+                            <input
+                                type="text"
+                                value={projectName}
+                                onChange={(e) => setProjectName(e.target.value)}
+                                disabled={isExporting}
+                                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-900 focus:border-[#6d5ef5] focus:outline-none focus:ring-2 focus:ring-[#6d5ef5]/20 disabled:opacity-50"
+                            />
+                        </Field>
+                        <Field label="Report title">
+                            <input
+                                type="text"
+                                value={reportTitle}
+                                onChange={(e) => setReportTitle(e.target.value)}
+                                disabled={isExporting}
+                                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-900 focus:border-[#6d5ef5] focus:outline-none focus:ring-2 focus:ring-[#6d5ef5]/20 disabled:opacity-50"
+                            />
+                        </Field>
+                    </div>
+
+                    {isExporting ? (
+                        <div className="mt-5">
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-100">
+                                <div
+                                    className="h-full bg-[#6d5ef5] transition-all duration-500"
+                                    style={{ width: `${exportProgress}%` }}
+                                />
+                            </div>
+                            <div className="mt-2 flex justify-between text-[12px] text-zinc-500">
+                                <span>{exportStatus || "Working…"}</span>
+                                <span className="tabular-nums">{exportProgress}%</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="mt-6 flex justify-end gap-2">
+                            <button
+                                onClick={() => setShowExportModal(false)}
+                                className="h-9 rounded-md border border-zinc-200 bg-white px-4 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleProfessionalExport}
+                                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0]"
+                            >
+                                <Download className="h-3.5 w-3.5" strokeWidth={1.75} />
+                                Generate PDF
+                            </button>
+                        </div>
+                    )}
+                </Modal>
+            )}
+        </div>
+    );
+}
+
+/* ============================================================
+   Subcomponents
+   ============================================================ */
+
+function TabBtn({
+    active, onClick, children,
+}: {
+    active: boolean;
+    onClick: () => void;
+    children: React.ReactNode;
+}) {
+    return (
+        <button
+            onClick={onClick}
+            className={[
+                "relative inline-flex h-9 items-center gap-1.5 px-3 text-[13px] font-medium transition-colors",
+                active ? "text-zinc-900" : "text-zinc-500 hover:text-zinc-900",
+            ].join(" ")}
+        >
+            {children}
+            {active && (
+                <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-[#6d5ef5]" />
+            )}
+        </button>
+    );
+}
+
+function Pill({ children }: { children: React.ReactNode }) {
+    return (
+        <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-zinc-100 px-1.5 text-[11px] font-medium text-zinc-600">
+            {children}
+        </span>
+    );
+}
+
+function InsightCard({
+    title, impact, description, recommendation,
+}: {
+    title: string;
+    impact: "High" | "Medium" | "Low";
+    description: string;
+    recommendation?: string;
+}) {
+    const impactStyle: Record<string, string> = {
+        High: "bg-red-50 text-red-700 border-red-200",
+        Medium: "bg-amber-50 text-amber-700 border-amber-200",
+        Low: "bg-sky-50 text-sky-700 border-sky-200",
+    };
+    return (
+        <article className="flex flex-col rounded-xl border border-zinc-200 bg-white p-5 shadow-sm transition-colors hover:border-zinc-300">
+            <header className="mb-3 flex items-start justify-between gap-3">
+                <h3 className="text-[15px] font-semibold leading-snug tracking-[-0.01em] text-zinc-900">
+                    {title}
+                </h3>
+                <span
+                    className={[
+                        "shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                        impactStyle[impact] ?? "bg-zinc-50 text-zinc-700 border-zinc-200",
+                    ].join(" ")}
+                >
+                    {impact} impact
+                </span>
+            </header>
+
+            <p className="text-[13px] leading-relaxed text-zinc-600">{description}</p>
+
+            {recommendation && (
+                <div className="mt-4 flex gap-2.5 rounded-lg bg-[#f1efff] px-3.5 py-3">
+                    <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#6d5ef5]" strokeWidth={1.75} />
+                    <p className="text-[13px] leading-relaxed text-zinc-800">{recommendation}</p>
                 </div>
             )}
+        </article>
+    );
+}
+
+function EmptyState({
+    icon: Icon, title, body,
+}: {
+    icon: typeof TrendingUp;
+    title: string;
+    body: string;
+}) {
+    return (
+        <div className="flex min-h-[40vh] flex-col items-center justify-center text-center">
+            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50">
+                <Icon className="h-5 w-5 text-zinc-500" strokeWidth={1.75} />
+            </div>
+            <h2 className="text-[15px] font-semibold tracking-tight text-zinc-900">{title}</h2>
+            <p className="mt-1 max-w-sm text-[13px] text-zinc-600">{body}</p>
+        </div>
+    );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+    return (
+        <label className="block">
+            <div className="mb-1.5 text-[12px] font-medium text-zinc-700">{label}</div>
+            {children}
+        </label>
+    );
+}
+
+function Modal({
+    title, children, onClose,
+}: {
+    title: string;
+    children: React.ReactNode;
+    onClose: () => void;
+}) {
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/30 backdrop-blur-sm p-4">
+            <div className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg">
+                <div className="mb-4 flex items-center justify-between">
+                    <h3 className="text-[15px] font-semibold tracking-tight text-zinc-900">{title}</h3>
+                    <button
+                        onClick={onClose}
+                        className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+                        aria-label="Close"
+                    >
+                        <AlertCircle className="hidden" />
+                        <span className="block h-4 w-4 leading-none">×</span>
+                    </button>
+                </div>
+                {children}
+            </div>
         </div>
     );
 }

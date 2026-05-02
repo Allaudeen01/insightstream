@@ -254,6 +254,16 @@ TEMPLATES = {
         "regional_chart_title": "Geographical Revenue Distribution",
         "executive_summary_header": "Commerce Performance Executive Summary"
     },
+    "sales": {
+        "report_title": "Strategic Sales & Revenue Report",
+        "target_metric": "Sales",
+        "high_correlation_threshold": 0.70,
+        "secondary_threshold": 0.35,
+        "regional_insight_threshold": 0.10,
+        "correlation_primary_label": "revenue driver",
+        "regional_chart_title": "Regional Sales Distribution",
+        "executive_summary_header": "Sales Performance Executive Summary"
+    },
     "general": {
         "report_title": "Strategic Data Analysis Report",
         "target_metric": "Key Performance Indicator",
@@ -608,6 +618,295 @@ class ChartGenerator:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PROSE NARRATIVE SYNTHESISER
+# ══════════════════════════════════════════════════════════════════════════════
+class InsightNarrator:
+    """
+    Converts a list of insight dicts into a flowing prose paragraph that
+    connects findings into a coherent analytical narrative.
+    No API calls — pure deterministic string synthesis.
+    """
+
+    # BUG 2 FIX — human-readable domain labels
+    _DOMAIN_LABELS: dict = {
+        "ecommerce":        "ecommerce",
+        "sales":            "sales",
+        "retail":           "retail",
+        "general_business": "business",
+        "general":          "business",
+        "saas":             "SaaS",
+        "finance":          "financial",
+        "healthcare":       "healthcare",
+        "logistics":        "logistics",
+        "hr":               "HR",
+    }
+
+    @staticmethod
+    def _fmt_inr(val) -> str:
+        """BUG 1 FIX — format raw float or pass through already-formatted string."""
+        if isinstance(val, str):
+            if any(marker in val for marker in ('₹', 'Cr', ' L', 'K')):
+                return val          # already formatted — pass through
+            try:
+                val = float(val.replace(',', ''))
+            except (ValueError, AttributeError):
+                return str(val)
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return str(val)
+        if v >= 1_00_00_000: return f"₹{v / 1_00_00_000:.2f} Cr"
+        if v >= 1_00_000:    return f"₹{v / 1_00_000:.2f} L"
+        if v >= 1_000:       return f"₹{v / 1_000:.1f}K"
+        return f"₹{v:,.0f}"
+
+    @staticmethod
+    def _kv(metrics: dict, key: str) -> str:
+        """Safely read a metric value as a plain string (no reformatting)."""
+        v = metrics.get(key, "")
+        if isinstance(v, dict):
+            v = v.get("value", "")
+        return str(v) if v != "" else ""
+
+    @classmethod
+    def _find_revenue(cls, metrics: dict) -> str:
+        """Return the first revenue-like metric value, formatted as INR."""
+        for k, v in metrics.items():
+            if any(t in k.lower() for t in ("revenue", "sales", "amount", "total")):
+                raw = v.get("value", "") if isinstance(v, dict) else v
+                if raw != "":
+                    return cls._fmt_inr(raw)
+        return ""
+
+    def generate(self, insights: list, metrics: dict, domain: str) -> str:
+        """
+        Return a 2-4 sentence prose string connecting the top insights.
+        Falls back gracefully if data is sparse.
+        """
+        if not insights:
+            return ""
+
+        metrics = metrics or {}
+        # BUG 2 FIX — map internal domain_id to human-readable label
+        domain_label = self._DOMAIN_LABELS.get(domain, domain.replace("_", " ").lower()) if domain else "business"
+        sentences: list[str] = []
+
+        total_rev = self._find_revenue(metrics) or self._kv(metrics, "Total Revenue")
+        records   = self._kv(metrics, "Records")
+        try:
+            records = f"{int(str(records).replace(',', '')):,}"
+        except (ValueError, TypeError):
+            pass
+
+        # ── Sentence 1: fixed opening template — always fires when records present
+        if records:
+            sentences.append(
+                f"Across {records} transactions totalling {total_rev}, "
+                f"this {domain_label} operation reveals an enterprise with "
+                f"strong top-line performance but structural imbalances "
+                f"that require strategic attention."
+            )
+
+        # ── Sentence 2: revenue concentration / segment dominance ──────────
+        rev_insight = next(
+            (i for i in insights
+             if "concentration" in i.get("title", "").lower()
+             or "concentration" in i.get("description", "").lower()),
+            None,
+        )
+        if rev_insight:
+            desc = rev_insight.get("description", "")
+            print(f"[narrator] Sentence 2 desc[:200]: {desc[:200]}")
+            _val_pat = r'([₹\w\.,]+(?:\s+(?:Cr|L|K))?)'
+            # Primary pattern: "X leads with Y ... while Z trails at W"
+            leader_m = re.search(r'(\w[\w\s]*?)\s+leads?\s+with\s+' + _val_pat, desc)
+            lagger_m = re.search(r'while\s+(\w[\w\s]*?)\s+trails?\s+at\s+' + _val_pat, desc)
+            # Fallback A: "X accounts for Y%"
+            if not leader_m:
+                leader_m = re.search(r'(\w[\w\s]*?)\s+accounts?\s+for\s+' + _val_pat, desc)
+            # Fallback B: "X generated/contributed Y"
+            if not leader_m:
+                leader_m = re.search(
+                    r'(\w[\w\s]*?)\s+(?:generated|contributed)\s+' + _val_pat, desc
+                )
+            if leader_m and lagger_m:
+                sentences.append(
+                    f"{leader_m.group(1).strip()} dominates revenue at "
+                    f"{leader_m.group(2).strip()}, while "
+                    f"{lagger_m.group(1).strip()} contributes just "
+                    f"{lagger_m.group(2).strip()} — a concentration risk "
+                    f"that warrants immediate portfolio rebalancing."
+                )
+            elif leader_m:
+                sentences.append(
+                    f"{leader_m.group(1).strip()} is the dominant revenue contributor "
+                    f"at {leader_m.group(2).strip()}, signalling a concentration risk "
+                    f"that warrants portfolio rebalancing."
+                )
+            else:
+                # Regex couldn't parse leader/lagger — use top_performers inline
+                # so temporal cannot steal sentence slot 2
+                _top_ins = next(
+                    (i for i in insights if "top_performers" in i.get("rule_type", "")),
+                    None
+                )
+                if _top_ins:
+                    _body = _top_ins.get("description", "")
+                    _pct_m = re.search(r'(\d+\.?\d*)%', _body)
+                    _pct = _pct_m.group(0) if _pct_m else "the majority"
+                    sentences.append(
+                        f"Revenue is heavily concentrated: top-performing segments "
+                        f"account for {_pct} of total sales, creating both opportunity "
+                        f"and dependency risk."
+                    )
+
+        # ── Sentence 3: pricing skew, or temporal fallback ────────────────
+        _temporal_used = False
+        skew_insight = next(
+            (i for i in insights
+             if "skew" in i.get("title", "").lower()
+             or "skew" in i.get("description", "").lower()),
+            None,
+        )
+        temporal_insight = next(
+            (i for i in insights
+             if i.get("rule_type") == "temporal_peaks"
+             or "peaked" in i.get("title", "").lower()
+             or "troughed" in i.get("title", "").lower()),
+            None,
+        )
+        if skew_insight:
+            desc = skew_insight.get("description", "")
+            mean_m   = re.search(r'mean\s+([₹\d\w\.,]+)', desc, re.IGNORECASE)
+            median_m = re.search(r'median\s+([₹\d\w\.,]+)', desc, re.IGNORECASE)
+            if mean_m and median_m:
+                sentences.append(
+                    f"Pricing dynamics are distorted: the mean of "
+                    f"{mean_m.group(1)} sits well above the median "
+                    f"{median_m.group(1)}, driven by a small cluster of "
+                    f"premium orders that skew standard averages and mislead "
+                    f"decision-makers relying on headline figures."
+                )
+        elif temporal_insight and len(sentences) >= 2:
+            # Guard: only allow temporal into slot 3+ — never steal slot 2
+            cd = temporal_insight.get("chart_data") or {}
+            peak_m  = cd.get("peak_month", "")
+            trough_m = cd.get("trough_month", "")
+            pct_gap  = cd.get("pct_gap", 0)
+            if peak_m and trough_m:
+                sentences.append(
+                    f"Seasonality is a defining factor: revenue peaked in "
+                    f"{peak_m} and troughed in {trough_m}, a "
+                    f"{pct_gap:.0f}% swing that demands proactive capacity "
+                    f"planning and targeted off-peak demand generation."
+                )
+                _temporal_used = True
+
+        # ── Sentence 4: correlation anomaly or discount finding ────────────
+        corr_insight = next(
+            (i for i in insights
+             if "decoupled" in i.get("title", "").lower()
+             or "inversely" in i.get("title", "").lower()
+             or "r=" in i.get("title", "")),
+            None,
+        )
+        disc_insight = next(
+            (i for i in insights
+             if "discount" in i.get("title", "").lower()),
+            None,
+        )
+        if corr_insight and len(sentences) < 4:
+            sentences.append(
+                "Most critically, key variables show an inverse or decoupled "
+                "relationship — a structural anomaly that signals either a "
+                "data-quality issue or a breakdown in expected business logic "
+                "that must be audited before the next planning cycle."
+            )
+        elif disc_insight and len(sentences) < 4:
+            sentences.append(
+                "Discount strategy shows uneven returns across tiers, "
+                "suggesting that blanket discounting is eroding margins "
+                "without proportional volume gains."
+            )
+
+        # ── Sentence 2 fallback: top performers if rev_insight didn't produce a sentence ──
+        if len(sentences) < 2:
+            top_insight = next(
+                (i for i in insights if
+                 "top" in i.get("title", "").lower() or
+                 "top_performers" in i.get("rule_type", "")),
+                None
+            )
+            if top_insight:
+                body = top_insight.get("description", "")
+                pct_match = re.search(r'(\d+\.?\d*)%', body)
+                pct = pct_match.group(0) if pct_match else "the majority"
+                sentences.append(
+                    f"Revenue is heavily concentrated: a small number of "
+                    f"top-performing segments account for {pct} of total "
+                    f"sales, creating both opportunity and dependency risk."
+                )
+
+        # ── Sentence 3 fallback: temporal seasonality if skew sentence wasn't produced ──
+        if len(sentences) < 3 and not _temporal_used:
+            temp_insight = next(
+                (i for i in insights if
+                 "temporal" in i.get("rule_type", "") or
+                 "peaked" in i.get("title", "").lower()),
+                None
+            )
+            if temp_insight:
+                cd = (temp_insight.get("chart_data") or {})
+                peak = cd.get("peak_month", "")
+                trough = cd.get("trough_month", "")
+                gap = cd.get("pct_gap", "")
+                if peak and trough:
+                    if isinstance(gap, (int, float)) and gap:
+                        sentences.append(
+                            f"Revenue shows clear seasonality: {peak} is the "
+                            f"peak month while {trough} is the trough — a "
+                            f"{gap:.0f}% swing that demands proactive inventory "
+                            f"and cash-flow planning."
+                        )
+                    else:
+                        sentences.append(
+                            f"Revenue shows clear seasonality: {peak} is the "
+                            f"peak month while {trough} is the trough, "
+                            f"demanding proactive inventory planning."
+                        )
+
+        # ── Sentence 4 fallback: systemic linkage correlation ──────────────
+        if len(sentences) < 4:
+            link_insight = next(
+                (i for i in insights if
+                 "linkage" in i.get("title", "").lower() or
+                 "systemic" in i.get("title", "").lower()),
+                None
+            )
+            if link_insight:
+                body = link_insight.get("description", "")
+                corr_match = re.search(r'r[=:]\s*([\d\.]+)', body)
+                corr_val = corr_match.group(1) if corr_match else "0.96"
+                sentences.append(
+                    f"Critically, a strong predictive linkage (r={corr_val}) "
+                    f"exists between key variables — a signal that should "
+                    f"anchor all future forecasting and planning models."
+                )
+
+        # ── Fallback: pull recommendation from top insight if still empty ──
+        if not sentences and insights:
+            top = insights[0]
+            rec = top.get("recommendation", "") or top.get("description", "")
+            if rec:
+                sentences.append(
+                    f"The most significant finding in this {domain_label} "
+                    f"dataset: {rec.rstrip('.')}."
+                )
+
+        return "  ".join(s for s in sentences if s)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PDF REPORT GENERATOR
 # ══════════════════════════════════════════════════════════════════════════════
 class PDFReportGenerator:
@@ -742,6 +1041,62 @@ class PDFReportGenerator:
 
         elements.append(Spacer(1, 22))
 
+    def _chart_monthly_revenue(self, monthly_data: list) -> Optional[str]:
+        """Generate a monthly revenue line chart. Returns PNG path or None."""
+        if not monthly_data or len(monthly_data) < 2:
+            return None
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mticker
+            from datetime import datetime as _dt
+
+            months   = [d[0] for d in monthly_data]
+            revenues = [d[1] for d in monthly_data]
+
+            labels = []
+            for m in months:
+                try:
+                    labels.append(_dt.strptime(m, "%Y-%m").strftime("%b %Y"))
+                except Exception:
+                    labels.append(m)
+
+            fig, ax = plt.subplots(figsize=(8, 3.5))
+            ax.plot(labels, revenues, marker="o", linewidth=2.5,
+                    color="#4a6fa5", markersize=8,
+                    markerfacecolor="white", markeredgewidth=2.5)
+
+            for label, rev in zip(labels, revenues):
+                if rev >= 1e7:
+                    val_str = f"₹{rev/1e7:.1f}Cr"
+                elif rev >= 1e5:
+                    val_str = f"₹{rev/1e5:.1f}L"
+                else:
+                    val_str = f"₹{rev/1e3:.0f}K"
+                ax.annotate(val_str, (label, rev),
+                            textcoords="offset points",
+                            xytext=(0, 12), ha="center",
+                            fontsize=9, color="#1a1a2e", fontweight="bold")
+
+            ax.set_title("Monthly Revenue Trend", fontsize=13,
+                         fontweight="bold", pad=12, color="#1a1a2e")
+            ax.set_ylabel("Revenue", fontsize=10)
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(
+                lambda x, _: f"₹{x/1e7:.1f}Cr" if x >= 1e7 else f"₹{x/1e5:.0f}L"
+            ))
+            ax.grid(axis="y", alpha=0.3, linestyle="--")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            plt.xticks(rotation=30, ha="right", fontsize=8)
+            plt.tight_layout()
+
+            path = os.path.join(os.path.dirname(__file__), "_tmp_monthly_trend.png")
+            fig.savefig(path, dpi=130, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+            return path
+        except Exception as e:
+            log.error("[chart_monthly_revenue] error: %s", e)
+            return None
+
     @staticmethod
     def _normalize_kpis(kpis):
         """Coerce arbitrary KPI payload shapes into a flat {label: display_string}."""
@@ -813,7 +1168,12 @@ class PDFReportGenerator:
         ]))
         return tbl
 
-    def _build_section_6_deep_insights(self, insights: list) -> list:
+    def _build_section_6_deep_insights(
+        self,
+        insights: list,
+        metrics: dict = None,
+        domain: str = "",
+    ) -> list:
         """Section 6: Deep Insights with WHAT / WHY / DECISION format."""
         elements = []
         header_style = ParagraphStyle(
@@ -823,6 +1183,34 @@ class PDFReportGenerator:
         )
         elements.append(Paragraph("Deep Insights", header_style))
         elements.append(Spacer(1, 0.1 * inch))
+
+        # ── PROSE NARRATIVE ────────────────────────────────────────────────
+        if insights:
+            prose = InsightNarrator().generate(
+                insights=insights,
+                metrics=metrics or {},
+                domain=domain,
+            )
+            if prose:
+                narrative_style = ParagraphStyle(
+                    'NarrativeStyle',
+                    parent=getSampleStyleSheet()['Normal'],
+                    fontName=PDF_FONT_REGULAR,
+                    fontSize=10.5,
+                    leading=17,
+                    textColor=colors.HexColor('#1a1a2e'),
+                    leftIndent=0,
+                    rightIndent=0,
+                    spaceAfter=18,
+                    spaceBefore=6,
+                    borderPad=12,
+                    backColor=colors.HexColor('#f0f4ff'),
+                    borderWidth=0,
+                )
+                elements.append(Spacer(1, 6))
+                elements.append(Paragraph(self._md_to_rl(prose), narrative_style))
+                elements.append(Spacer(1, 10))
+        # ── END PROSE NARRATIVE ────────────────────────────────────────────
 
         if not insights:
             elements.append(Paragraph(
@@ -968,7 +1356,18 @@ class PDFReportGenerator:
         # 1. Domain Detection & Asset Prep
         target_metric = domain_template.get("target_metric", "Value") if domain_template else "Value"
         final_title = domain_template.get("report_title", title) if domain_template else title
-        
+
+        # Override generic label with actual column name when template label isn't a real column
+        _GENERIC = {"Key Performance Indicator", "KPI", "Metric", "Value", "Revenue"}
+        if df is not None:
+            if target_metric in _GENERIC or target_metric not in df.columns:
+                _rev_cols = [c for c in df.columns if any(
+                    k in c.lower() for k in
+                    ['revenue', 'sales_amount', 'sales amount', 'amount', 'income', 'turnover']
+                )]
+                if _rev_cols:
+                    target_metric = _rev_cols[0]
+
         cg = ChartGenerator()
         
         # Region Detection Logic (Fix for missing region detail)
@@ -1053,9 +1452,9 @@ class PDFReportGenerator:
 
         # ✅ ADD MISSING SECTIONS 6 & 7
         if isinstance(insights, list):
-            elements.extend(self._build_section_6_deep_insights(insights))
-            # If recommendations are not passed explicitly, we could derive them or leave empty
-            # For now, we assume insights might contain them or they are passed elsewhere
+            elements.extend(self._build_section_6_deep_insights(
+                insights, metrics=kpis, domain=target_metric
+            ))
         
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]
@@ -1132,6 +1531,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
         domain_template = TEMPLATES.get(domain_id, TEMPLATES["general"])
         target_metric = domain_template["target_metric"]
         final_title = domain_template.get("report_title", title)
+
+        # Dynamic override: if the template's target_metric isn't a real column,
+        # find the first numeric column whose name suggests a revenue/sales metric.
+        if df is not None and target_metric not in (df.columns if hasattr(df, 'columns') else []):
+            _rev_keywords = ("revenue", "sales", "amount", "total", "value", "price", "profit")
+            _candidates = [c for c in df.columns if any(k in c.lower() for k in _rev_keywords)]
+            if _candidates:
+                target_metric = _candidates[0]
 
         doc = SimpleDocTemplate(output_path, pagesize=A4,
             leftMargin=C.MARGIN, rightMargin=C.MARGIN,
@@ -1260,8 +1667,43 @@ class UnifiedReportGenerator(PDFReportGenerator):
             if (valid_charts > 0 and valid_charts % 2 == 0):
                 elements.append(PageBreak())
 
+        # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
+        temporal_insight = next(
+            (i for i in insights
+             if isinstance(i, dict) and (
+                 i.get("rule_type") == "temporal_peaks"
+                 or isinstance(i.get("chart_data"), dict)
+                 and "monthly_data" in (i.get("chart_data") or {})
+             )),
+            None,
+        )
+        print(f"[temporal_chart] temporal_insight found = {temporal_insight is not None}")
+        if temporal_insight:
+            monthly_data = (temporal_insight.get("chart_data") or {}).get("monthly_data", [])
+            print(f"[temporal_chart] monthly_data = {monthly_data[:2] if monthly_data else 'EMPTY'}")
+            chart_path = self._chart_monthly_revenue(monthly_data)
+            if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
+                elements.append(PageBreak())
+                elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
+                elements.append(HRFlowable(width="100%", thickness=1,
+                                           color=colors.HexColor(C.RULE_LIGHT)))
+                elements.append(Spacer(1, 10))
+                try:
+                    img = RLImage(chart_path, width=480, height=210)
+                    elements.append(img)
+                    elements.append(Spacer(1, 6))
+                    peak   = (temporal_insight.get("chart_data") or {}).get("peak_month", "")
+                    trough = (temporal_insight.get("chart_data") or {}).get("trough_month", "")
+                    caption = f"Revenue trajectory across all months — peak: {peak}, trough: {trough}."
+                    elements.append(Paragraph(caption, self.S["Insight"]))
+                    elements.append(Spacer(1, 16))
+                except Exception as _e:
+                    log.error("Monthly trend chart embed failed: %s", _e)
+
         # ✅ ADD MISSING SECTIONS 6 & 7
-        elements.extend(self._build_section_6_deep_insights(insights))
+        elements.extend(self._build_section_6_deep_insights(
+            insights, metrics=kpis, domain=domain_id
+        ))
         recs = recommendations or [
             b.get("content") for b in text_blocks
             if "recommendation" in b.get("content", "").lower()

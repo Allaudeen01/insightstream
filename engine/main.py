@@ -28,7 +28,8 @@ import database as db
 from insight_engine import (
     ColumnClassifier, MetricComputer, BusinessRuleEngine,
     InsightNarrator, SmartChartRecommender, AnomalyDetector,
-    run_insight_engine, RecommendationEngine, StrategicBriefBuilder
+    run_insight_engine, RecommendationEngine, StrategicBriefBuilder,
+    validate_dataframe, auto_clean_dataframe,
 )
 from session_cache import SessionCache, JobTracker
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks
@@ -191,6 +192,7 @@ class DatasetSchema(BaseModel):
     preview: Optional[list[dict]] = None  # First 10 rows
     sheets: Optional[List[str]] = None    # For multi-sheet Excel files
     requires_selection: bool = False      # Flag to prompt user for sheet selection
+    quality_report: Optional[dict] = None # Data quality audit result
 
 @app.get("/")
 def read_root():
@@ -425,7 +427,32 @@ async def upload_dataset(
                     )
                 
                 target_sheet = sheet_name if sheet_name else 0
-                pdf = pd.read_excel(excel_file, sheet_name=target_sheet)
+                
+                # Read everything as string first — prevents mixed-type crash
+                pdf = pd.read_excel(
+                    excel_file, 
+                    sheet_name=target_sheet,
+                    dtype=str,          # ← KEY FIX: read ALL columns as string
+                    keep_default_na=False  # ← don't convert empty cells yet
+                )
+                
+                # Replace empty strings with NaN
+                pdf = pdf.replace('', float('nan'))
+                
+                # Now intelligently coerce each column
+                for col in pdf.columns:
+                    # Try integer first
+                    try:
+                        converted = pd.to_numeric(pdf[col], errors='coerce')
+                        non_null_orig = pdf[col].notna().sum()
+                        non_null_conv = converted.notna().sum()
+                        if non_null_orig > 0 and (non_null_conv / non_null_orig) >= 0.5:
+                            pdf[col] = converted  # Use numeric — bad rows become NaN
+                        # else: leave as string for validator to flag
+                    except Exception:
+                        pass  # Leave as string
+                
+                # Safe conversion to Polars — all columns are now either float or str
                 df = pl.from_pandas(pdf)
                 print(f"Excel parsed. Shape: {df.shape}")
             except Exception as e:
@@ -441,10 +468,28 @@ async def upload_dataset(
             raise ValueError(f"Unknown file type: {filename}")
             
         print(f"=== UPLOAD SUCCESS: {df.shape} ===")
-        
+
+        # ── Data Quality Audit ────────────────────────────────────────────
+        quality_report = validate_dataframe(df)
+        print(f"[quality] critical={quality_report['summary']['critical']}  medium={quality_report['summary']['medium']}")
+
+        if quality_report["summary"]["critical"] > 0:
+            return DatasetSchema(
+                filename=file.filename,
+                row_count=len(df),
+                column_count=len(df.columns),
+                quality_report=quality_report,
+                requires_selection=False,
+            )
+
+        # Auto-fix medium issues (nulls, duplicates) silently
+        if quality_report["summary"]["medium"] > 0:
+            df = auto_clean_dataframe(df)
+            print(f"[quality] auto-cleaned → {df.shape}")
+
         # Generate session ID
         session_id = str(uuid.uuid4())
-        
+
         # Store dataframe in session (file-based for production)
         save_session(session_id, file.filename, df)
         _cache.delete(session_id, "insight_result")
@@ -488,7 +533,8 @@ async def upload_dataset(
             column_count=len(df.columns),
             columns=columns_info,
             preview=preview,
-            requires_selection=False
+            requires_selection=False,
+            quality_report=quality_report,
         )
         
     except Exception as e:

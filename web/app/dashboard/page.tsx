@@ -1,27 +1,21 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
-    ArrowLeft,
     Save,
-    LayoutDashboard,
-    Pin,
-    Type,
-    Check,
-    GripVertical,
-    X,
     Plus,
+    X,
+    GripVertical,
     Loader2,
-    Share2,
+    Download,
     Calculator,
-    Target
+    Check,
+    BarChart3,
 } from "lucide-react";
-import Navbar from "@/components/Navbar";
-import ChartCard from "@/components/ChartCard";
-import SkeletonCard from "@/components/SkeletonCard";
+import Sidebar from "@/components/Sidebar";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
@@ -34,8 +28,21 @@ let ResponsiveGrid: any = null;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// ----- Plotly light theme used across the dashboard -----
+const PLOT_LAYOUT = {
+    autosize: true,
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "transparent",
+    margin: { t: 16, r: 16, b: 40, l: 48 },
+    font: { family: "Inter, system-ui, sans-serif", color: "#52525b", size: 12 },
+    xaxis: { gridcolor: "#f4f4f5", zerolinecolor: "#e4e4e7", tickfont: { color: "#71717a" } },
+    yaxis: { gridcolor: "#f4f4f5", zerolinecolor: "#e4e4e7", tickfont: { color: "#71717a" } },
+    colorway: ["#6d5ef5", "#14b8a6", "#f59e0b", "#ec4899", "#64748b", "#8b5cf6"],
+};
+
 export default function DashboardPage() {
     const router = useRouter();
+
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [allCharts, setAllCharts] = useState<any[]>([]);
     const [pinnedIds, setPinnedIds] = useState<string[]>([]);
@@ -45,19 +52,22 @@ export default function DashboardPage() {
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [gridReady, setGridReady] = useState(false);
+
     const containerRef = useRef<HTMLDivElement>(null);
     const [containerWidth, setContainerWidth] = useState(1200);
 
-    // Custom KPI Modal State
+    // Custom KPI modal
     const [showKPIModal, setShowKPIModal] = useState(false);
     const [availableCols, setAvailableCols] = useState<string[]>([]);
     const [kpiConfig, setKpiConfig] = useState({ column: "", aggregation: "sum", label: "" });
     const [creatingKPI, setCreatingKPI] = useState(false);
 
-    // Export State
+    // Export
     const [isExporting, setIsExporting] = useState(false);
     const [exportProgress, setExportProgress] = useState(0);
+    const [exportStatus, setExportStatus] = useState("");
 
+    // ----- Load grid library client-side -----
     useEffect(() => {
         import("react-grid-layout").then((mod) => {
             ResponsiveGrid = mod.Responsive || mod.default;
@@ -65,143 +75,7 @@ export default function DashboardPage() {
         });
     }, []);
 
-    const [exportStatus, setExportStatus] = useState("");
-
-    const handleProfessionalExport = async () => {
-        if (!sessionId) {
-            alert("Session not initialized.");
-            return;
-        }
-        setIsExporting(true);
-        setExportProgress(5);
-        setExportStatus("Initializing report engine...");
-        
-        try {
-            const chartAssets: any[] = [];
-            const chartsToExport = pinnedIds.map(id => allCharts.find(c => c.chart_id === id)).filter(Boolean);
-            
-            setExportProgress(15);
-            setExportStatus("Resolving visuals...");
-
-            // 1. Resolve Plotly Library
-            let Plotly = (window as any).Plotly;
-            if (!Plotly) {
-                try {
-                    const mod = await import('plotly.js-dist-min' as any);
-                    Plotly = mod.default || mod;
-                } catch (e) {
-                    console.warn("Plotly dynamic resolve failed");
-                }
-            }
-            
-            // 2. Capture Charts
-            for (let i = 0; i < (chartsToExport as any[]).length; i++) {
-                const chart = chartsToExport[i];
-                setExportStatus(`Capturing ${chart.title}...`);
-                
-                const container = document.querySelector(`[data-chart-id="${chart.chart_id}"]`);
-                const plotlyEl = container?.querySelector('.js-plotly-plot');
-                
-                let image_base64 = "";
-                let error = "";
-
-                if (plotlyEl && Plotly) {
-                    try {
-                        image_base64 = await Plotly.toImage(plotlyEl, {
-                            format: 'png',
-                            width: 1200,
-                            height: 700,
-                            scale: 2
-                        });
-                    } catch (e: any) {
-                        console.error(`Capture failed: ${chart.chart_id}`, e);
-                        error = e.message;
-                    }
-                } else {
-                    error = !plotlyEl ? "DOM not found" : "Plotly missing";
-                }
-
-                chartAssets.push({
-                    id: chart.chart_id,
-                    title: chart.title,
-                    image_base64,
-                    error,
-                    insight: chart.description || "Segment visualization."
-                });
-
-                setExportProgress(20 + Math.floor(((i + 1) / (chartsToExport as any[]).length) * 50));
-            }
-
-            // 3. Narrative & Context
-            const kpiData: any = {};
-            textBlocks.forEach(t => {
-                if (t.content.includes(":")) {
-                    const [k, v] = t.content.split(":");
-                    kpiData[k.trim()] = v.trim();
-                }
-            });
-
-            const storedInsights = localStorage.getItem(`insights_${sessionId}`);
-            const insightsData = storedInsights ? JSON.parse(storedInsights) : null;
-
-            setExportStatus("Building multi-page PDF...");
-            setExportProgress(80);
-            
-            const template = localStorage.getItem("report_template") || "modern";
-            const res = await fetch(`${API_BASE}/export-dashboard-pdf/${sessionId}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    title: "Executive Strategic Intelligence",
-                    project_name: "InsightStream BI",
-                    template,
-                    kpis: kpiData,
-                    charts: chartAssets,
-                    ai_summary: insightsData?.executive_summary || "",
-                    insights: insightsData?.recommendations || [],
-                    text_blocks: textBlocks
-                })
-            });
-
-            if (!res.ok) {
-                const errData = await res.json();
-                throw new Error(errData.detail || "PDF generation failed");
-            }
-
-            setExportStatus("Downloading report...");
-            setExportProgress(95);
-
-            const blob = await res.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `InsightStream_Dashboard_Report_${sessionId.slice(0,8)}.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            
-            setTimeout(() => {
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(a);
-            }, 100);
-
-            setExportProgress(100);
-            setTimeout(() => {
-                // @ts-ignore
-                if (typeof setShowExportModal !== 'undefined') setShowExportModal(false);
-                setIsExporting(false);
-                setExportProgress(0);
-                setExportStatus("");
-            }, 800);
-
-        } catch (err: any) {
-            console.error("Export failure:", err);
-            alert(`Export Failed: ${err.message}`);
-            setIsExporting(false);
-            setExportStatus("");
-        }
-    };
-
+    // ----- Track container width for the grid -----
     useEffect(() => {
         const el = containerRef.current;
         if (!el) return;
@@ -210,6 +84,7 @@ export default function DashboardPage() {
         return () => observer.disconnect();
     }, [gridReady]);
 
+    // ----- Load session + charts + saved layout -----
     useEffect(() => {
         const stored = localStorage.getItem("analysis_session");
         if (!stored) { router.push("/upload"); return; }
@@ -230,10 +105,18 @@ export default function DashboardPage() {
                 setLayout(dashRes.layout);
                 setPinnedIds(dashRes.pinned_chart_ids || []);
                 setTextBlocks(dashRes.text_blocks || []);
+            } else {
+                // Default: pin first 4 charts in a 2-up grid
+                const first = (vizRes.charts || []).slice(0, 4);
+                setPinnedIds(first.map((c: any) => c.chart_id));
+                setLayout(first.map((c: any, i: number) => ({
+                    i: c.chart_id, x: (i % 2) * 6, y: Math.floor(i / 2) * 4, w: 6, h: 4,
+                })));
             }
         }).finally(() => setLoading(false));
     }, [router]);
 
+    // ----- Save layout -----
     const handleSave = async () => {
         if (!sessionId) return;
         setSaving(true);
@@ -241,13 +124,20 @@ export default function DashboardPage() {
             await fetch(`${API_BASE}/dashboard/${sessionId}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ layout, pinned_chart_ids: pinnedIds, text_blocks: textBlocks }),
+                body: JSON.stringify({
+                    layout,
+                    pinned_chart_ids: pinnedIds,
+                    text_blocks: textBlocks,
+                }),
             });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
-        } finally { setSaving(false); }
+        } finally {
+            setSaving(false);
+        }
     };
 
+    // ----- Custom KPI -----
     const createCustomKPI = async () => {
         if (!kpiConfig.column) return;
         setCreatingKPI(true);
@@ -255,179 +145,469 @@ export default function DashboardPage() {
             const res = await fetch(`${API_BASE}/kpis/${sessionId}/custom`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(kpiConfig)
+                body: JSON.stringify(kpiConfig),
             });
             const data = await res.json();
             const kpiId = `kpi_${Date.now()}`;
-            const kpiContent = `${data.kpi.label}: ${data.kpi.formatted} (${data.kpi.trend === 'up' ? '▲' : '▼'} ${data.kpi.change_pct}%)`;
+            const trendArrow = data.kpi.trend === "up" ? "▲" : "▼";
+            const kpiContent = `${data.kpi.label}: ${data.kpi.formatted} (${trendArrow} ${data.kpi.change_pct}%)`;
             setTextBlocks(prev => [...prev, { id: kpiId, content: kpiContent }]);
             setPinnedIds(prev => [...prev, kpiId]);
             setLayout(prev => [...prev, { i: kpiId, x: 0, y: 0, w: 3, h: 2 }]);
             setShowKPIModal(false);
-        } finally { setCreatingKPI(false); }
+            setKpiConfig({ column: "", aggregation: "sum", label: "" });
+        } finally {
+            setCreatingKPI(false);
+        }
     };
 
+    // ----- Remove tile -----
     const removeItem = (id: string) => {
         setPinnedIds(prev => prev.filter(i => i !== id));
         setLayout(prev => prev.filter(l => l.i !== id));
         setTextBlocks(prev => prev.filter(t => t.id !== id));
     };
 
-    if (loading) return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-500" /></div>;
+    // ----- PDF export (logic preserved from original) -----
+    const handleProfessionalExport = async () => {
+        if (!sessionId) { alert("Session not initialized."); return; }
+        setIsExporting(true);
+        setExportProgress(5);
+        setExportStatus("Preparing report…");
+
+        try {
+            const chartAssets: any[] = [];
+            const chartsToExport = pinnedIds
+                .map(id => allCharts.find(c => c.chart_id === id))
+                .filter(Boolean);
+
+            setExportProgress(15);
+            setExportStatus("Loading chart engine…");
+
+            let Plotly = (window as any).Plotly;
+            if (!Plotly) {
+                try {
+                    const mod = await import("plotly.js-dist-min" as any);
+                    Plotly = mod.default || mod;
+                } catch {
+                    /* swallow — handled per chart */
+                }
+            }
+
+            for (let i = 0; i < chartsToExport.length; i++) {
+                const chart = chartsToExport[i];
+                setExportStatus(`Capturing ${chart.title}…`);
+
+                const container = document.querySelector(`[data-chart-id="${chart.chart_id}"]`);
+                const plotlyEl = container?.querySelector(".js-plotly-plot");
+                let image_base64 = "";
+                let error = "";
+
+                if (plotlyEl && Plotly) {
+                    try {
+                        image_base64 = await Plotly.toImage(plotlyEl, {
+                            format: "png", width: 1200, height: 700, scale: 2,
+                        });
+                    } catch (e: any) { error = e.message; }
+                } else {
+                    error = !plotlyEl ? "DOM not found" : "Plotly missing";
+                }
+
+                chartAssets.push({
+                    id: chart.chart_id,
+                    title: chart.title,
+                    image_base64,
+                    error,
+                    insight: chart.description || "",
+                });
+
+                setExportProgress(20 + Math.floor(((i + 1) / chartsToExport.length) * 50));
+            }
+
+            const kpiData: any = {};
+            textBlocks.forEach(t => {
+                if (t.content.includes(":")) {
+                    const [k, v] = t.content.split(":");
+                    kpiData[k.trim()] = v.trim();
+                }
+            });
+
+            const storedInsights = localStorage.getItem(`insights_${sessionId}`);
+            const insightsData = storedInsights ? JSON.parse(storedInsights) : null;
+
+            setExportStatus("Building PDF…");
+            setExportProgress(80);
+
+            const template = localStorage.getItem("report_template") || "modern";
+            const res = await fetch(`${API_BASE}/export-dashboard-pdf/${sessionId}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    title: "Dashboard report",
+                    project_name: "InsightStream",
+                    template,
+                    kpis: kpiData,
+                    charts: chartAssets,
+                    ai_summary: insightsData?.executive_summary || "",
+                    insights: insightsData?.recommendations || [],
+                    text_blocks: textBlocks,
+                }),
+            });
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.detail || "PDF generation failed");
+            }
+
+            setExportStatus("Downloading…");
+            setExportProgress(95);
+
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `InsightStream_Dashboard_${sessionId.slice(0, 8)}.pdf`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            }, 100);
+
+            setExportProgress(100);
+            setTimeout(() => {
+                setIsExporting(false);
+                setExportProgress(0);
+                setExportStatus("");
+            }, 600);
+        } catch (err: any) {
+            alert(`Export failed: ${err.message}`);
+            setIsExporting(false);
+            setExportStatus("");
+        }
+    };
+
+    // ----- Loading state -----
+    if (loading) {
+        return (
+            <div className="flex h-screen bg-white">
+                <Sidebar />
+                <div className="flex flex-1 items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-zinc-400" strokeWidth={1.75} />
+                </div>
+            </div>
+        );
+    }
 
     const RG = ResponsiveGrid;
 
     return (
-        <div className="min-h-screen bg-background">
-            <Navbar />
-            <main className="container mx-auto px-6 py-8">
-                <div className="flex items-center justify-between mb-12">
-                    <div className="flex items-center gap-4">
-                        <Link href="/insights" className="p-2 bg-white/5 rounded-xl hover:bg-white/10 transition-all"><ArrowLeft className="w-5 h-5" /></Link>
-                        <h1 className="text-2xl font-black tracking-tight">Executive Workspace</h1>
-                    </div>
+        <div className="flex h-screen bg-white text-zinc-900 antialiased">
+            <Sidebar />
+
+            <div className="flex min-w-0 flex-1 flex-col">
+                {/* Top bar */}
+                <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-zinc-200 bg-white/85 px-6 backdrop-blur">
                     <div className="flex items-center gap-3">
-                        <button onClick={handleProfessionalExport} disabled={isExporting} className="flex items-center gap-2 px-5 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold hover:bg-white/10 transition-all group">
-                            <Target className={`w-4 h-4 text-purple-400 ${isExporting ? 'animate-ping' : 'group-hover:scale-110 transition-transform'}`} />
-                            {isExporting ? "Capturing..." : "Professional Export"}
-                        </button>
-                        <button onClick={() => setShowKPIModal(true)} className="flex items-center gap-2 px-5 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold hover:bg-white/10 transition-all">
-                            <Calculator className="w-4 h-4 text-emerald-400" /> Custom KPI
-                        </button>
-                        <button onClick={handleSave} disabled={saving} className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold shadow-lg transition-all ${saved ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-500/20"}`}>
-                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                            {saved ? "Synchronized" : "Secure Perspective"}
-                        </button>
+                        <h1 className="text-[17px] font-semibold tracking-[-0.01em]">Dashboard</h1>
+                        <span className="text-[13px] text-zinc-500">{pinnedIds.length} pinned</span>
                     </div>
-                </div>
 
-                <div ref={containerRef}>
-                    {gridReady && RG && (
-                        <RG
-                            className="layout"
-                            layouts={{ lg: layout }}
-                            breakpoints={{ lg: 1200, md: 996, sm: 768 }}
-                            cols={{ lg: 12, md: 10, sm: 6 }}
-                            rowHeight={100}
-                            width={containerWidth}
-                            onLayoutChange={setLayout}
-                            draggableHandle=".drag-handle"
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setShowKPIModal(true)}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
                         >
-                            {pinnedIds.map((id) => {
-                                const chart = allCharts.find(c => c.chart_id === id);
-                                const text = textBlocks.find(t => t.id === id);
-                                return (
-                                    <div key={id} className="group" data-chart-id={chart?.chart_id}>
-                                        <div className="h-full rounded-[2rem] bg-slate-900 border border-white/10 p-5 flex flex-col relative">
-                                            <div className="flex items-center justify-between mb-4">
-                                                <div className="flex items-center gap-2 drag-handle cursor-grab active:cursor-grabbing">
-                                                    <GripVertical className="w-4 h-4 text-white/20" />
-                                                    <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">{chart ? "Visual" : "Metric"}</span>
-                                                </div>
-                                                <button onClick={() => removeItem(id)} className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/20 hover:text-red-400 transition-all"><X className="w-4 h-4" /></button>
-                                            </div>
-                                            {chart ? (
-                                                <div className="flex-1 min-h-0">
-                                                    <Plot
-                                                        data={chart.plotly_json.data}
-                                                        layout={{ ...chart.plotly_json.layout, autosize: true, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: { color: 'rgba(255,255,255,0.5)', size: 10 } }}
-                                                        config={{ displayModeBar: false, responsive: true }}
-                                                        style={{ width: '100%', height: '100%' }}
-                                                        useResizeHandler
-                                                    />
-                                                </div>
-                                            ) : (
-                                                <div className="flex-1 flex flex-col justify-center text-center">
-                                                    <div className="p-4 rounded-2xl bg-white/5 border border-white/5 font-bold text-lg">{text?.content}</div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </RG>
-                    )}
-                </div>
-            </main>
+                            <Calculator className="h-3.5 w-3.5" strokeWidth={1.75} />
+                            Add metric
+                        </button>
+                        <button
+                            onClick={handleProfessionalExport}
+                            disabled={isExporting}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                        >
+                            <Download className="h-3.5 w-3.5" strokeWidth={1.75} />
+                            {isExporting ? "Exporting…" : "Export PDF"}
+                        </button>
+                        <button
+                            onClick={handleSave}
+                            disabled={saving}
+                            className={[
+                                "inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium shadow-sm transition-colors",
+                                saved
+                                    ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                                    : "bg-[#6d5ef5] text-white hover:bg-[#5b4be0]",
+                            ].join(" ")}
+                        >
+                            {saving ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
+                            ) : saved ? (
+                                <Check className="h-3.5 w-3.5" strokeWidth={2} />
+                            ) : (
+                                <Save className="h-3.5 w-3.5" strokeWidth={1.75} />
+                            )}
+                            {saved ? "Saved" : "Save layout"}
+                        </button>
+                    </div>
+                </header>
 
-            {/* Custom KPI Modal */}
-            {showKPIModal && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-6">
-                    <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-10 w-full max-w-lg">
-                        <h2 className="text-2xl font-black mb-8 flex items-center gap-3"><Target className="w-6 h-6 text-emerald-400" /> Forge Custom Metric</h2>
-                        <div className="space-y-6 mb-10">
-                            <div>
-                                <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Source Dimension</label>
-                                <select 
-                                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none"
-                                    value={kpiConfig.column}
-                                    onChange={(e) => setKpiConfig({ ...kpiConfig, column: e.target.value })}
-                                >
-                                    <option value="">Select numeric column</option>
-                                    {availableCols.map(c => <option key={c} value={c}>{c}</option>)}
-                                </select>
-                            </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Aggregation</label>
-                                    <select 
-                                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none"
-                                        value={kpiConfig.aggregation}
-                                        onChange={(e) => setKpiConfig({ ...kpiConfig, aggregation: e.target.value })}
+                {/* Main */}
+                <main className="flex-1 overflow-auto">
+                    <div className="mx-auto max-w-[1400px] px-6 py-6">
+                        {pinnedIds.length === 0 ? (
+                            <EmptyState onAdd={() => setShowKPIModal(true)} />
+                        ) : (
+                            <div ref={containerRef}>
+                                {gridReady && RG && (
+                                    <RG
+                                        className="layout"
+                                        layouts={{ lg: layout }}
+                                        breakpoints={{ lg: 1200, md: 996, sm: 768 }}
+                                        cols={{ lg: 12, md: 10, sm: 6 }}
+                                        rowHeight={100}
+                                        width={containerWidth}
+                                        margin={[16, 16]}
+                                        onLayoutChange={setLayout}
+                                        draggableHandle=".drag-handle"
                                     >
-                                        <option value="sum">Summation</option>
-                                        <option value="avg">Mean Average</option>
-                                        <option value="growth">Growth %</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label className="text-[10px] font-black uppercase tracking-widest text-muted-foreground mb-2 block">Metric Label</label>
-                                    <input 
-                                        className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none"
-                                        placeholder="e.g. Total Revenue"
-                                        value={kpiConfig.label}
-                                        onChange={(e) => setKpiConfig({ ...kpiConfig, label: e.target.value })}
-                                    />
-                                </div>
+                                        {pinnedIds.map((id) => {
+                                            const chart = allCharts.find(c => c.chart_id === id);
+                                            const text = textBlocks.find(t => t.id === id);
+                                            return (
+                                                <div key={id} data-chart-id={chart?.chart_id}>
+                                                    <DashTile
+                                                        kind={chart ? "chart" : "metric"}
+                                                        title={chart?.title}
+                                                        onRemove={() => removeItem(id)}
+                                                    >
+                                                        {chart ? (
+                                                            <div className="h-full min-h-0">
+                                                                <Plot
+                                                                    data={chart.plotly_json.data}
+                                                                    layout={{ ...chart.plotly_json.layout, ...PLOT_LAYOUT }}
+                                                                    config={{ displayModeBar: false, responsive: true }}
+                                                                    style={{ width: "100%", height: "100%" }}
+                                                                    useResizeHandler
+                                                                />
+                                                            </div>
+                                                        ) : (
+                                                            <MetricBlock content={text?.content || ""} />
+                                                        )}
+                                                    </DashTile>
+                                                </div>
+                                            );
+                                        })}
+                                    </RG>
+                                )}
                             </div>
-                        </div>
-                        <div className="flex gap-3">
-                            <button onClick={() => setShowKPIModal(false)} className="flex-1 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-bold transition-all">Abort</button>
-                            <button onClick={createCustomKPI} disabled={creatingKPI || !kpiConfig.column} className="flex-[2] py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-emerald-500/20 disabled:opacity-50">
-                                {creatingKPI ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "Deploy Metric"}
-                            </button>
-                        </div>
+                        )}
                     </div>
-                </div>
-            )}
-            {/* Export Progress Modal */}
-            {isExporting && (
-                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/90 backdrop-blur-xl p-6">
-                    <div className="bg-slate-900 border border-white/10 rounded-[3rem] p-12 w-full max-w-xl text-center shadow-2xl shadow-purple-500/10">
-                        <div className="w-24 h-24 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-8 animate-pulse">
-                            <Target className="w-12 h-12 text-indigo-400" />
-                        </div>
-                        <h2 className="text-3xl font-black mb-4">Generating Intelligence</h2>
-                        <p className="text-muted-foreground mb-10 text-sm font-medium leading-relaxed">
-                            We're capturing high-fidelity snapshots of your workspace<br/> 
-                            to build a pixel-perfect professional report.
-                        </p>
-                        
-                        <div className="space-y-4">
-                            <div className="h-3 w-full bg-white/5 rounded-full overflow-hidden border border-white/5">
-                                <div 
-                                    className="h-full bg-gradient-to-r from-indigo-600 to-purple-600 transition-all duration-500 ease-out shadow-[0_0_20px_rgba(99,102,241,0.5)]" 
-                                    style={{ width: `${exportProgress}%` }} 
+                </main>
+            </div>
+
+            {/* Custom KPI modal */}
+            {showKPIModal && (
+                <Modal title="Add a custom metric" onClose={() => setShowKPIModal(false)}>
+                    <div className="space-y-4">
+                        <Field label="Column">
+                            <select
+                                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-900 focus:border-[#6d5ef5] focus:outline-none focus:ring-2 focus:ring-[#6d5ef5]/20"
+                                value={kpiConfig.column}
+                                onChange={(e) => setKpiConfig({ ...kpiConfig, column: e.target.value })}
+                            >
+                                <option value="">Select a numeric column…</option>
+                                {availableCols.map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                        </Field>
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <Field label="Aggregation">
+                                <select
+                                    className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-900 focus:border-[#6d5ef5] focus:outline-none focus:ring-2 focus:ring-[#6d5ef5]/20"
+                                    value={kpiConfig.aggregation}
+                                    onChange={(e) => setKpiConfig({ ...kpiConfig, aggregation: e.target.value })}
+                                >
+                                    <option value="sum">Sum</option>
+                                    <option value="avg">Average</option>
+                                    <option value="growth">Growth %</option>
+                                </select>
+                            </Field>
+                            <Field label="Label">
+                                <input
+                                    type="text"
+                                    placeholder="e.g. Total revenue"
+                                    value={kpiConfig.label}
+                                    onChange={(e) => setKpiConfig({ ...kpiConfig, label: e.target.value })}
+                                    className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-900 placeholder:text-zinc-400 focus:border-[#6d5ef5] focus:outline-none focus:ring-2 focus:ring-[#6d5ef5]/20"
                                 />
-                            </div>
-                            <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400 px-1">
-                                <span>{exportStatus || 'Generating Intelligence...'}</span>
-                                <span>{exportProgress}%</span>
-                            </div>
+                            </Field>
                         </div>
                     </div>
+
+                    <div className="mt-6 flex justify-end gap-2">
+                        <button
+                            onClick={() => setShowKPIModal(false)}
+                            className="h-9 rounded-md border border-zinc-200 bg-white px-4 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={createCustomKPI}
+                            disabled={creatingKPI || !kpiConfig.column}
+                            className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0] disabled:opacity-50"
+                        >
+                            {creatingKPI && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                            Add metric
+                        </button>
+                    </div>
+                </Modal>
+            )}
+
+            {/* Export progress modal */}
+            {isExporting && (
+                <Modal title="Exporting dashboard" onClose={() => { /* prevent close mid-export */ }}>
+                    <p className="text-[13px] text-zinc-600">
+                        Capturing your charts and assembling a PDF report. This usually takes 10–20 seconds.
+                    </p>
+                    <div className="mt-5">
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-100">
+                            <div
+                                className="h-full bg-[#6d5ef5] transition-all duration-500"
+                                style={{ width: `${exportProgress}%` }}
+                            />
+                        </div>
+                        <div className="mt-2 flex justify-between text-[12px] text-zinc-500">
+                            <span>{exportStatus || "Working…"}</span>
+                            <span className="tabular-nums">{exportProgress}%</span>
+                        </div>
+                    </div>
+                </Modal>
+            )}
+        </div>
+    );
+}
+
+/* ============================================================
+   Subcomponents
+   ============================================================ */
+
+function DashTile({
+    kind, title, children, onRemove,
+}: {
+    kind: "chart" | "metric";
+    title?: string;
+    children: React.ReactNode;
+    onRemove: () => void;
+}) {
+    return (
+        <div className="group flex h-full flex-col rounded-xl border border-zinc-200 bg-white shadow-sm">
+            <div className="drag-handle flex cursor-grab items-center justify-between border-b border-zinc-100 px-4 py-2.5 active:cursor-grabbing">
+                <div className="flex items-center gap-2 min-w-0">
+                    <GripVertical className="h-3.5 w-3.5 shrink-0 text-zinc-300" strokeWidth={1.75} />
+                    <span className="truncate text-[13px] font-medium text-zinc-900">
+                        {title ?? (kind === "metric" ? "Metric" : "Chart")}
+                    </span>
+                </div>
+                <button
+                    onClick={onRemove}
+                    className="opacity-0 transition-opacity group-hover:opacity-100 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+                    aria-label="Remove"
+                >
+                    <X className="h-3.5 w-3.5" strokeWidth={1.75} />
+                </button>
+            </div>
+            <div className="flex-1 min-h-0 p-3">
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function MetricBlock({ content }: { content: string }) {
+    // content shape: "Label: value (▲ 12%)"
+    const colonIdx = content.indexOf(":");
+    const label = colonIdx > -1 ? content.slice(0, colonIdx).trim() : "Metric";
+    const rest = colonIdx > -1 ? content.slice(colonIdx + 1).trim() : content;
+    const trendMatch = rest.match(/\(([▲▼])\s*([\d.]+%?)\)/);
+    const value = rest.replace(/\(.*\)/, "").trim();
+    const trend = trendMatch ? { dir: trendMatch[1], pct: trendMatch[2] } : null;
+
+    return (
+        <div className="flex h-full flex-col justify-center px-2">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+            <div className="mt-1 text-2xl font-semibold tracking-tight text-zinc-900">{value}</div>
+            {trend && (
+                <div className={[
+                    "mt-1 text-[12px] font-medium",
+                    trend.dir === "▲" ? "text-emerald-600" : "text-red-600",
+                ].join(" ")}>
+                    {trend.dir} {trend.pct}
                 </div>
             )}
+        </div>
+    );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+    return (
+        <label className="block">
+            <div className="mb-1.5 text-[12px] font-medium text-zinc-700">{label}</div>
+            {children}
+        </label>
+    );
+}
+
+function Modal({
+    title, children, onClose,
+}: {
+    title: string;
+    children: React.ReactNode;
+    onClose: () => void;
+}) {
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/30 backdrop-blur-sm p-4">
+            <div className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg">
+                <div className="mb-4 flex items-center justify-between">
+                    <h3 className="text-[15px] font-semibold tracking-tight text-zinc-900">{title}</h3>
+                    <button
+                        onClick={onClose}
+                        className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+                        aria-label="Close"
+                    >
+                        <X className="h-4 w-4" strokeWidth={1.75} />
+                    </button>
+                </div>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function EmptyState({ onAdd }: { onAdd: () => void }) {
+    return (
+        <div className="flex min-h-[60vh] flex-col items-center justify-center text-center">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50">
+                <BarChart3 className="h-5 w-5 text-zinc-500" strokeWidth={1.75} />
+            </div>
+            <h2 className="text-lg font-semibold tracking-tight text-zinc-900">Your dashboard is empty</h2>
+            <p className="mt-1 max-w-sm text-[13px] text-zinc-600">
+                Pin charts from the Insights page or add a custom metric to start building.
+            </p>
+            <div className="mt-5 flex gap-2">
+                <Link
+                    href="/insights"
+                    className="inline-flex h-9 items-center rounded-md border border-zinc-200 bg-white px-4 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
+                >
+                    Browse insights
+                </Link>
+                <button
+                    onClick={onAdd}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0]"
+                >
+                    <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+                    Add metric
+                </button>
+            </div>
         </div>
     );
 }

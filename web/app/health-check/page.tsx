@@ -1,36 +1,30 @@
+// web/app/health-check/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft,
-  ArrowRight,
   AlertTriangle,
+  ArrowRight,
+  Check,
   CheckCircle2,
-  XCircle,
+  ChevronRight,
+  Eye,
   Loader2,
-  Trash2,
+  RotateCcw,
   Sparkles,
   Table2,
+  Trash2,
   X,
-  Settings2,
-  RotateCcw,
-  Eye,
-  Check,
-  ShieldCheck,
-  Activity,
-  Layers,
-  Search,
-  ChevronRight,
   Zap,
-  BadgeCheck
 } from "lucide-react";
-import Navbar from "@/components/Navbar";
-import KPICard from "@/components/KPICard";
+import Sidebar from "@/components/Sidebar";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/* ============================================================
+   Types (unchanged from original)
+   ============================================================ */
 interface IssueItem {
   column: string;
   issue_type: string;
@@ -39,7 +33,6 @@ interface IssueItem {
   count: number;
   percentage: number;
 }
-
 interface HealthCheckData {
   session_id: string;
   quality_score: string;
@@ -48,14 +41,12 @@ interface HealthCheckData {
   duplicate_rows: number;
   issues: IssueItem[];
 }
-
 interface SessionData {
   session_id: string;
   filename: string;
   row_count: number;
   column_count: number;
 }
-
 interface RawDataResponse {
   session_id: string;
   columns: string[];
@@ -65,7 +56,6 @@ interface RawDataResponse {
   total_rows: number;
   total_pages: number;
 }
-
 interface CleaningAction {
   action: string;
   column?: string;
@@ -73,7 +63,6 @@ interface CleaningAction {
   label: string;
   recommended: boolean;
 }
-
 interface PreviewData {
   before_rows: number;
   before_columns: number;
@@ -86,18 +75,19 @@ interface PreviewData {
   changes: string[];
 }
 
+/* ============================================================
+   Page
+   ============================================================ */
 export default function HealthCheckPage() {
   const router = useRouter();
+
   const [loading, setLoading] = useState(true);
   const [healthData, setHealthData] = useState<HealthCheckData | null>(null);
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [cleaning, setCleaning] = useState(false);
-  const [showRawData, setShowRawData] = useState(false);
-  const [rawData, setRawData] = useState<RawDataResponse | null>(null);
-  const [loadingRawData, setLoadingRawData] = useState(false);
 
-  // Cleaning Modal State
+  // Cleaning state
+  const [cleaning, setCleaning] = useState(false);
   const [showCleanModal, setShowCleanModal] = useState(false);
   const [cleaningActions, setCleaningActions] = useState<CleaningAction[]>([]);
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
@@ -105,7 +95,12 @@ export default function HealthCheckPage() {
   const [canUndo, setCanUndo] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  // Raw data preview
+  const [showRawData, setShowRawData] = useState(false);
+  const [rawData, setRawData] = useState<RawDataResponse | null>(null);
+  const [loadingRawData, setLoadingRawData] = useState(false);
 
+  // ----- Init -----
   useEffect(() => {
     const stored = localStorage.getItem("analysis_session");
     if (!stored) { router.push("/upload"); return; }
@@ -114,19 +109,21 @@ export default function HealthCheckPage() {
     fetchHealthCheck(session.session_id);
   }, [router]);
 
+  // ----- API: health check -----
   const fetchHealthCheck = async (sessionId: string) => {
     try {
       const response = await fetch(`${API_BASE}/health-check/${sessionId}`);
-      if (!response.ok) throw new Error("Diagnostic array failed to sync");
+      if (!response.ok) throw new Error("Couldn't load the quality check. Please try again.");
       const data = await response.json();
       setHealthData(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Protocol breach detected");
+      setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setLoading(false);
     }
   };
 
+  // ----- API: open clean modal (build action list from issues) -----
   const openCleanModal = () => {
     if (!healthData) return;
     const actions: CleaningAction[] = [];
@@ -134,8 +131,8 @@ export default function HealthCheckPage() {
       actions.push({
         action: "drop_duplicates",
         enabled: true,
-        label: `Purge ${healthData.duplicate_rows} duplicate records`,
-        recommended: true
+        label: `Remove ${healthData.duplicate_rows.toLocaleString()} duplicate rows`,
+        recommended: true,
       });
     }
     healthData.issues.forEach(issue => {
@@ -146,17 +143,17 @@ export default function HealthCheckPage() {
           column: issue.column,
           enabled: !isHighMissing,
           label: isHighMissing
-            ? `Decommission column '${issue.column}' (${issue.percentage.toFixed(1)}% nullity)`
-            : `Synthesize ${issue.count} missing '${issue.column}' values via median`,
-          recommended: !isHighMissing
+            ? `Drop column "${issue.column}" (${issue.percentage.toFixed(1)}% missing)`
+            : `Fill ${issue.count.toLocaleString()} missing values in "${issue.column}" with the median`,
+          recommended: !isHighMissing,
         });
       } else if (issue.issue_type === "outlier") {
         actions.push({
           action: "cap_outliers",
           column: issue.column,
           enabled: false,
-          label: `Clamp extreme outliers in '${issue.column}' (${issue.count} detected)`,
-          recommended: false
+          label: `Cap ${issue.count.toLocaleString()} outliers in "${issue.column}"`,
+          recommended: false,
         });
       }
     });
@@ -165,6 +162,7 @@ export default function HealthCheckPage() {
     setShowCleanModal(true);
   };
 
+  // ----- API: preview -----
   const fetchPreview = async () => {
     if (!healthData) return;
     setLoadingPreview(true);
@@ -175,18 +173,18 @@ export default function HealthCheckPage() {
       const response = await fetch(`${API_BASE}/preview-clean/${healthData.session_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(enabledActions)
+        body: JSON.stringify(enabledActions),
       });
-      if (!response.ok) throw new Error("Simulation pipeline failure");
-      const data = await response.json();
-      setPreviewData(data);
+      if (!response.ok) throw new Error("Couldn't preview the changes.");
+      setPreviewData(await response.json());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Simulation failure");
+      setError(err instanceof Error ? err.message : "Preview failed.");
     } finally {
       setLoadingPreview(false);
     }
   };
 
+  // ----- API: apply -----
   const applyCleaning = async () => {
     if (!healthData) return;
     setCleaning(true);
@@ -197,225 +195,272 @@ export default function HealthCheckPage() {
       const response = await fetch(`${API_BASE}/clean/${healthData.session_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(enabledActions)
+        body: JSON.stringify(enabledActions),
       });
-      if (!response.ok) throw new Error("Sanitization protocol failed");
+      if (!response.ok) throw new Error("Cleaning failed. Please try again.");
       const data = await response.json();
       setCanUndo(data.can_undo);
       setShowCleanModal(false);
-      setSuccessMessage(`Dataset sanitized. ${data.changes?.length || 0} modifications applied.`);
-      setTimeout(() => setSuccessMessage(null), 10000);
+      setSuccessMessage(`Data cleaned. ${data.changes?.length || 0} change${data.changes?.length === 1 ? "" : "s"} applied.`);
+      setTimeout(() => setSuccessMessage(null), 8000);
       await fetchHealthCheck(healthData.session_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sanitization failed");
+      setError(err instanceof Error ? err.message : "Cleaning failed.");
     } finally {
       setCleaning(false);
     }
   };
 
+  // ----- API: undo -----
   const undoClean = async () => {
     if (!healthData) return;
     try {
-      const response = await fetch(`${API_BASE}/undo-clean/${healthData.session_id}`, {
-        method: "POST"
-      });
-      if (!response.ok) throw new Error("Rollback failed");
+      const response = await fetch(`${API_BASE}/undo-clean/${healthData.session_id}`, { method: "POST" });
+      if (!response.ok) throw new Error("Couldn't undo. Please try again.");
       setCanUndo(false);
-      setSuccessMessage("Dataset reverted to initial state.");
-      setTimeout(() => setSuccessMessage(null), 5000);
+      setSuccessMessage("Changes reverted.");
+      setTimeout(() => setSuccessMessage(null), 4000);
       await fetchHealthCheck(healthData.session_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Rollback failure");
+      setError(err instanceof Error ? err.message : "Undo failed.");
     }
   };
 
+  // ----- API: raw data -----
   const handleViewRawData = async () => {
     if (!sessionData) return;
     setShowRawData(true);
     setLoadingRawData(true);
     try {
       const response = await fetch(`${API_BASE}/data/${sessionData.session_id}?page_size=100`);
-      if (!response.ok) throw new Error("Vault access denied");
-      const data = await response.json();
-      setRawData(data);
+      if (!response.ok) throw new Error("Couldn't load preview data.");
+      setRawData(await response.json());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Data fetch failure");
+      setError(err instanceof Error ? err.message : "Preview failed.");
     } finally {
       setLoadingRawData(false);
     }
   };
 
-  const getSeverityStyles = (severity: string) => {
-    switch (severity) {
-      case "high": return "bg-red-500/10 border-red-500/20 text-red-400";
-      case "medium": return "bg-orange-500/10 border-orange-500/20 text-orange-400";
-      default: return "bg-blue-500/10 border-blue-500/20 text-blue-400";
-    }
-  };
-
-  const getScoreColor = (score: string) => {
-    switch (score) {
-      case "A": return "text-emerald-400 bg-emerald-500/20 border-emerald-500/30";
-      case "B": return "text-blue-400 bg-blue-500/20 border-blue-500/30";
-      case "C": return "text-orange-400 bg-orange-500/20 border-orange-500/30";
-      default: return "text-red-400 bg-red-500/20 border-red-500/30";
-    }
-  };
-
+  // ----- Loading -----
   if (loading) {
     return (
-      <div className="min-h-screen bg-background flex flex-col items-center justify-center">
-        <Activity className="w-12 h-12 text-purple-500 animate-pulse mb-6" />
-        <p className="text-muted-foreground font-bold uppercase tracking-widest text-xs">Scanning Data Integrity...</p>
+      <div className="flex h-screen bg-white">
+        <Sidebar />
+        <div className="flex flex-1 items-center justify-center">
+          <Loader2 className="h-5 w-5 animate-spin text-zinc-400" strokeWidth={1.75} />
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col overflow-hidden">
-      <Navbar />
+    <div className="flex h-screen bg-white text-zinc-900 antialiased">
+      <Sidebar />
 
-      <main className="flex-1 overflow-y-auto px-6 py-10">
-        <div className="max-w-7xl mx-auto space-y-10">
-          {error && (
-            <div className="p-5 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-400 animate-page-enter">
-              {error}
-            </div>
-          )}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Top bar */}
+        <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-zinc-200 bg-white/85 px-6 backdrop-blur">
+          <div className="flex items-center gap-3 min-w-0">
+            <h1 className="text-[17px] font-semibold tracking-[-0.01em]">Data quality check</h1>
+            {sessionData?.filename && (
+              <>
+                <span className="text-zinc-300">/</span>
+                <span className="truncate text-[13px] text-zinc-500">{sessionData.filename}</span>
+              </>
+            )}
+          </div>
 
-          {healthData && (
-            <div className="animate-page-enter">
-              {/* Summary Section */}
-              <div className="flex flex-col md:flex-row items-end justify-between gap-8 mb-10">
-                <div className="space-y-2">
-                  <div className="flex items-center gap-3 mb-2">
-                    <span className="px-3 py-1 rounded-full bg-purple-500/10 text-purple-400 text-[10px] font-bold uppercase tracking-widest border border-purple-500/20">System Diagnostics</span>
-                  </div>
-                  <h1 className="text-4xl font-black tracking-tight">Data Health Core</h1>
-                  <p className="text-muted-foreground max-w-xl">Deep structural audit of dataset integrity and relational consistency. Score represents overall usability for modeling.</p>
-                </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleViewRawData}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
+            >
+              <Eye className="h-3.5 w-3.5" strokeWidth={1.75} />
+              Preview data
+            </button>
+            {canUndo && (
+              <button
+                onClick={undoClean}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-3 text-[13px] font-medium text-amber-700 hover:bg-amber-100"
+              >
+                <RotateCcw className="h-3.5 w-3.5" strokeWidth={1.75} />
+                Undo
+              </button>
+            )}
+            <button
+              onClick={openCleanModal}
+              disabled={!healthData}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-3 text-[13px] font-medium text-white hover:bg-[#5b4be0] disabled:opacity-50"
+            >
+              <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
+              Clean data
+            </button>
+          </div>
+        </header>
 
-                <div className={`p-8 rounded-3xl border backdrop-blur-xl flex flex-col items-center gap-2 ${getScoreColor(healthData.quality_score)}`}>
-                  <span className="text-[10px] font-black uppercase tracking-[0.2em] opacity-60">Integrity Score</span>
-                  <span className="text-6xl font-black leading-none">{healthData.quality_score}</span>
-                </div>
+        {/* Body */}
+        <main className="flex-1 overflow-y-auto">
+          <div className="mx-auto max-w-[1200px] px-6 py-6">
+            {error && (
+              <div className="mb-6 flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.75} />
+                <div className="flex-1">{error}</div>
+                <button onClick={() => setError(null)} className="text-red-400 hover:text-red-700">
+                  <X className="h-4 w-4" strokeWidth={1.75} />
+                </button>
               </div>
+            )}
 
-              {/* Grid Metrics */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-12">
-                <KPICard title="Ingested Rows" value={healthData.row_count.toLocaleString()} icon={<Layers className="w-5 h-5" />} trend="Operational" />
-                <KPICard title="Total Dimensions" value={healthData.column_count.toString()} icon={<Table2 className="w-5 h-5" />} trend="Standard" />
-                <KPICard title="Duplicate Nodes" value={healthData.duplicate_rows.toString()} icon={<Trash2 className="w-5 h-5" />} trend={healthData.duplicate_rows > 0 ? "Purge Needed" : "0% (Clean)"} />
-                <KPICard title="Issue Count" value={healthData.issues.length.toString()} icon={<ShieldCheck className="w-5 h-5" />} trend={healthData.issues.length > 5 ? "Critical" : "Stable"} />
-              </div>
-
-              {/* Action Bar */}
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-2xl font-bold flex items-center gap-3">
-                  <Search className="w-6 h-6 text-purple-500" />
-                  Diagnostic Log
-                </h2>
-                <div className="flex gap-4">
-                  <button onClick={handleViewRawData} className="flex items-center gap-2 px-5 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-2xl font-bold transition-all text-sm">
-                    <Eye className="w-4 h-4" />
-                    Vault Preview
-                  </button>
-                  {canUndo && (
-                    <button onClick={undoClean} className="flex items-center gap-2 px-5 py-2.5 bg-orange-500/10 border border-orange-500/20 hover:bg-orange-500/20 text-orange-400 rounded-2xl font-bold transition-all text-sm">
-                      <RotateCcw className="w-4 h-4" />
-                      Rollback
-                    </button>
-                  )}
-                  <button onClick={openCleanModal} className="flex items-center gap-2 px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-2xl font-bold transition-all shadow-xl shadow-purple-500/20 text-sm">
-                    <Sparkles className="w-4 h-4" />
-                    Auto-Sanitize
-                  </button>
-                </div>
-              </div>
-
-              {/* Issues List */}
-              <div className="grid grid-cols-1 gap-4">
-                {healthData.issues.length === 0 ? (
-                  <div className="p-12 rounded-3xl bg-emerald-500/5 border border-emerald-500/20 flex flex-col items-center text-center">
-                    <ShieldCheck className="w-12 h-12 text-emerald-400 mb-4" />
-                    <h3 className="text-xl font-bold text-emerald-400 mb-2">Protocol Perfect</h3>
-                    <p className="text-muted-foreground">Zero structural anomalies detected in current ingestion stream.</p>
-                  </div>
-                ) : (
-                  healthData.issues.map((issue, i) => (
-                    <div key={i} className={`group p-5 rounded-3xl border backdrop-blur-sm transition-all hover:translate-x-2 ${getSeverityStyles(issue.severity)}`}>
-                      <div className="flex items-center gap-5">
-                        <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
-                          {issue.severity === "high" ? <AlertTriangle className="w-6 h-6" /> : <Layers className="w-6 h-6" />}
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-1">
-                            <span className="font-bold text-lg">{issue.column === "_all_" ? "Global Entity" : issue.column}</span>
-                            <span className="px-2 py-0.5 rounded-full bg-white/10 text-[10px] font-black uppercase tracking-widest">{issue.severity} priority</span>
-                          </div>
-                          <p className="text-sm opacity-70 leading-relaxed font-medium">{issue.description}</p>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-xl font-black">{issue.count.toLocaleString()}</div>
-                          <div className="text-[10px] font-black uppercase tracking-widest opacity-50">Impacted Units</div>
-                        </div>
-                      </div>
+            {healthData && (
+              <>
+                {/* Header summary */}
+                <section className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm">
+                  <div className="flex items-start justify-between gap-6">
+                    <div className="min-w-0 flex-1">
+                      <h2 className="text-[20px] font-semibold tracking-[-0.01em]">
+                        Quality summary
+                      </h2>
+                      <p className="mt-1 text-[13px] leading-relaxed text-zinc-600">
+                        We scanned your data for missing values, duplicates, and outliers.
+                        Use the cleaning tools to fix issues before analysis.
+                      </p>
                     </div>
-                  ))
-                )}
-              </div>
+                    <ScoreBadge score={healthData.quality_score} />
+                  </div>
 
-              {/* Navigation */}
-              <div className="mt-12 flex justify-between p-8 rounded-3xl bg-white/5 border border-white/10 backdrop-blur-xl">
-                <div className="flex flex-col gap-1">
-                    <h3 className="font-bold">Next Phase Integration</h3>
-                    <p className="text-xs text-muted-foreground">Proceed to Exploratory Data Array once diagnostics are stable.</p>
-                </div>
-                <div className="flex gap-4">
-                  <button onClick={() => router.push("/upload")} className="px-6 py-3 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 font-bold transition-all">Ingest New Data</button>
-                  <button onClick={() => router.push("/eda")} className="group flex items-center gap-2 px-8 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-2xl font-bold transition-all shadow-xl shadow-purple-500/20">
-                    Propagate to EDA
-                    <ChevronRight className="w-5 h-5 transition-transform group-hover:translate-x-1" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </main>
+                  {/* Stats row */}
+                  <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-zinc-200 bg-zinc-200 sm:grid-cols-4">
+                    <Stat
+                      label="Rows"
+                      value={healthData.row_count.toLocaleString()}
+                    />
+                    <Stat
+                      label="Columns"
+                      value={healthData.column_count.toLocaleString()}
+                    />
+                    <Stat
+                      label="Duplicates"
+                      value={healthData.duplicate_rows.toLocaleString()}
+                      tone={healthData.duplicate_rows > 0 ? "warn" : "ok"}
+                    />
+                    <Stat
+                      label="Issues"
+                      value={healthData.issues.length.toLocaleString()}
+                      tone={healthData.issues.length > 5 ? "warn" : healthData.issues.length === 0 ? "ok" : "neutral"}
+                    />
+                  </div>
+                </section>
 
-      {/* Modern Dialogs */}
+                {/* Issues */}
+                <section className="mt-8">
+                  <h2 className="mb-3 text-[14px] font-semibold tracking-[-0.01em]">
+                    Issues found
+                  </h2>
+
+                  {healthData.issues.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50 px-6 py-10 text-center">
+                      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-white">
+                        <CheckCircle2 className="h-5 w-5 text-emerald-600" strokeWidth={1.75} />
+                      </div>
+                      <h3 className="text-[15px] font-semibold text-emerald-900">No issues found</h3>
+                      <p className="mt-1 max-w-sm text-[13px] text-emerald-700">
+                        Your data looks clean and ready for analysis.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white">
+                      {healthData.issues.map((issue, i) => (
+                        <IssueRow key={i} issue={issue} divider={i > 0} />
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                {/* Footer nav */}
+                <section className="mt-8 flex flex-col gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-5 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-[14px] font-semibold text-zinc-900">Ready to analyze?</h3>
+                    <p className="mt-0.5 text-[13px] text-zinc-600">
+                      Continue to exploratory data analysis once you're happy with the data.
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={() => router.push("/upload")}
+                      className="inline-flex h-9 items-center rounded-md border border-zinc-200 bg-white px-4 text-[13px] font-medium text-zinc-700 hover:bg-white/80"
+                    >
+                      Upload another file
+                    </button>
+                    <button
+                      onClick={() => router.push("/eda")}
+                      className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0]"
+                    >
+                      Continue to EDA
+                      <ArrowRight className="h-3.5 w-3.5" strokeWidth={1.75} />
+                    </button>
+                  </div>
+                </section>
+              </>
+            )}
+          </div>
+        </main>
+      </div>
+
+      {/* ============= Preview data modal ============= */}
       {showRawData && (
-        <div className="fixed inset-0 bg-background/90 backdrop-blur-2xl flex items-center justify-center z-[100] p-6 animate-in fade-in zoom-in duration-300">
-          <div className="bg-background border border-white/10 rounded-[2.5rem] w-full max-w-7xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-            <div className="p-8 border-b border-white/5 flex items-center justify-between">
-              <div className="space-y-1">
-                <h3 className="text-2xl font-black tracking-tight">Raw Data Vault</h3>
-                <p className="text-xs text-muted-foreground uppercase font-black tracking-widest">Read-only transcript of primary ingestion</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/30 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg">
+            <div className="flex shrink-0 items-center justify-between border-b border-zinc-100 px-5 py-4">
+              <div>
+                <h3 className="text-[15px] font-semibold tracking-tight">Preview data</h3>
+                <p className="mt-0.5 text-[12px] text-zinc-500">
+                  {rawData
+                    ? `Showing first ${rawData.data.length.toLocaleString()} of ${rawData.total_rows.toLocaleString()} rows`
+                    : "Loading…"}
+                </p>
               </div>
-              <button onClick={() => setShowRawData(false)} className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl transition-all border border-white/10 text-muted-foreground"><X className="w-6 h-6" /></button>
+              <button
+                onClick={() => setShowRawData(false)}
+                className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" strokeWidth={1.75} />
+              </button>
             </div>
-            <div className="flex-1 overflow-auto p-1">
+
+            <div className="flex-1 overflow-auto">
               {loadingRawData ? (
-                <div className="flex flex-col items-center justify-center h-full gap-4">
-                    <Loader2 className="w-12 h-12 animate-spin text-purple-500" />
-                    <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Accessing Records...</span>
+                <div className="flex h-64 items-center justify-center">
+                  <Loader2 className="h-5 w-5 animate-spin text-zinc-400" strokeWidth={1.75} />
                 </div>
               ) : rawData && (
-                <table className="w-full text-sm border-spacing-0 border-separate">
-                  <thead className="sticky top-0 z-20">
-                    <tr className="bg-background/80 backdrop-blur-md">
+                <table className="w-full border-separate border-spacing-0 text-[13px]">
+                  <thead className="sticky top-0 z-10 bg-zinc-50">
+                    <tr>
                       {rawData.columns.map((col) => (
-                        <th key={col} className="px-6 py-5 text-left font-black text-xs uppercase tracking-widest border-b border-white/5 whitespace-nowrap text-muted-foreground">{col}</th>
+                        <th
+                          key={col}
+                          className="whitespace-nowrap border-b border-zinc-200 px-4 py-2.5 text-left text-[12px] font-medium text-zinc-700"
+                        >
+                          {col}
+                        </th>
                       ))}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-white/5">
+                  <tbody>
                     {rawData.data.map((row, i) => (
-                      <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
+                      <tr key={i} className="hover:bg-zinc-50">
                         {rawData.columns.map((col) => (
-                          <td key={col} className="px-6 py-4 whitespace-nowrap text-foreground/70 font-medium group-hover:text-foreground">
-                            {row[col] !== null && row[col] !== undefined ? String(row[col]) : <span className="text-red-500/50 font-bold italic">null</span>}
+                          <td
+                            key={col}
+                            className="whitespace-nowrap border-b border-zinc-100 px-4 py-2 text-zinc-800"
+                          >
+                            {row[col] !== null && row[col] !== undefined ? (
+                              String(row[col])
+                            ) : (
+                              <span className="italic text-zinc-400">null</span>
+                            )}
                           </td>
                         ))}
                       </tr>
@@ -428,94 +473,261 @@ export default function HealthCheckPage() {
         </div>
       )}
 
+      {/* ============= Clean data modal ============= */}
       {showCleanModal && (
-        <div className="fixed inset-0 bg-background/90 backdrop-blur-2xl flex items-center justify-center z-[100] p-6 animate-in fade-in zoom-in duration-300">
-            <div className="bg-background border border-white/10 rounded-[2.5rem] w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
-                <div className="p-8 border-b border-white/5 flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                        <div className="p-3 rounded-2xl bg-purple-500/10 text-purple-500 border border-purple-500/20"><Settings2 className="w-6 h-6" /></div>
-                        <div>
-                            <h3 className="text-2xl font-black">Sanitization Logic</h3>
-                            <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Select automated refinement protocols</p>
-                        </div>
-                    </div>
-                    <button onClick={() => setShowCleanModal(false)} className="p-2 text-muted-foreground hover:text-foreground"><X className="w-6 h-6" /></button>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-8 space-y-6">
-                    {cleaningActions.map((action, i) => (
-                        <button key={i} onClick={() => {
-                            const newActions = [...cleaningActions];
-                            newActions[i].enabled = !newActions[i].enabled;
-                            setCleaningActions(newActions);
-                            setPreviewData(null);
-                        }} className={`w-full text-left p-5 rounded-3xl border transition-all flex items-center gap-4 ${action.enabled ? 'bg-purple-600/10 border-purple-500/30' : 'bg-white/5 border-white/10 opacity-70 hover:opacity-100 hover:bg-white/10'}`}>
-                            <div className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center shrink-0 transition-all ${action.enabled ? 'bg-purple-500 border-purple-500 text-white' : 'border-white/20'}`}>
-                                {action.enabled && <Check className="w-4 h-4" />}
-                            </div>
-                            <div className="flex-1">
-                                <p className="font-bold">{action.label}</p>
-                                {action.recommended && <span className="text-[8px] font-black uppercase tracking-widest text-emerald-500">System Recommended</span>}
-                            </div>
-                        </button>
-                    ))}
-
-                    <div className="pt-4">
-                        <button onClick={fetchPreview} disabled={loadingPreview || !cleaningActions.some(a => a.enabled)} className="w-full flex items-center justify-center gap-3 p-4 bg-white/5 border border-white/10 rounded-2xl font-bold hover:bg-white/10 transition-all text-sm disabled:opacity-30">
-                            {loadingPreview ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5 text-yellow-500" />}
-                            Simulate Changes
-                        </button>
-
-                        {previewData && (
-                            <div className="mt-6 p-6 rounded-[2rem] bg-indigo-500/5 border border-indigo-500/20 animate-in fade-in slide-in-from-top-4">
-                                <div className="grid grid-cols-2 gap-8 mb-6">
-                                    <div className="space-y-1">
-                                        <div className="text-[10px] font-black uppercase tracking-widest opacity-50">Ingress State</div>
-                                        <div className="font-bold flex items-center gap-2">
-                                            {previewData.before_rows} Rows
-                                            <span className={`px-2 py-0.5 rounded-lg text-[10px] border ${getScoreColor(previewData.before_score)}`}>{previewData.before_score}</span>
-                                        </div>
-                                    </div>
-                                    <div className="space-y-1">
-                                        <div className="text-[10px] font-black uppercase tracking-widest text-purple-400">Post-Process</div>
-                                        <div className="font-bold flex items-center gap-2">
-                                            {previewData.after_rows} Rows
-                                            <span className={`px-2 py-0.5 rounded-lg text-[10px] border ${getScoreColor(previewData.after_score)}`}>{previewData.after_score}</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="space-y-2 border-t border-indigo-500/10 pt-4">
-                                    {previewData.changes.map((change, i) => (
-                                        <div key={i} className="flex items-center gap-2 text-xs font-medium text-foreground/70 tracking-tight">
-                                            <ChevronRight className="w-3 h-3 text-purple-500" />
-                                            {change}
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </div>
-
-                <div className="p-8 border-t border-white/5 bg-white/[0.02]">
-                    <button onClick={applyCleaning} disabled={cleaning || !cleaningActions.some(a => a.enabled)} className="w-full flex items-center justify-center gap-3 p-5 bg-purple-600 hover:bg-purple-500 text-white rounded-[1.5rem] font-black text-lg transition-all shadow-2xl shadow-purple-500/20 disabled:opacity-50">
-                        {cleaning ? <Loader2 className="w-6 h-6 animate-spin" /> : <ShieldCheck className="w-6 h-6" />}
-                        Apply Sanitization Protocol
-                    </button>
-                </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/30 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg">
+            <div className="flex shrink-0 items-center justify-between border-b border-zinc-100 px-5 py-4">
+              <div>
+                <h3 className="text-[15px] font-semibold tracking-tight">Clean data</h3>
+                <p className="mt-0.5 text-[12px] text-zinc-500">
+                  Pick the fixes you want to apply.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowCleanModal(false)}
+                className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" strokeWidth={1.75} />
+              </button>
             </div>
+
+            <div className="flex-1 overflow-y-auto p-5">
+              {cleaningActions.length === 0 ? (
+                <div className="flex flex-col items-center py-10 text-center">
+                  <CheckCircle2 className="mb-3 h-6 w-6 text-emerald-600" strokeWidth={1.75} />
+                  <p className="text-[14px] font-medium text-zinc-900">Nothing to clean</p>
+                  <p className="mt-1 text-[13px] text-zinc-600">Your data has no fixable issues.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {cleaningActions.map((action, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        const next = [...cleaningActions];
+                        next[i].enabled = !next[i].enabled;
+                        setCleaningActions(next);
+                        setPreviewData(null);
+                      }}
+                      className={[
+                        "flex w-full items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors",
+                        action.enabled
+                          ? "border-[#c8c1ff] bg-[#f1efff]"
+                          : "border-zinc-200 bg-white hover:bg-zinc-50",
+                      ].join(" ")}
+                    >
+                      <Checkbox checked={action.enabled} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[13.5px] font-medium text-zinc-900">{action.label}</p>
+                        {action.recommended && (
+                          <span className="mt-0.5 inline-block text-[11px] font-medium text-emerald-700">
+                            Recommended
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+
+                  <button
+                    onClick={fetchPreview}
+                    disabled={loadingPreview || !cleaningActions.some(a => a.enabled)}
+                    className="mt-3 inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md border border-zinc-200 bg-white text-[13px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                  >
+                    {loadingPreview
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
+                      : <Zap className="h-3.5 w-3.5" strokeWidth={1.75} />}
+                    Preview changes
+                  </button>
+
+                  {previewData && (
+                    <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
+                      <div className="grid grid-cols-2 gap-4 pb-3">
+                        <PreviewSide
+                          label="Before"
+                          rows={previewData.before_rows}
+                          score={previewData.before_score}
+                          tone="muted"
+                        />
+                        <PreviewSide
+                          label="After"
+                          rows={previewData.after_rows}
+                          score={previewData.after_score}
+                          tone="accent"
+                        />
+                      </div>
+                      {previewData.changes.length > 0 && (
+                        <div className="space-y-1.5 border-t border-zinc-200 pt-3">
+                          {previewData.changes.map((change, i) => (
+                            <div key={i} className="flex items-start gap-1.5 text-[12.5px] text-zinc-700">
+                              <ChevronRight className="mt-0.5 h-3 w-3 shrink-0 text-[#6d5ef5]" strokeWidth={1.75} />
+                              {change}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="shrink-0 border-t border-zinc-100 bg-zinc-50 px-5 py-4">
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setShowCleanModal(false)}
+                  className="h-9 rounded-md border border-zinc-200 bg-white px-4 text-[13px] font-medium text-zinc-700 hover:bg-white/80"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={applyCleaning}
+                  disabled={cleaning || !cleaningActions.some(a => a.enabled)}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0] disabled:opacity-50"
+                >
+                  {cleaning && <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />}
+                  Apply changes
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Success Toast */}
+      {/* ============= Success toast ============= */}
       {successMessage && (
-        <div className="fixed bottom-10 left-1/2 -translate-x-1/2 bg-foreground text-background px-8 py-5 rounded-[2rem] shadow-2xl flex items-center gap-4 z-[200] animate-in slide-in-from-bottom-10">
-          <BadgeCheck className="w-6 h-6" />
-          <span className="font-bold text-sm tracking-tight">{successMessage}</span>
-          <button onClick={() => setSuccessMessage(null)} className="ml-4 p-2 hover:bg-background/10 rounded-xl transition-all"><X className="w-4 h-4" /></button>
+        <div className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 shadow-lg">
+          <CheckCircle2 className="h-4 w-4 text-emerald-600" strokeWidth={1.75} />
+          <span className="text-[13px] font-medium text-zinc-900">{successMessage}</span>
+          <button
+            onClick={() => setSuccessMessage(null)}
+            className="rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+            aria-label="Dismiss"
+          >
+            <X className="h-3.5 w-3.5" strokeWidth={1.75} />
+          </button>
         </div>
       )}
     </div>
   );
 }
 
+/* ============================================================
+   Subcomponents
+   ============================================================ */
+
+function ScoreBadge({ score }: { score: string }) {
+  const map: Record<string, { bg: string; ring: string; text: string; label: string }> = {
+    A: { bg: "bg-emerald-50", ring: "ring-emerald-200", text: "text-emerald-700", label: "Excellent" },
+    B: { bg: "bg-sky-50", ring: "ring-sky-200", text: "text-sky-700", label: "Good" },
+    C: { bg: "bg-amber-50", ring: "ring-amber-200", text: "text-amber-700", label: "Fair" },
+    D: { bg: "bg-red-50", ring: "ring-red-200", text: "text-red-700", label: "Needs work" },
+    F: { bg: "bg-red-50", ring: "ring-red-200", text: "text-red-700", label: "Poor" },
+  };
+  const s = map[score] ?? map.C;
+  return (
+    <div className={`flex shrink-0 flex-col items-center rounded-xl px-5 py-3 ring-1 ${s.bg} ${s.ring}`}>
+      <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Quality score</span>
+      <span className={`mt-0.5 text-3xl font-semibold leading-none ${s.text}`}>{score}</span>
+      <span className={`mt-1 text-[11px] font-medium ${s.text}`}>{s.label}</span>
+    </div>
+  );
+}
+
+function Stat({
+  label, value, tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "ok" | "warn";
+}) {
+  const valueTone =
+    tone === "warn" ? "text-amber-700"
+      : tone === "ok" ? "text-emerald-700"
+        : "text-zinc-900";
+  return (
+    <div className="bg-white px-4 py-3.5">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className={`mt-0.5 text-[20px] font-semibold tabular-nums tracking-tight ${valueTone}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function IssueRow({ issue, divider }: { issue: IssueItem; divider: boolean }) {
+  const sevStyle: Record<string, { dot: string; pill: string; label: string }> = {
+    high: { dot: "bg-red-500", pill: "bg-red-50 text-red-700 border-red-200", label: "High" },
+    medium: { dot: "bg-amber-500", pill: "bg-amber-50 text-amber-700 border-amber-200", label: "Medium" },
+    low: { dot: "bg-sky-500", pill: "bg-sky-50 text-sky-700 border-sky-200", label: "Low" },
+  };
+  const sev = sevStyle[issue.severity] ?? sevStyle.low;
+  const columnLabel = issue.column === "_all_" ? "All columns" : issue.column;
+
+  return (
+    <div className={`flex items-start gap-4 px-5 py-4 ${divider ? "border-t border-zinc-100" : ""}`}>
+      <div className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${sev.dot}`} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[14px] font-semibold text-zinc-900">{columnLabel}</span>
+          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${sev.pill}`}>
+            {sev.label}
+          </span>
+          <span className="text-[12px] text-zinc-500">
+            {issue.issue_type.replace(/_/g, " ")}
+          </span>
+        </div>
+        <p className="mt-1 text-[13px] leading-relaxed text-zinc-600">{issue.description}</p>
+      </div>
+      <div className="shrink-0 text-right">
+        <div className="text-[16px] font-semibold tabular-nums text-zinc-900">
+          {issue.count.toLocaleString()}
+        </div>
+        <div className="text-[11px] text-zinc-500">
+          {issue.percentage.toFixed(1)}% of rows
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Checkbox({ checked }: { checked: boolean }) {
+  return (
+    <div
+      className={[
+        "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors",
+        checked
+          ? "border-[#6d5ef5] bg-[#6d5ef5] text-white"
+          : "border-zinc-300 bg-white",
+      ].join(" ")}
+      aria-hidden="true"
+    >
+      {checked && <Check className="h-3 w-3" strokeWidth={2.5} />}
+    </div>
+  );
+}
+
+function PreviewSide({
+  label, rows, score, tone,
+}: {
+  label: string;
+  rows: number;
+  score: string;
+  tone: "muted" | "accent";
+}) {
+  const labelClass = tone === "accent" ? "text-[#6d5ef5]" : "text-zinc-500";
+  return (
+    <div>
+      <div className={`text-[11px] font-medium uppercase tracking-wide ${labelClass}`}>{label}</div>
+      <div className="mt-1 flex items-center gap-2">
+        <span className="text-[14px] font-semibold text-zinc-900 tabular-nums">
+          {rows.toLocaleString()} rows
+        </span>
+        <span className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[11px] font-semibold text-zinc-700">
+          {score}
+        </span>
+      </div>
+    </div>
+  );
+}
