@@ -647,6 +647,11 @@ class DecisionIntelligenceSynthesizer:
             # This "suppress if high-impact" rule is essential for clean narrative
             compressed = [i for i in compressed if i.rule_type != "fallback"]
             
+        # Always include temporal_peaks if it fired
+        temporal_insights = [i for i in insights if getattr(i, 'rule_type', '') == 'temporal_peaks']
+        already_included = any(getattr(i, 'rule_type', '') == 'temporal_peaks' for i in compressed)
+        if temporal_insights and not already_included:
+            compressed.insert(2, temporal_insights[0])
         return compressed[:4]
 
 # ============================================================
@@ -1752,12 +1757,24 @@ class BusinessRuleEngine:
             return []
         try:
             # Parse date — handle both native date types and strings
-            if df.schema.get(date_col) in (pl.Date, pl.Datetime):
-                df_parsed = df.with_columns(pl.col(date_col).cast(pl.Date).alias("_parsed_date"))
-            else:
-                df_parsed = df.with_columns(
-                    pl.col(date_col).cast(pl.Utf8).str.to_date(strict=False).alias("_parsed_date")
-                )
+            try:
+                if df.schema.get(date_col) in (pl.Date, pl.Datetime):
+                    df_parsed = df.with_columns(
+                        pl.col(date_col).cast(pl.Date).alias("_parsed_date")
+                    )
+                else:
+                    # Use pandas for robust parsing — handles DD/MM/YYYY, MM-DD-YYYY, mixed
+                    raw_dates = df[date_col].to_pandas()
+                    parsed_dates = pd.to_datetime(raw_dates, errors="coerce", dayfirst=True)
+                    if parsed_dates.isna().all():
+                        print(f"[temporal_peaks] all dates unparseable in {date_col}")
+                        return []
+                    df_parsed = df.with_columns(
+                        pl.Series("_parsed_date", parsed_dates.dt.date.values).alias("_parsed_date")
+                    )
+            except Exception as e:
+                print(f"[temporal_peaks] date parse failed: {e}")
+                return []
             df_parsed = df_parsed.filter(pl.col("_parsed_date").is_not_null())
             if df_parsed.height < 30:
                 return []
@@ -2005,6 +2022,11 @@ class StrategicBriefBuilder:
 
         if segment_finding:
             lines.append(segment_finding)
+        temporal_finding = self._find_temporal_finding()
+        if not temporal_finding:
+            temporal_finding = self._find_temporal_finding_direct()
+        if temporal_finding:
+            lines.append(temporal_finding)
 
         if critical_count > 0:
             lines.append(
@@ -2069,6 +2091,66 @@ class StrategicBriefBuilder:
             print(f"[BRIEF] _find_top_driver error: {e}")
 
         return None, None, None
+
+    def _find_temporal_finding(self) -> str:
+        for ins in self.insights:
+            rule = ins.get("rule_type", "") if isinstance(ins, dict) else getattr(ins, "rule_type", "")
+            print(f"[TEMPORAL DEBUG] checking insight: rule={rule}, type={type(ins)}")
+            if rule == "temporal_peaks":
+                chart_data = ins.get("chart_data", {}) if isinstance(ins, dict) else getattr(ins, "chart_data", {})
+                print(f"[TEMPORAL DEBUG] chart_data={chart_data}")
+                peak = chart_data.get("peak_month", "") if chart_data else ""
+                trough = chart_data.get("trough_month", "") if chart_data else ""
+                gap = chart_data.get("pct_gap", 0) if chart_data else 0
+                print(f"[TEMPORAL DEBUG] peak={peak}, trough={trough}, gap={gap}")
+                if peak and trough:
+                    return (
+                        f"Revenue shows clear seasonality: {peak} is the peak month "
+                        f"while {trough} is the trough — a {gap:.0f}% swing that demands "
+                        f"proactive inventory and cash-flow planning."
+                    )
+        return ""
+
+    def _find_temporal_finding_direct(self) -> str:
+        """Directly compute peak/trough from the dataframe — no dependency on insight objects."""
+        try:
+            date_col = next(
+                (c for c in self.df.columns if any(k in c.lower() for k in ["date", "time", "month"])),
+                None
+            )
+            rev_col = next(
+                (c for c in self.df.columns if any(k in c.lower() for k in ["sales", "amount", "revenue"])),
+                None
+            )
+            if not date_col or not rev_col:
+                return ""
+
+            import pandas as pd
+            pdf = self.df.to_pandas()
+            pdf[date_col] = pd.to_datetime(pdf[date_col], errors="coerce")
+            pdf = pdf.dropna(subset=[date_col])
+            if len(pdf) < 30:
+                return ""
+
+            pdf["_month"] = pdf[date_col].dt.to_period("M")
+            monthly = pdf.groupby("_month")[rev_col].sum()
+            if len(monthly) < 2:
+                return ""
+
+            peak_month = monthly.idxmax().strftime("%B")
+            trough_month = monthly.idxmin().strftime("%B")
+            peak_val = float(monthly.max())
+            trough_val = float(monthly.min())
+            gap = ((peak_val - trough_val) / peak_val) * 100
+
+            return (
+                f"Revenue shows clear seasonality: {peak_month} is the peak month "
+                f"while {trough_month} is the trough — a {gap:.0f}% swing that demands "
+                f"proactive inventory and cash-flow planning."
+            )
+        except Exception as e:
+            print(f"[TEMPORAL DIRECT] error: {e}")
+            return ""
 
     def _find_top_segment_finding(self) -> str:
         """Surface the most impactful segment-level insight as a brief sentence."""
@@ -2407,18 +2489,41 @@ class SmartChartRecommender:
         date_col  = profile.date_col
         ret_col   = profile.return_col
         del_col   = profile.delivery_days_col
-        price_col = profile.price_col or profile.revenue_col
-        qty_col   = profile.qty_col
+        # Revenue col = pre-aggregated column (Sales Amount, Revenue, etc.)
+        # Price col   = unit price column (Unit Price, Price, etc.)
+        # Rule: if revenue_col exists, always use it directly — never multiply by qty
+        revenue_col_direct = profile.revenue_col   # e.g. "Sales Amount"
+        price_col          = profile.price_col or profile.revenue_col
+        qty_col            = profile.qty_col
+
+        # The key guard: is our "price_col" already a revenue/sales/amount column?
+        # If yes, multiplying by qty_col would give wrong inflated numbers.
+        def _is_revenue_col(col_name: str) -> bool:
+            if not col_name:
+                return False
+            cl = col_name.lower()
+            return any(k in cl for k in ["sales", "amount", "revenue", "income"])
 
         # ── 1. Revenue by Category (horizontal bar) ────────────────────────
         if cat and price_col:
             try:
+                # Guard: don't use an identifier column as price
+                if price_col in profile.identifiers:
+                    price_col = profile.revenue_col or next(
+                        (c for c in profile.numericals if c not in profile.identifiers),
+                        None,
+                    )
                 rev_col = "Revenue (₹)"
                 pdf_tmp = pdf.copy()
-                pdf_tmp[rev_col] = (
-                    pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
-                    if qty_col else pdf[price_col].fillna(0)
-                )
+                if _is_revenue_col(price_col):
+                    # "Sales Amount" is already revenue — use directly
+                    pdf_tmp[rev_col] = pdf[price_col].fillna(0)
+                else:
+                    # True unit price — multiply by qty to get revenue
+                    pdf_tmp[rev_col] = (
+                        pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
+                        if qty_col else pdf[price_col].fillna(0)
+                    )
                 grp = (
                     pdf_tmp.groupby(cat)[rev_col].sum()
                     .reset_index()
@@ -2598,9 +2703,12 @@ class SmartChartRecommender:
                 pdf_tmp = pdf.copy()
                 # Use human readable name instead of __rev__
                 rev_label = "Revenue"
+                _pc2_lower = price_col.lower()
+                _price2_is_revenue = any(k in _pc2_lower for k in ["sales", "amount", "revenue"])
                 pdf_tmp[rev_label] = (
                     pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
-                    if qty_col else pdf[price_col].fillna(0)
+                    if (qty_col and not _price2_is_revenue)
+                    else pdf[price_col].fillna(0)
                 )
                 grp = (
                     pdf_tmp.groupby(geo_col)[rev_label].sum()
@@ -2616,34 +2724,84 @@ class SmartChartRecommender:
                     # Check if we should do a grouped bar (Feature 1)
                     # If cat exists, replace simple bar with grouped bar
                     if cat and cat != geo_col:
-                        pdf_tmp = pdf.copy()
-                        pdf_tmp[rev_label] = (
-                            pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
-                            if qty_col else pdf[price_col].fillna(0)
+                        # Step 1: resolve revenue column
+                        # Priority 1: explicit revenue_col from profile (most reliable)
+                        # Priority 2: keyword-matched numeric column
+                        # Priority 3: fallback to price_col
+                        if revenue_col_direct:
+                            revenue_col = revenue_col_direct
+                        else:
+                            price_candidates = [
+                                c for c in num_cols
+                                if any(k in c.lower() for k in ["sales", "amount", "revenue", "price", "profit"])
+                            ]
+                            revenue_col = price_candidates[0] if price_candidates else price_col
+                        # Step 2: resolve region and category from profile.categoricals
+                        all_cats = profile.categoricals
+                        region_candidates = [
+                            c for c in all_cats
+                            if any(k in c.lower() for k in ["region", "area", "zone", "territory", "location", "city", "state", "country"])
+                        ]
+                        cat_candidates = [
+                            c for c in all_cats
+                            if any(k in c.lower() for k in ["category", "product", "type", "segment", "class"])
+                            and c not in region_candidates
+                        ]
+                        region_col = region_candidates[0] if region_candidates else geo_col
+                        cat_col    = cat_candidates[0]    if cat_candidates    else (
+                            all_cats[1] if len(all_cats) > 1 else all_cats[0]
                         )
+                        pdf_tmp = pdf.copy()
+                        if _is_revenue_col(revenue_col):
+                            pdf_tmp["_revenue"] = pdf[revenue_col].fillna(0)
+                        else:
+                            pdf_tmp["_revenue"] = (
+                                pdf[revenue_col].fillna(0) * pdf[qty_col].fillna(0)
+                                if qty_col else pdf[revenue_col].fillna(0)
+                            )
                         grp_cat = (
-                            pdf_tmp.groupby([geo_col, cat])[rev_label].sum()
+                            pdf_tmp.groupby([region_col, cat_col])["_revenue"].sum()
                             .reset_index()
-                            .sort_values(rev_label, ascending=False)
                         )
                         fig = px.bar(
-                            grp_cat, x=geo_col, y=rev_label, color=cat,
+                            grp_cat,
+                            x=region_col,
+                            y="_revenue",
+                            color=cat_col,
                             barmode="group",
-                            title=f"Which {cat} performs best in each {geo_col}?",
-                            text_auto=False
+                            title=f"Which {cat_col} performs best in each {region_col}?",
+                            text_auto=".2s",
+                            color_discrete_sequence=px.colors.qualitative.Set2
                         )
+                        # Merge CHART_LAYOUT_BASE with geo-specific settings so
+                        # tickformat=".2s" is never overwritten by the base yaxis dict.
+                        geo_layout = {**CHART_LAYOUT_BASE}
+                        geo_layout["yaxis"] = {
+                            "gridcolor": "rgba(255,255,255,0.05)",
+                            "tickformat": ".2s",
+                        }
+                        geo_layout["xaxis_title"] = region_col
+                        geo_layout["yaxis_title"] = "Revenue"
+                        geo_layout["legend_title"] = cat_col
+
                         fig.update_layout(template="plotly_dark")
-                        add("geo_cat_revenue", {
-                            "chart_id": "geo_cat_revenue",
-                            "chart_type": "grouped_bar",
-                            "title": f"Which {cat} performs best in each {geo_col}?",
-                            "description": f"Geographical revenue distribution across both {geo_col} and {cat}",
-                            "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
-                            "columns_used": [geo_col, cat, price_col],
-                            "priority_score": 82,
-                            "insight_reason": "Cross-category geographic performance analysis",
-                            "interest_level": "high"
-                        })
+
+                        # Suppress chart if all bars are nearly identical (uninformative)
+                        geo_values = grp_cat["_revenue"].tolist()
+                        if not is_chart_informative(geo_values, min_variance_pct=1.0):
+                            print(f"[CHART SUPPRESSED] geo_cat_revenue — values too flat")
+                        else:
+                            add("geo_cat_revenue", {
+                                "chart_id": "geo_cat_revenue",
+                                "chart_type": "grouped_bar",
+                                "title": f"Which {cat_col} performs best in each {region_col}?",
+                                "description": f"Geographical revenue distribution across both {region_col} and {cat_col}",
+                                "plotly_json": json.loads(fig.update_layout(**geo_layout).to_json()),
+                                "columns_used": [region_col, cat_col, revenue_col],
+                                "priority_score": 82,
+                                "insight_reason": "Cross-category geographic performance analysis",
+                                "interest_level": "high"
+                            })
                     else:
                         fig = px.bar(
                             grp, x=geo_col, y=rev_label,
@@ -2746,10 +2904,28 @@ class SmartChartRecommender:
     ):
         import plotly.express as px, json
         cat = profile.category_col
-        for num in num_cols[:2]:
+
+        # Priority 1: revenue/sales/amount/price columns
+        priority_nums = [
+            c for c in num_cols
+            if any(k in c.lower() for k in ["sales", "amount", "revenue", "price", "profit"])
+        ]
+        # Priority 2: any numeric column with meaningful scale (max >= 100)
+        other_nums = [
+            c for c in num_cols
+            if c not in priority_nums
+            and pdf[c].max() >= 100
+        ]
+        ordered_nums = (priority_nums + other_nums)[:2]
+
+        for num in ordered_nums:
             if len(charts) >= max_charts:
                 break
             if not cat or num == cat:
+                continue
+            # Skip low-scale columns (quantity, rating, count — max < 100)
+            if pdf[num].max() < 100:
+                print(f"[CHART SUPPRESSED] Fallback {num} — max={pdf[num].max():.1f} < 100")
                 continue
             try:
                 grp = (
@@ -2757,12 +2933,29 @@ class SmartChartRecommender:
                     .reset_index()
                     .sort_values(num, ascending=False)
                 )
+                values = grp[num].tolist()
+                if not is_chart_informative(values, min_variance_pct=5.0):
+                    print(f"[CHART SUPPRESSED] Fallback {num} by {cat} — variance too low")
+                    continue
                 fig = px.bar(
-                    grp, x=cat, y=num,
+                    grp,
+                    x=num,
+                    y=cat,
+                    orientation="h",
                     title=f"Median {num} by {cat}",
-                    text_auto=".1f"
+                    text_auto=".1f",
+                    color=num,
+                    color_continuous_scale="Blues",
                 )
-                fig.update_layout(template="plotly_dark")
+                fig.update_layout(
+                    template="plotly_dark",
+                    coloraxis_showscale=False,
+                    xaxis=dict(
+                        range=[0, grp[num].max() * 1.15],
+                        tickformat=".2s",
+                    ),
+                    yaxis=dict(autorange="reversed"),
+                )
                 cid = f"fallback_bar_{num}_{cat}"
                 if cid not in chart_ids_used:
                     chart_ids_used.add(cid)
@@ -2771,7 +2964,9 @@ class SmartChartRecommender:
                         "chart_type": "bar",
                         "title": f"{num} by {cat}",
                         "description": f"Median {num} comparison (robust to outliers)",
-                        "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                        "plotly_json": json.loads(
+                            fig.update_layout(**CHART_LAYOUT_BASE).to_json()
+                        ),
                         "columns_used": [cat, num],
                         "priority_score": 55,
                         "insight_reason": "Category vs numeric comparison",
@@ -2960,7 +3155,7 @@ def run_insight_engine(
 
     # Executive summary (Step 7: Strategic Brief)
     high_count = sum(1 for i in insights if "🔴" in str(i.impact))
-    exec_summary = _build_exec_summary(df, profile, metrics, high_count, domain_info, driver_info, insights=compressed_insights)
+    exec_summary = _build_exec_summary(df, profile, metrics, high_count, domain_info, driver_info, insights=compressed_insights, raw_insights=insights)
 
     _progress("done", 100)
 
@@ -3020,15 +3215,16 @@ def _fmt_currency(val: float) -> str:
     return f"{sign}₹{abs_val:,.0f}"
 
 
-def _build_exec_summary(df: pl.DataFrame, profile: DataProfile, metrics: dict, high_impact_count: int, domain_info: dict, driver_info: dict, insights: list = None) -> str:
+def _build_exec_summary(df: pl.DataFrame, profile: DataProfile, metrics: dict, high_impact_count: int, domain_info: dict, driver_info: dict, insights: list = None, raw_insights: list = None) -> str:
     """Step 7: Generate High-End Executive Strategic Brief (3-5 lines)."""
     domain_id = domain_info.get("id", "general")
 
-    # Use the new deterministic builder
+    # Pass raw_insights for temporal detection — compressed may have dropped it
+    all_insights_for_temporal = (raw_insights or []) + (insights or [])
     builder = StrategicBriefBuilder(
         domain=domain_id,
         df=df,
-        insights=insights or [],
+        insights=all_insights_for_temporal,
         corr_matrix=driver_info.get("corr_matrix")
     )
     return builder.build()

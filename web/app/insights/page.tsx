@@ -377,7 +377,20 @@ export default function InsightsPage() {
                                                                         opacity: 1,
                                                                     },
                                                                 }))}
-                                                                layout={{ ...chart.plotly_json.layout, ...PLOT_LAYOUT }}
+                                                                layout={{
+                                                                    ...chart.plotly_json.layout,
+                                                                    ...PLOT_LAYOUT,
+                                                                    xaxis: {
+                                                                        ...PLOT_LAYOUT.xaxis,
+                                                                        ...chart.plotly_json.layout?.xaxis,
+                                                                        tickformat: chart.plotly_json.layout?.xaxis?.tickformat,
+                                                                    },
+                                                                    yaxis: {
+                                                                        ...PLOT_LAYOUT.yaxis,
+                                                                        ...chart.plotly_json.layout?.yaxis,
+                                                                        tickformat: chart.plotly_json.layout?.yaxis?.tickformat,
+                                                                    },
+                                                                }}
                                                                 config={{ displayModeBar: false, responsive: true }}
                                                                 style={{ width: "100%", height: "100%" }}
                                                                 useResizeHandler

@@ -158,6 +158,8 @@ import pandas as pd
 import polars as pl
 import seaborn as sns
 
+print("=== REPORT_GENERATOR.PY LOADED — VERSION DEBUG ===")
+
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -508,6 +510,16 @@ class ChartGenerator:
             log.warning("  ✗ region chart skipped (region=%r, numeric=%r)", cm.region, cm.numeric)
             return None
 
+        # Skip flat simple regional chart — grouped chart (with category) is always shown
+        if not (cm.category and cm.category != cm.region):
+            _pre_data = df.groupby(cm.region)[cm.numeric].sum()
+            _vals = _pre_data.tolist()
+            if _vals:
+                _variance_pct = (max(_vals) - min(_vals)) / max(max(_vals), 1) * 100
+                if _variance_pct < 10:
+                    log.info("  ✗ region chart skipped — variance %.1f%% < 10%%", _variance_pct)
+                    return None
+
         sns.set_style(C.SNS_STYLE)
         with self._safe_fig(fname) as (fig, ax):
             if cm.category and cm.category != cm.region:
@@ -678,11 +690,12 @@ class InsightNarrator:
                     return cls._fmt_inr(raw)
         return ""
 
-    def generate(self, insights: list, metrics: dict, domain: str) -> str:
+    def generate(self, insights: list, metrics: dict, domain: str, df=None) -> str:
         """
         Return a 2-4 sentence prose string connecting the top insights.
         Falls back gracefully if data is sparse.
         """
+        print(f"[NARRATOR ENTRY] insights={len(insights)}, df type={type(df)}, df is None={df is None}")
         if not insights:
             return ""
 
@@ -760,47 +773,63 @@ class InsightNarrator:
                         f"and dependency risk."
                     )
 
-        # ── Sentence 3: pricing skew, or temporal fallback ────────────────
-        _temporal_used = False
-        skew_insight = next(
-            (i for i in insights
-             if "skew" in i.get("title", "").lower()
-             or "skew" in i.get("description", "").lower()),
-            None,
-        )
-        temporal_insight = next(
-            (i for i in insights
-             if i.get("rule_type") == "temporal_peaks"
-             or "peaked" in i.get("title", "").lower()
-             or "troughed" in i.get("title", "").lower()),
-            None,
-        )
-        if skew_insight:
-            desc = skew_insight.get("description", "")
-            mean_m   = re.search(r'mean\s+([₹\d\w\.,]+)', desc, re.IGNORECASE)
-            median_m = re.search(r'median\s+([₹\d\w\.,]+)', desc, re.IGNORECASE)
-            if mean_m and median_m:
-                sentences.append(
-                    f"Pricing dynamics are distorted: the mean of "
-                    f"{mean_m.group(1)} sits well above the median "
-                    f"{median_m.group(1)}, driven by a small cluster of "
-                    f"premium orders that skew standard averages and mislead "
-                    f"decision-makers relying on headline figures."
+        # ── Sentence 3: seasonality — computed directly from df ──────────
+        print(f"[S3 DEBUG] df type={type(df)}, df is None={df is None}")
+        print(f"[S3 DEBUG] insights count={len(insights)}")
+        import pandas as _pd
+        s3 = ""
+        try:
+            _df = df
+            if _df is not None:
+                if hasattr(_df, 'to_pandas'):
+                    _df = _df.to_pandas()
+                date_col = next(
+                    (c for c in _df.columns if any(k in str(c).lower()
+                     for k in ["date", "time", "month"])), None
                 )
-        elif temporal_insight and len(sentences) >= 2:
-            # Guard: only allow temporal into slot 3+ — never steal slot 2
-            cd = temporal_insight.get("chart_data") or {}
-            peak_m  = cd.get("peak_month", "")
-            trough_m = cd.get("trough_month", "")
-            pct_gap  = cd.get("pct_gap", 0)
-            if peak_m and trough_m:
-                sentences.append(
-                    f"Seasonality is a defining factor: revenue peaked in "
-                    f"{peak_m} and troughed in {trough_m}, a "
-                    f"{pct_gap:.0f}% swing that demands proactive capacity "
-                    f"planning and targeted off-peak demand generation."
+                rev_col = next(
+                    (c for c in _df.columns if any(k in str(c).lower()
+                     for k in ["sales", "amount", "revenue"])), None
                 )
-                _temporal_used = True
+                if date_col and rev_col:
+                    _pdf = _df.copy()
+                    _pdf[date_col] = _pd.to_datetime(_pdf[date_col], errors="coerce")
+                    _pdf = _pdf.dropna(subset=[date_col])
+                    if len(_pdf) >= 30:
+                        _pdf["_month"] = _pdf[date_col].dt.to_period("M")
+                        _monthly = _pdf.groupby("_month")[rev_col].sum()
+                        if len(_monthly) >= 2:
+                            _peak = _monthly.idxmax().strftime("%B")
+                            _trough = _monthly.idxmin().strftime("%B")
+                            _gap = ((_monthly.max() - _monthly.min()) / _monthly.max()) * 100
+                            s3 = (
+                                f"Revenue shows clear seasonality: {_peak} is the peak month "
+                                f"while {_trough} is the trough — a {_gap:.0f}% swing that "
+                                f"demands proactive inventory and cash-flow planning."
+                            )
+        except Exception as _e:
+            print(f"[S3 seasonality] error: {_e}")
+            s3 = ""
+        # Fallback: extract from temporal_peaks insight when df is unavailable
+        if not s3:
+            for _ins in insights:
+                _rule = _ins.get("rule_type", "") if isinstance(_ins, dict) else getattr(_ins, "rule_type", "")
+                if _rule == "temporal_peaks":
+                    _cd = _ins.get("chart_data", {}) if isinstance(_ins, dict) else getattr(_ins, "chart_data", {})
+                    if _cd:
+                        _peak = _cd.get("peak_month", "")
+                        _trough = _cd.get("trough_month", "")
+                        _gap = _cd.get("pct_gap", 0)
+                        if _peak and _trough:
+                            s3 = (
+                                f"Revenue shows clear seasonality: {_peak} is the peak month "
+                                f"while {_trough} is the trough — a {_gap:.0f}% swing that "
+                                f"demands proactive inventory and cash-flow planning."
+                            )
+                            break
+        print(f"[S3 DEBUG] s3 result='{s3[:80] if s3 else 'EMPTY'}'")
+        if s3:
+            sentences.append(s3)
 
         # ── Sentence 4: correlation anomaly or discount finding ────────────
         corr_insight = next(
@@ -847,33 +876,7 @@ class InsightNarrator:
                     f"sales, creating both opportunity and dependency risk."
                 )
 
-        # ── Sentence 3 fallback: temporal seasonality if skew sentence wasn't produced ──
-        if len(sentences) < 3 and not _temporal_used:
-            temp_insight = next(
-                (i for i in insights if
-                 "temporal" in i.get("rule_type", "") or
-                 "peaked" in i.get("title", "").lower()),
-                None
-            )
-            if temp_insight:
-                cd = (temp_insight.get("chart_data") or {})
-                peak = cd.get("peak_month", "")
-                trough = cd.get("trough_month", "")
-                gap = cd.get("pct_gap", "")
-                if peak and trough:
-                    if isinstance(gap, (int, float)) and gap:
-                        sentences.append(
-                            f"Revenue shows clear seasonality: {peak} is the "
-                            f"peak month while {trough} is the trough — a "
-                            f"{gap:.0f}% swing that demands proactive inventory "
-                            f"and cash-flow planning."
-                        )
-                    else:
-                        sentences.append(
-                            f"Revenue shows clear seasonality: {peak} is the "
-                            f"peak month while {trough} is the trough, "
-                            f"demanding proactive inventory planning."
-                        )
+        # ── Sentence 3 fallback: handled by direct df computation above ──
 
         # ── Sentence 4 fallback: systemic linkage correlation ──────────────
         if len(sentences) < 4:
@@ -1173,8 +1176,10 @@ class PDFReportGenerator:
         insights: list,
         metrics: dict = None,
         domain: str = "",
+        df=None,
     ) -> list:
         """Section 6: Deep Insights with WHAT / WHY / DECISION format."""
+        print(f"[SECTION6 ENTRY] insights={len(insights) if insights else 0}, df type={type(df)}, df is None={df is None}")
         elements = []
         header_style = ParagraphStyle(
             'Section6Header',
@@ -1190,6 +1195,7 @@ class PDFReportGenerator:
                 insights=insights,
                 metrics=metrics or {},
                 domain=domain,
+                df=df,
             )
             if prose:
                 narrative_style = ParagraphStyle(
@@ -1451,9 +1457,10 @@ class PDFReportGenerator:
                 )
 
         # ✅ ADD MISSING SECTIONS 6 & 7
+        print(f"[BUILD METHOD] calling section 6, df type={type(df)}, df is None={df is None}")
         if isinstance(insights, list):
             elements.extend(self._build_section_6_deep_insights(
-                insights, metrics=kpis, domain=target_metric
+                insights, metrics=kpis, domain=target_metric, df=df
             ))
         
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
@@ -1701,8 +1708,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     log.error("Monthly trend chart embed failed: %s", _e)
 
         # ✅ ADD MISSING SECTIONS 6 & 7
+        print(f"[PRE-SECTION6] insights type={type(insights)}, len={len(insights) if insights else 0}, df is None={df is None}")
+        print(f"[build_from_assets] df passed to section 6: type={type(df)}, is None={df is None}")
         elements.extend(self._build_section_6_deep_insights(
-            insights, metrics=kpis, domain=domain_id
+            insights, metrics=kpis, domain=domain_id, df=df
         ))
         recs = recommendations or [
             b.get("content") for b in text_blocks

@@ -34,6 +34,8 @@ from insight_engine import (
 from session_cache import SessionCache, JobTracker
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks
 from report_generator import ChartGenerator, PDFReportGenerator, ColumnMap, cleanup_temp_files, UnifiedReportGenerator
+import report_generator
+print(f"[IMPORT] report_generator loaded from: {report_generator.__file__}")
 
 import tempfile
 from pathlib import Path
@@ -280,11 +282,11 @@ async def export_dashboard_pdf(
         # Load session data to get the actual DF for regional charts
         try:
             filename, df = load_session(session_id)
-            cols = [c.lower() for c in df.columns]
             from insight_engine import detect_domain
-            domain_id = detect_domain(cols)
+            domain_id = detect_domain(df)   # ← pass df not cols
         except Exception as e:
             logger.warning(f"Could not load session data for PDF: {e}")
+            print(f"[load_session FAILED] session_id={session_id}, error={type(e).__name__}: {e}")
             df = None
             domain_id = "general"
 
