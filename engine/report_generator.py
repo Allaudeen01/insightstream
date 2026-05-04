@@ -456,21 +456,23 @@ class ChartGenerator:
         log.warning("  ✗ verify failed — %s", filename)
         return None
 
-    def bar_chart(self, df: pd.DataFrame, cat_col: str, val_col: str, 
+    def bar_chart(self, df: pd.DataFrame, cat_col: str, val_col: str,
                   title: str = "Bar Chart", filename: str = "bar_chart.png") -> Optional[str]:
         """Generic bar chart generator used by domain-specific reports."""
         if cat_col not in df.columns or val_col not in df.columns:
             return None
-            
+
         data = df.groupby(cat_col)[val_col].median().sort_values(ascending=False).head(12)
         if data.empty: return None
-        
+
         sns.set_style(C.SNS_STYLE)
         with self._safe_fig(filename) as (fig, ax):
             sns.barplot(x=data.index.astype(str), y=data.values, palette=C.PALETTE, ax=ax)
             ax.set_title(title, fontsize=14, fontweight="bold")
             ax.set_xlabel(cat_col)
             ax.set_ylabel(f"Median {val_col}")
+            # 15% headroom so the tallest bar never clips the axis edge
+            ax.set_ylim(0, data.max() * 1.15)
             plt.xticks(rotation=30, ha="right")
             fig.tight_layout()
         return self._verify(filename)
@@ -1577,65 +1579,107 @@ class UnifiedReportGenerator(PDFReportGenerator):
             elements.append(Paragraph(ai_summary, self.S["Insight"]))
             elements.append(Spacer(1, 20))
 
-        # 3. PAGE 3: REGIONAL ANALYSIS (Rendered if DF provided)
+        # 3. PAGE 3: REGIONAL ANALYSIS (Rendered if DF provided, suppressed if low-variance)
+        _regional_page_added = False
         if df is not None:
             region_col = get_region_column(df)
             if region_col and target_metric in df.columns:
-                elements.append(PageBreak())
-                elements.append(Paragraph(domain_template.get("regional_chart_title", "Regional Breakdown"), self.S["Section"]))
-                elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
-                elements.append(Spacer(1, 20))
-                
-                # Generate actual chart image
-                cg = ChartGenerator()
-                chart_path = cg.bar_chart(
-                    df, region_col, target_metric,
-                    title=domain_template.get("regional_chart_title"),
-                    filename=f"reg_{session_id}.png"
+                # Variance guard — skip the whole regional page if spread < 10%
+                _reg_vals = df.groupby(region_col)[target_metric].median().tolist()
+                _reg_variance_pct = (
+                    (max(_reg_vals) - min(_reg_vals)) / max(max(_reg_vals), 1) * 100
+                    if _reg_vals else 0
                 )
-                if chart_path:
-                    self.embed_chart_safely(elements, chart_path, 
-                                            f"Strategic Distribution: {target_metric}", 
-                                            f"Analysis of {target_metric} variance across identified regional clusters.")
-                
-                # Add Markdown Table
-                region_stats_df = df.groupby(region_col)[target_metric].median().reset_index()
-                region_stats_df.columns = [region_col, f"Median {target_metric}"]
-                md_table = generate_markdown_table(region_stats_df)
-                if md_table:
+                if _reg_variance_pct >= 10:
+                    elements.append(PageBreak())
+                    _regional_page_added = True
+                    elements.append(Paragraph(domain_template.get("regional_chart_title", "Regional Breakdown"), self.S["Section"]))
+                    elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
                     elements.append(Spacer(1, 20))
-                    elements.append(Paragraph(f"Regional {target_metric} Statistics", self.S["ChartTitle"]))
-                    lines = md_table.split("\n")
-                    table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
-                    table_data = [[cell.strip() for cell in row] for row in table_data]
-                    if table_data:
-                        t = Table(table_data, hAlign='LEFT')
-                        t.setStyle(TableStyle([
-                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor(self.config["brand_dark"])),
-                            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                            ('GRID', (0,0), (-1,-1), 1, colors.HexColor(C.RULE_GREY))
-                        ]))
-                        elements.append(t)
 
-        elements.append(PageBreak())
+                    # Generate actual chart image
+                    cg = ChartGenerator()
+                    chart_path = cg.bar_chart(
+                        df, region_col, target_metric,
+                        title=domain_template.get("regional_chart_title"),
+                        filename=f"reg_{session_id}.png"
+                    )
+                    if chart_path:
+                        self.embed_chart_safely(elements, chart_path,
+                                                f"Strategic Distribution: {target_metric}",
+                                                f"Analysis of {target_metric} variance across identified regional clusters.")
+
+                    # Add Markdown Table
+                    region_stats_df = df.groupby(region_col)[target_metric].median().reset_index()
+                    region_stats_df.columns = [region_col, f"Median {target_metric}"]
+                    md_table = generate_markdown_table(region_stats_df)
+                    if md_table:
+                        elements.append(Spacer(1, 20))
+                        elements.append(Paragraph(f"Regional {target_metric} Statistics", self.S["ChartTitle"]))
+                        lines = md_table.split("\n")
+                        table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
+                        table_data = [[cell.strip() for cell in row] for row in table_data]
+                        if table_data:
+                            t = Table(table_data, hAlign='LEFT')
+                            t.setStyle(TableStyle([
+                                ('BACKGROUND', (0,0), (-1,0), colors.HexColor(self.config["brand_dark"])),
+                                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                                ('GRID', (0,0), (-1,-1), 1, colors.HexColor(C.RULE_GREY))
+                            ]))
+                            elements.append(t)
+                else:
+                    log.info("Regional page suppressed — variance %.1f%% < 10%%", _reg_variance_pct)
 
         # 4. PAGE 4: STRATEGIC FINDINGS & NOTES
+        elements.append(PageBreak())
         if insights or text_blocks:
             elements.append(Paragraph("Strategic Findings & Key Results", self.S["Section"]))
             elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
             elements.append(Spacer(1, 20))
 
+            finding_title_style = ParagraphStyle(
+                'FindingTitle', fontSize=11, fontName=PDF_FONT_BOLD,
+                textColor=colors.HexColor('#1e293b'), spaceAfter=4,
+            )
+            finding_body_style = ParagraphStyle(
+                'FindingBody', fontSize=9.5, fontName=PDF_FONT_REGULAR,
+                textColor=colors.HexColor('#334155'), leading=14,
+                leftIndent=14, spaceAfter=4,
+            )
+            finding_impact_style = ParagraphStyle(
+                'FindingImpact', fontSize=8.5, fontName=PDF_FONT_BOLD,
+                textColor=colors.HexColor('#dc2626'), spaceAfter=10,
+                leftIndent=14,
+            )
+
             if insights:
-                for ins in insights:
+                for idx, ins in enumerate(insights, 1):
                     if isinstance(ins, dict):
-                        clean_ins = ins.get("title") or ins.get("description", "")[:120]
+                        title = ins.get("title") or ins.get("rule_type", "Strategic Finding")
+                        description = ins.get("description", "")
+                        impact = ins.get("impact", "")
+                        recommendation = ins.get("recommendation", "")
                     else:
-                        s = str(ins)
-                        clean_ins = s.split('[')[0].split('{')[0] if '[' in s or '{' in s else s
-                    if clean_ins:
-                        elements.append(Paragraph(f"• {clean_ins}", self.S["Insight"]))
-                        elements.append(Spacer(1, 8))
-                elements.append(Spacer(1, 20))
+                        title = str(ins).split('[')[0].strip()
+                        description = ""
+                        impact = ""
+                        recommendation = ""
+
+                    if title:
+                        elements.append(Paragraph(f"• {title}", finding_title_style))
+                    if description:
+                        # Truncate to ~200 chars for the findings summary page
+                        short_desc = description[:220].rstrip()
+                        if len(description) > 220:
+                            short_desc += "…"
+                        elements.append(Paragraph(self._md_to_rl(short_desc), finding_body_style))
+                    if impact:
+                        impact_clean = self._strip_emoji(impact)
+                        elements.append(Paragraph(f"Impact: {impact_clean.upper()}", finding_impact_style))
+                    elif title:
+                        elements.append(Spacer(1, 10))
+
+                elements.append(Spacer(1, 10))
 
             if text_blocks:
                 elements.append(Paragraph("Expert Annotations", self.S["ChartTitle"]))
@@ -1644,7 +1688,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     if content:
                         elements.append(Paragraph(content, self.S["Insight"]))
                         elements.append(Spacer(1, 12))
-            
+
             elements.append(PageBreak())
 
         # 5. PAGE 5+: VISUAL ANALYSIS (Frontend Captures)
@@ -1653,6 +1697,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(Spacer(1, 20))
 
         valid_charts = 0
+        total_charts = len(charts)
         for i, chart in enumerate(charts):
             img_path = self._decode_image(chart.get("image_base64", ""), session_id)
             err = chart.get("error")
@@ -1671,7 +1716,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 )
                 valid_charts += 1
             
-            if (valid_charts > 0 and valid_charts % 2 == 0):
+            # Only add page break after every 2 charts if there are more charts coming
+            is_last_chart = (i == total_charts - 1)
+            if (valid_charts > 0 and valid_charts % 2 == 0 and not is_last_chart):
                 elements.append(PageBreak())
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
