@@ -2746,8 +2746,53 @@ class SmartChartRecommender:
                         markers=True
                     )
                     fig.update_traces(line_color="#6366f1", line_width=2)
-                    fig.update_layout(template="plotly_dark",
-                                      xaxis_title="Month", yaxis_title="Revenue")
+                    
+                    # ✅ TIER 2 ENHANCEMENT: Peak and trough markers
+                    peak_idx   = monthly["__rev__"].idxmax()
+                    trough_idx = monthly["__rev__"].idxmin()
+                    peak_month   = monthly.loc[peak_idx,   "month"]
+                    trough_month = monthly.loc[trough_idx, "month"]
+                    peak_val   = monthly.loc[peak_idx,   "__rev__"]
+                    trough_val = monthly.loc[trough_idx, "__rev__"]
+                    
+                    # Peak marker — green star
+                    fig.add_scatter(
+                        x=[peak_month], y=[peak_val],
+                        mode="markers+text",
+                        marker=dict(size=14, color="#10b981",
+                                    symbol="star", line=dict(color="white", width=1)),
+                        text=[f"Peak: {peak_val/1e6:.1f}M"],
+                        textposition="top center",
+                        textfont=dict(color="#10b981", size=11),
+                        name="Peak", showlegend=True
+                    )
+                    # Trough marker — red triangle
+                    fig.add_scatter(
+                        x=[trough_month], y=[trough_val],
+                        mode="markers+text",
+                        marker=dict(size=14, color="#ef4444",
+                                    symbol="triangle-down", line=dict(color="white", width=1)),
+                        text=[f"Trough: {trough_val/1e6:.1f}M"],
+                        textposition="bottom center",
+                        textfont=dict(color="#ef4444", size=11),
+                        name="Trough", showlegend=True
+                    )
+                    # Reference band — shaded region between trough and peak
+                    fig.add_hrect(
+                        y0=trough_val, y1=peak_val,
+                        fillcolor="rgba(99,102,241,0.05)",
+                        line_width=0,
+                        annotation_text=f"{((peak_val-trough_val)/peak_val*100):.0f}% swing",
+                        annotation_position="right",
+                        annotation_font=dict(color="#94a3b8", size=10)
+                    )
+                    
+                    fig.update_layout(
+                        template="plotly_dark",
+                        xaxis_title="Month",
+                        yaxis_title="Revenue",
+                        legend=dict(orientation="h", y=1.1)
+                    )
                     add("revenue_over_time", {
                         "chart_id": "revenue_over_time",
                         "chart_type": "line",
