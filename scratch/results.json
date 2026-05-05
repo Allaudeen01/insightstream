@@ -1,0 +1,99 @@
+{
+  "domain": "World Happiness / Socio-economic",
+  "target": "Happiness Score",
+  "correlations": [
+    {
+      "column": "GDP per Capita",
+      "pearson": 0.8969222218049469,
+      "spearman": 0.9033656863044562
+    },
+    {
+      "column": "Family Support",
+      "pearson": 0.20309475271462812,
+      "spearman": 0.1929932824904279
+    },
+    {
+      "column": "Life Expectancy",
+      "pearson": 0.31809740880507836,
+      "spearman": 0.302854905101668
+    },
+    {
+      "column": "Freedom",
+      "pearson": 0.20974851192469507,
+      "spearman": 0.1965094754548482
+    },
+    {
+      "column": "Corruption Index",
+      "pearson": -0.21748690391819242,
+      "spearman": -0.20691576913826912
+    },
+    {
+      "column": "Generosity",
+      "pearson": -0.025472996151478244,
+      "spearman": -0.024805145780057398
+    },
+    {
+      "column": "Population (Millions)",
+      "pearson": -0.001322607157248895,
+      "spearman": 0.006705475519461516
+    }
+  ],
+  "regional": [
+    {
+      "Region": "Oceania",
+      "Happiness_median": 5.74,
+      "GDP_median": 1.29,
+      "LifeExpectancy_median": 0.7,
+      "count": 145
+    },
+    {
+      "Region": "Asia",
+      "Happiness_median": 5.73,
+      "GDP_median": 1.26,
+      "LifeExpectancy_median": 0.73,
+      "count": 145
+    },
+    {
+      "Region": "South America",
+      "Happiness_median": 5.7,
+      "GDP_median": 1.19,
+      "LifeExpectancy_median": 0.74,
+      "count": 126
+    },
+    {
+      "Region": "Europe",
+      "Happiness_median": 5.67,
+      "GDP_median": 1.19,
+      "LifeExpectancy_median": 0.72,
+      "count": 157
+    },
+    {
+      "Region": "Middle East",
+      "Happiness_median": 5.65,
+      "GDP_median": 1.21,
+      "LifeExpectancy_median": 0.73,
+      "count": 137
+    },
+    {
+      "Region": "North America",
+      "Happiness_median": 5.64,
+      "GDP_median": 1.25,
+      "LifeExpectancy_median": 0.67,
+      "count": 150
+    },
+    {
+      "Region": "Africa",
+      "Happiness_median": 5.61,
+      "GDP_median": 1.2,
+      "LifeExpectancy_median": 0.68,
+      "count": 140
+    }
+  ],
+  "outliers": [
+    {
+      "column": "Happiness Score",
+      "count": 3
+    }
+  ],
+  "row_count": 1000
+}

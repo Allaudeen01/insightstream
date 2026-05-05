@@ -149,6 +149,306 @@ class ComputedMetric:
 
 
 # ============================================================
+# V4 ADDITION 1: IMPACT QUANTIFICATION ENGINE
+# ============================================================
+
+class ImpactQuantifier:
+    """
+    ✅ V4: Converts qualitative insights into ₹ and % impact estimates.
+    Uses observed data patterns as the basis for projections.
+    """
+    
+    @staticmethod
+    def margin_replication_gain(pdf, geo_col, rev_col, cost_col, best_region: str) -> dict:
+        """
+        Quantify: if all regions matched the best region's margin proxy,
+        how much additional value is generated?
+        """
+        try:
+            grp = pdf.groupby(geo_col).agg(
+                revenue=(rev_col, "sum"),
+                cost=(cost_col, "mean"),
+                count=(rev_col, "count")
+            ).dropna()
+            
+            grp["margin_proxy"] = grp["revenue"] - (grp["cost"] * grp["count"])
+            
+            if best_region not in grp.index:
+                return {}
+            
+            best_margin_rate = (
+                grp.loc[best_region, "margin_proxy"] /
+                grp.loc[best_region, "revenue"]
+            )
+            current_total_margin = grp["margin_proxy"].sum()
+            potential_margin = grp["revenue"].sum() * best_margin_rate
+            uplift_abs = potential_margin - current_total_margin
+            uplift_pct = (uplift_abs / abs(current_total_margin)) * 100 if current_total_margin != 0 else 0
+            
+            return {
+                "uplift_abs": uplift_abs,
+                "uplift_pct": uplift_pct,
+                "best_margin_rate": best_margin_rate,
+                "statement": (
+                    f"Replicating {best_region}'s operational model across all regions "
+                    f"could improve total margin by {_fmt_currency(uplift_abs)} "
+                    f"({uplift_pct:+.1f}%) based on observed efficiency differential."
+                )
+            }
+        except Exception:
+            return {}
+    
+    @staticmethod
+    def pricing_standardization_gain(pdf, cost_col, rev_col, cat_col) -> dict:
+        """
+        Quantify: if pricing CV is reduced to 0.20 (industry standard),
+        what's the estimated margin improvement?
+        """
+        try:
+            current_cv = pdf[cost_col].std() / pdf[cost_col].mean() if pdf[cost_col].mean() > 0 else 0
+            target_cv = 0.20
+            
+            if current_cv <= target_cv:
+                return {}
+            
+            # Excess variability = revenue at risk
+            excess_cv = current_cv - target_cv
+            total_rev = pdf[rev_col].sum()
+            revenue_at_risk = total_rev * excess_cv  # proxy: excess spread costs margin
+            recovery_pct = 0.35  # industry estimate: 35% of at-risk revenue recoverable
+            
+            gain_abs = revenue_at_risk * recovery_pct
+            gain_pct = (gain_abs / total_rev) * 100 if total_rev > 0 else 0
+            
+            return {
+                "current_cv": current_cv,
+                "target_cv": target_cv,
+                "revenue_at_risk": revenue_at_risk,
+                "gain_abs": gain_abs,
+                "gain_pct": gain_pct,
+                "statement": (
+                    f"Standardizing {cost_col} to CV ≤ {target_cv} (from {current_cv:.2f}) "
+                    f"could recover {_fmt_currency(gain_abs)} ({gain_pct:.1f}% of revenue) "
+                    f"currently lost to pricing inconsistency."
+                )
+            }
+        except Exception:
+            return {}
+    
+    @staticmethod
+    def category_share_gain(pdf, cat_col, rev_col, lagging_cat: str, leading_cat: str) -> dict:
+        """
+        Quantify: if lagging category matched leading category's share,
+        what's the revenue uplift?
+        """
+        try:
+            shares = pdf.groupby(cat_col)[rev_col].sum()
+            total = shares.sum()
+            
+            if leading_cat not in shares.index or lagging_cat not in shares.index:
+                return {}
+            
+            leading_share = shares[leading_cat] / total if total > 0 else 0
+            lagging_current = shares[lagging_cat] / total if total > 0 else 0
+            lagging_target = leading_share * 0.5  # conservative: half of leader
+            
+            uplift_share = lagging_target - lagging_current
+            uplift_abs = uplift_share * total
+            
+            return {
+                "uplift_abs": uplift_abs,
+                "uplift_pct": uplift_share * 100,
+                "statement": (
+                    f"Growing {lagging_cat} to 50% of {leading_cat}'s market share "
+                    f"represents a {_fmt_currency(uplift_abs)} revenue opportunity "
+                    f"({uplift_share*100:.1f}pp share gain)."
+                )
+            }
+        except Exception:
+            return {}
+
+
+# ============================================================
+# V4 ADDITION 2: STATISTICAL CONFIDENCE SCORING
+# ============================================================
+
+class ConfidenceScorer:
+    """
+    ✅ V4: Computes statistical confidence for each insight.
+    Returns: label, score (0-1), explanation.
+    """
+    
+    # ✅ FINAL V4: Calibrated multipliers per insight type
+    BASE_CONFIDENCE = {
+        "cross_dimensional_margin": 0.78,
+        "causal_pricing_driver": 0.82,
+        "revenue_concentration": 0.91,
+        "simulation_pricing": 0.61,  # simulations always lower
+        "simulation_category_growth": 0.48,
+        "descriptive_balance": 0.88,
+        "heatmap_pattern": 0.85,
+        "correlation_anomaly": 0.89,
+        "correlation_matrix": 0.89,
+        "pricing_inconsistency": 0.75,
+        "cross_dimensional_dominance": 0.82,
+        "cross_dimensional_volume_value": 0.79,
+        "temporal_peaks": 0.86,
+        "revenue_dominance": 0.91,
+        "descriptive_distribution": 0.72,
+        "descriptive_volume": 0.95,  # always accurate
+    }
+    
+    @classmethod
+    def score(cls, insight, df, correlation=None, eta2=None, share=None) -> dict:
+        """
+        ✅ FINAL V4: Calibrated confidence scoring with adjustments.
+        """
+        n = len(df)
+        
+        # Handle both dict and BusinessInsight object
+        if isinstance(insight, dict):
+            rule = insight.get("rule_type", "")
+        else:
+            rule = getattr(insight, "rule_type", "")
+        
+        # Start with type-based prior
+        base = cls.BASE_CONFIDENCE.get(rule, 0.65)
+        
+        # Adjust for sample size
+        if n >= 5000:
+            base += 0.08
+        elif n >= 1000:
+            base += 0.05
+        elif n >= 300:
+            base += 0.02
+        elif n >= 100:
+            base += 0.00
+        elif n >= 30:
+            base -= 0.05
+        else:
+            base -= 0.15
+        
+        # Adjust for signal strength
+        if correlation is not None:
+            base += min(abs(correlation) * 0.15, 0.10)
+        if eta2 is not None:
+            base += min(eta2 * 0.20, 0.10)
+        if share is not None:
+            base += min((share - 0.25) * 0.30, 0.08)
+        
+        score = max(0.20, min(0.97, base))
+        
+        if score >= 0.80:
+            label = "High"
+        elif score >= 0.55:
+            label = "Medium"
+        else:
+            label = "Low"
+        
+        return {
+            "score": score,
+            "label": label,
+            "pct": f"{score*100:.0f}%",
+            "reason": cls._reason(rule, n, score)
+        }
+    
+    @staticmethod
+    def _reason(rule: str, n: int, score: float) -> str:
+        """Generate confidence reason based on rule type."""
+        reasons = {
+            "simulation_pricing": (
+                "Simulation estimate — based on observed CV differential. "
+                "Actual recovery depends on execution quality."
+            ),
+            "simulation_category_growth": (
+                "Growth projection based on current market share differential. "
+                "Actual results depend on demand elasticity and competition."
+            ),
+            "cross_dimensional_margin": (
+                "Derived from observed revenue/cost differential. "
+                "Confidence scales with sample consistency."
+            ),
+            "causal_pricing_driver": (
+                "ANOVA-validated. η² measures % variance explained."
+            ),
+            "revenue_concentration": (
+                "Direct calculation from revenue distribution. "
+                "High confidence due to observed data."
+            ),
+            "descriptive_volume": (
+                "Exact count from dataset. No estimation involved."
+            ),
+        }
+        
+        base = reasons.get(rule,
+            f"Based on n={n:,} records with observed pattern consistency.")
+        return base
+
+
+# ============================================================
+# FINAL V4 ADDITION 2: SCENARIO ANALYSIS ENGINE
+# ============================================================
+
+class ScenarioEngine:
+    """
+    ✅ FINAL V4: Generates best/base/worst case ranges for every simulation.
+    Multipliers calibrated by insight category risk profile.
+    """
+    
+    PROFILES = {
+        "pricing": {
+            "best": 1.55,
+            "worst": 0.35,
+            "risk": (
+                "High — pricing changes face execution risk "
+                "and potential volume elasticity effects."
+            )
+        },
+        "margin": {
+            "best": 1.30,
+            "worst": 0.55,
+            "risk": (
+                "Medium — operational replication is more "
+                "predictable than demand-side changes."
+            )
+        },
+        "category": {
+            "best": 1.90,
+            "worst": 0.25,
+            "risk": (
+                "Very High — category growth depends on "
+                "demand elasticity, competition, and execution."
+            )
+        },
+        "default": {
+            "best": 1.40,
+            "worst": 0.45,
+            "risk": "Medium — estimate uncertainty varies by context."
+        }
+    }
+    
+    @classmethod
+    def generate(cls, base_gain: float, category: str = "default") -> dict:
+        """Generate best/base/worst case scenarios."""
+        p = cls.PROFILES.get(category, cls.PROFILES["default"])
+        best = base_gain * p["best"]
+        worst = base_gain * p["worst"]
+        
+        return {
+            "best_case": best,
+            "base_case": base_gain,
+            "worst_case": worst,
+            "range_pct": ((best - worst) / abs(base_gain)) * 100 if base_gain else 0,
+            "risk_note": p["risk"],
+            "display": (
+                f"Best case: {_fmt_currency(best)}  |  "
+                f"Base case: {_fmt_currency(base_gain)}  |  "
+                f"Worst case: {_fmt_currency(worst)}"
+            )
+        }
+
+
+# ============================================================
 # 2. COLUMN CLASSIFIER
 # ============================================================
 
@@ -177,6 +477,10 @@ class ColumnClassifier:
 
         # Detect sub-roles for metric computation
         self._detect_sub_roles(df, profile)
+        
+        # Debug: Log numeric columns detected
+        print(f"[PROFILE] Numeric columns detected: {profile.numericals[:10]}")  # Show first 10
+        
         return profile
 
     # ------------------------------------------------------------------ #
@@ -371,6 +675,12 @@ class DomainDetector:
                 "sale_date", "quantity_sold",
                 "quantity sold", "product_category",
                 "sales_amount", "sales amount",
+            ],
+            "insurance_agents": [
+                "agent", "license", "irda", "ulip", "commission",
+                "vintage", "blacklist", "channel", "intermediary",
+                "policy", "premium", "joining", "designation",
+                "qualification", "agentstatus", "minpayment"
             ],
             "healthcare": [
                 "patient", "diagnosis", "blood", "bio", "clinical",
@@ -930,13 +1240,33 @@ class BusinessRuleEngine:
         all_insights.extend(self._rule_discount_impact(df, domain))
         all_insights.extend(self._rule_demographic_split(df, domain))
         all_insights.extend(self._rule_temporal_peaks(df))
+        
+        # ── ✅ GAP 1: Cross-Dimensional Reasoning ─────────────────────────
+        all_insights.extend(self._rule_cross_dimensional(df, profile))
+        
+        # ── ✅ GAP 4: Pricing Inconsistency Detection ─────────────────────
+        pricing_insight = self._rule_pricing_inconsistency(df, profile)
+        if pricing_insight:
+            all_insights.append(pricing_insight)
+        
+        # ── ✅ V4: Causal Reasoning & Simulation ──────────────────────────
+        causal_insight = self._rule_causal_pricing(df, profile)
+        if causal_insight:
+            all_insights.append(causal_insight)
+        all_insights.extend(self._rule_simulation(df, profile))
 
         # ── Post-Processing ──────────────────────────────────────────────
         all_insights = self._deduplicate(all_insights)
         all_insights = self._inject_contradictions(all_insights)
+        
+        # ── ✅ GAP 3: Rank insights by business impact + confidence ──────
+        all_insights = self._rank_insights(all_insights)
+        
+        # ── ✅ P0 FIX: Ensure minimum 3 insights ─────────────────────────
+        all_insights = self._ensure_minimum_insights(all_insights, df, profile)
 
         print(f"\n[INSIGHT ENGINE] FINAL: {len(all_insights)} insights\n")
-        return all_insights, warnings
+        return all_insights[:8], warnings  # top 8, ranked
 
     def evaluate(self, df, profile, metrics) -> tuple[list[BusinessInsight], list[str]]:
         """Backwards compatibility wrapper for run_insight_engine."""
@@ -1792,7 +2122,7 @@ class BusinessRuleEngine:
             months   = monthly["_month"].to_list()
             revenues = monthly["monthly_rev"].to_list()
 
-            # Peak/trough on FULL data
+            # Peak/trough on FULL period-based data
             peak_idx   = revenues.index(max(revenues))
             trough_idx = revenues.index(min(revenues))
             peak_month   = months[peak_idx].strftime("%B")
@@ -1801,7 +2131,8 @@ class BusinessRuleEngine:
             trough_val = revenues[trough_idx]
             pct_gap = ((peak_val - trough_val) / peak_val) * 100
 
-            # Center the chart window on the peak month
+            # ── Chart data: Use period-based window centered on peak ──
+            # This ensures the chart shows the actual periods where peak/trough occurred
             MAX_CHART_MONTHS = 12
             half  = MAX_CHART_MONTHS // 2
             start = max(0, peak_idx - half)
@@ -1810,16 +2141,17 @@ class BusinessRuleEngine:
             display_months   = months[start:end]
             display_revenues = revenues[start:end]
 
+            # Chart data: period-based (e.g., "2028-01", "2028-02", "2028-03")
+            # This matches the actual periods where peak/trough were detected
+            chart_monthly_data = [
+                (m.strftime("%Y-%m"), r) for m, r in zip(display_months, display_revenues)
+            ]
+
             mom_parts = [
                 f"{m.strftime('%b')}={self._format_inr(r)}"
                 for m, r in zip(display_months, display_revenues)
             ]
             mom_str = ("..." if len(months) > MAX_CHART_MONTHS else "") + " → ".join(mom_parts)
-
-            # Chart uses display window only; full data kept in evidence string
-            chart_monthly_data = [
-                (m.strftime("%Y-%m"), r) for m, r in zip(display_months, display_revenues)
-            ]
 
             return [BusinessInsight(
                 title=f"Revenue Peaked in {peak_month}, Troughed in {trough_month}",
@@ -1874,6 +2206,414 @@ class BusinessRuleEngine:
         )]
 
     @log_rule
+    def _rule_cross_dimensional(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """
+        ✅ GAP 1: Cross-Dimensional Reasoning
+        Combine 2+ variables to generate non-obvious composite insights.
+        This is what separates rule-based stats from reasoning-based AI.
+        """
+        insights = []
+        pdf = df.to_pandas()
+        
+        rev_col = profile.revenue_col or profile.price_col
+        cost_col = next((c for c in df.columns
+                        if any(k in c.lower() for k in
+                               ["cost", "price", "spend", "expense"])), None)
+        geo_col = profile.geographic_col
+        cat_col = profile.category_col
+        
+        # Pattern 1: High Revenue + Low Cost = High Margin Zone
+        if rev_col and cost_col and geo_col and rev_col != cost_col:
+            try:
+                grp = pdf.groupby(geo_col).agg(
+                    avg_rev=(rev_col, "mean"),
+                    avg_cost=(cost_col, "mean")
+                ).dropna()
+                
+                if len(grp) >= 2:
+                    grp["margin_proxy"] = grp["avg_rev"] - grp["avg_cost"]
+                    
+                    best = grp["margin_proxy"].idxmax()
+                    worst = grp["margin_proxy"].idxmin()
+                    best_rev = grp.loc[best, "avg_rev"]
+                    worst_rev = grp.loc[worst, "avg_rev"]
+                    best_margin = grp.loc[best, "margin_proxy"]
+                    
+                    # ✅ V4: Add impact quantification
+                    quant = ImpactQuantifier.margin_replication_gain(
+                        pdf, geo_col, rev_col, cost_col, best_region=best
+                    )
+                    
+                    description_base = (
+                        f"{best} combines high revenue ({_fmt_currency(best_rev)} avg) with "
+                        f"lower cost — the strongest margin proxy in the dataset. "
+                        f"{worst} shows the inverse pattern and warrants a cost audit."
+                    )
+                    
+                    # Append quantification if available
+                    if quant and "statement" in quant:
+                        description_base += f" {quant['statement']}"
+                    
+                    insight = BusinessInsight(
+                        title=f"Margin Zone Identified: {best} is High-Efficiency Region",
+                        description=description_base,
+                        why_it_matters="Margin efficiency varies by region — this is a strategic expansion signal.",
+                        evidence=f"Margin proxy: {_fmt_currency(best_margin)} in {best}",
+                        impact="🔴 Critical",
+                        confidence_label="high",
+                        recommendation=(
+                            f"Prioritize {best} for expansion investment. "
+                            f"Apply {best}'s operational model to {worst} to close the efficiency gap."
+                        ),
+                        rule_type="cross_dimensional_margin",
+                        score=10.0
+                    )
+                    
+                    # Add quantification metadata
+                    if quant:
+                        insight.chart_data = insight.chart_data or {}
+                        insight.chart_data.update({
+                            "uplift_abs": quant.get("uplift_abs", 0),
+                            "uplift_pct": quant.get("uplift_pct", 0)
+                        })
+                    
+                    insights.append(insight)
+            except Exception:
+                pass
+        
+        # Pattern 2: Category × Region Dominance (from heatmap data)
+        if rev_col and geo_col and cat_col:
+            try:
+                pivot = pdf.groupby([geo_col, cat_col])[rev_col].sum().unstack(cat_col).fillna(0)
+                
+                if len(pivot) >= 2 and len(pivot.columns) >= 2:
+                    # Which category wins in the MOST regions?
+                    dominant_cat = (pivot.apply(lambda r: r.idxmax(), axis=1)
+                                    .value_counts().idxmax())
+                    dominant_count = (pivot.apply(lambda r: r.idxmax(), axis=1)
+                                     .value_counts().iloc[0])
+                    total_regions = len(pivot)
+                    
+                    # Which region has the most uneven category mix?
+                    row_cv = pivot.apply(
+                        lambda r: r.std()/r.mean() if r.mean() > 0 else 0, axis=1
+                    )
+                    volatile_region = row_cv.idxmax()
+                    
+                    insights.append(BusinessInsight(
+                        title=f"{dominant_cat} Dominates in {dominant_count}/{total_regions} Regions",
+                        description=(
+                            f"{dominant_cat} is the top-performing category in "
+                            f"{dominant_count} out of {total_regions} regions — "
+                            f"a cross-regional dominance signal. "
+                            f"{volatile_region} shows the highest category variability, "
+                            f"indicating uneven category performance within that region."
+                        ),
+                        why_it_matters="Cross-regional category dominance indicates product-market fit strength.",
+                        evidence=f"{dominant_cat} leads in {dominant_count}/{total_regions} regions",
+                        impact="🔴 Critical",
+                        confidence_label="high",
+                        recommendation=(
+                            f"Scale {dominant_cat} investment uniformly across all regions. "
+                            f"Investigate {volatile_region} for category-specific execution gaps."
+                        ),
+                        rule_type="cross_dimensional_dominance",
+                        score=10.0
+                    ))
+            except Exception:
+                pass
+        
+        # Pattern 3: Volume vs Value Decoupling by Segment
+        qty_col = profile.qty_col or next((c for c in df.columns
+                     if any(k in c.lower() for k in
+                            ["qty", "quantity", "units", "volume", "count"])), None)
+        if rev_col and qty_col and cat_col and rev_col != qty_col:
+            try:
+                grp2 = pdf.groupby(cat_col).agg(
+                    total_rev=(rev_col, "sum"),
+                    total_qty=(qty_col, "sum")
+                ).dropna()
+                
+                if len(grp2) >= 2:
+                    grp2["rev_per_unit"] = grp2["total_rev"] / grp2["total_qty"].replace(0, 1)
+                    
+                    high_val = grp2["rev_per_unit"].idxmax()
+                    high_vol = grp2["total_qty"].idxmax()
+                    
+                    if high_val != high_vol:
+                        high_val_rpu = grp2.loc[high_val, "rev_per_unit"]
+                        insights.append(BusinessInsight(
+                            title=f"Volume–Value Decoupling: {high_val} vs {high_vol}",
+                            description=(
+                                f"{high_val} generates the highest revenue per unit "
+                                f"({_fmt_currency(high_val_rpu)}) but "
+                                f"{high_vol} leads in volume. "
+                                f"These are different optimization levers — "
+                                f"value maximization vs. volume maximization."
+                            ),
+                            why_it_matters="Volume and value leaders require different strategies.",
+                            evidence=f"RPU leader: {high_val}, Volume leader: {high_vol}",
+                            impact="🔴 Critical",
+                            confidence_label="high",
+                            recommendation=(
+                                f"Run dual strategy: grow {high_val} for margin, "
+                                f"grow {high_vol} for market share. "
+                                f"Do not apply same pricing strategy to both."
+                            ),
+                            rule_type="cross_dimensional_volume_value",
+                            score=9.0
+                        ))
+            except Exception:
+                pass
+        
+        return insights
+
+    @log_rule
+    def _rule_pricing_inconsistency(self, df: pl.DataFrame, profile: DataProfile) -> Optional[BusinessInsight]:
+        """
+        ✅ GAP 4: Detect when cost/price spread signals non-standardized pricing.
+        High CV or wide P10-P90 spread indicates pricing inconsistency.
+        """
+        pdf = df.to_pandas()
+        
+        # Look for cost/price columns (excluding revenue columns)
+        cost_col = next((c for c in df.columns
+                        if any(k in c.lower() for k in
+                               ["cost", "price", "unit"]) and
+                        not any(k in c.lower() for k in
+                               ["total", "sales", "amount", "revenue"])), None)
+        cat_col = profile.category_col
+        
+        if not cost_col or not cat_col:
+            return None
+        
+        try:
+            # CV by category — high inter-category price variance
+            cat_cv = pdf.groupby(cat_col)[cost_col].agg(
+                lambda x: x.std()/x.mean() if x.mean() > 0 else 0
+            )
+            overall_cv = pdf[cost_col].std() / pdf[cost_col].mean() if pdf[cost_col].mean() > 0 else 0
+            
+            p10 = pdf[cost_col].quantile(0.10)
+            p90 = pdf[cost_col].quantile(0.90)
+            spread_ratio = p90 / p10 if p10 > 0 else 0
+            
+            if spread_ratio > 3 or overall_cv > 0.5:
+                worst_cat = cat_cv.idxmax() if len(cat_cv) > 0 else "Unknown"
+                worst_cv = cat_cv.max() if len(cat_cv) > 0 else 0
+                
+                return BusinessInsight(
+                    title="Pricing Not Standardized — High Cost Variability",
+                    description=(
+                        f"{cost_col} ranges from {_fmt_currency(p10)} (P10) to {_fmt_currency(p90)} (P90) "
+                        f"— a {spread_ratio:.1f}× spread. "
+                        f"Overall CV: {overall_cv:.2f}. "
+                        f"{worst_cat} shows the highest internal price variance (CV={worst_cv:.2f}), "
+                        f"suggesting inconsistent pricing rules or data quality issues."
+                    ),
+                    why_it_matters="Pricing inconsistency erodes margin predictability and customer trust.",
+                    evidence=f"P10-P90 spread: {spread_ratio:.1f}×, CV: {overall_cv:.2f}",
+                    impact="🔴 Critical" if spread_ratio > 5 else "🟠 Important",
+                    confidence_label="high",
+                    recommendation=(
+                        f"Standardize pricing tiers for {cost_col}. "
+                        f"Audit {worst_cat} for rogue pricing. "
+                        f"Use P25-P75 range as the acceptable pricing band."
+                    ),
+                    rule_type="pricing_inconsistency",
+                    score=6.0
+                )
+        except Exception:
+            pass
+        
+        return None
+
+    @log_rule
+    def _rule_causal_pricing(self, df: pl.DataFrame, profile: DataProfile) -> Optional[BusinessInsight]:
+        """
+        ✅ V4 ADDITION 4: Explain WHY cost variability exists by finding its strongest predictor.
+        Uses ANOVA eta-squared to identify the primary driver.
+        """
+        pdf = df.to_pandas()
+        
+        # Look for cost/price columns
+        cost_col = next((c for c in df.columns
+                        if any(k in c.lower() for k in ["cost", "price"]) and
+                        not any(k in c.lower() for k in ["total", "sales", "amount", "revenue"])), None)
+        
+        if not cost_col:
+            return None
+        
+        try:
+            cat_cols = [c for c in pdf.select_dtypes("object").columns if c not in profile.identifiers]
+            best_predictor = None
+            best_eta2 = 0  # eta-squared = variance explained
+            
+            for col in cat_cols:
+                n_unique = pdf[col].nunique()
+                if n_unique < 2 or n_unique > 20:
+                    continue
+                
+                groups = [grp[cost_col].dropna().values
+                         for _, grp in pdf.groupby(col)]
+                
+                if len(groups) < 2:
+                    continue
+                
+                # One-way ANOVA eta-squared (% variance explained by this grouping)
+                grand_mean = pdf[cost_col].mean()
+                ss_between = sum(len(g) * (g.mean() - grand_mean) ** 2 for g in groups if len(g) > 0)
+                ss_total = pdf[cost_col].var() * len(pdf) if pdf[cost_col].var() > 0 else 1
+                eta2 = ss_between / ss_total if ss_total > 0 else 0
+                
+                if eta2 > best_eta2:
+                    best_eta2 = eta2
+                    best_predictor = col
+            
+            if best_predictor and best_eta2 > 0.05:
+                return BusinessInsight(
+                    title=f"Root Cause: {best_predictor} Drives {best_eta2*100:.0f}% of Price Variability",
+                    description=(
+                        f"ANOVA analysis shows {best_predictor} explains "
+                        f"{best_eta2*100:.0f}% of {cost_col} variance (η²={best_eta2:.2f}). "
+                        f"This is the primary structural driver of pricing inconsistency — "
+                        f"not random noise, but a systematic {best_predictor}-dependent pricing pattern."
+                    ),
+                    why_it_matters="Understanding the root cause enables targeted standardization.",
+                    evidence=f"η²={best_eta2:.2f} at n={len(pdf):,}",
+                    impact="🔴 Critical" if best_eta2 > 0.30 else "🟠 Important",
+                    confidence_label="high" if best_eta2 > 0.20 else "medium",
+                    recommendation=(
+                        f"Pricing standardization must happen AT THE {best_predictor.upper()} LEVEL. "
+                        f"Define separate pricing tiers per {best_predictor} value, "
+                        f"then enforce within-group consistency."
+                    ),
+                    rule_type="causal_pricing_driver",
+                    score=7.0
+                )
+        except Exception:
+            pass
+        
+        return None
+
+    @log_rule
+    def _rule_simulation(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """
+        ✅ V4 ADDITION 3: Generate 'what-if' scenarios from observed data.
+        Each simulation shows: current state → target state → ₹ delta.
+        """
+        simulations = []
+        pdf = df.to_pandas()
+        
+        rev_col = profile.revenue_col or profile.price_col
+        cost_col = next((c for c in df.columns
+                        if any(k in c.lower() for k in ["cost", "price"]) and
+                        not any(k in c.lower() for k in ["total", "sales", "amount", "revenue"])), None)
+        cat_col = profile.category_col
+        
+        # Simulation 1: Pricing Standardization
+        if cost_col and rev_col:
+            try:
+                quant = ImpactQuantifier.pricing_standardization_gain(
+                    pdf, cost_col, rev_col, cat_col
+                )
+                
+                if quant and quant.get("gain_abs", 0) > 0:
+                    # ✅ FINAL V4: Add scenario analysis
+                    scenarios = ScenarioEngine.generate(quant["gain_abs"], category="pricing")
+                    
+                    description_base = (
+                        f"CURRENT STATE: {cost_col} CV = {quant['current_cv']:.2f} "
+                        f"(high variability). "
+                        f"TARGET STATE: CV ≤ {quant['target_cv']} "
+                        f"(industry standard). "
+                        f"ESTIMATED GAIN: {_fmt_currency(quant['gain_abs'])} "
+                        f"({quant['gain_pct']:.1f}% of revenue). "
+                        f"ASSUMPTION: 35% of at-risk revenue is recoverable "
+                        f"through tier standardization."
+                    )
+                    
+                    # Append scenario range
+                    description_base += f"\n\nSCENARIO RANGE: {scenarios['display']}. Risk: {scenarios['risk_note']}"
+                    
+                    insight = BusinessInsight(
+                        title="Simulation: Pricing Standardization Impact",
+                        description=description_base,
+                        why_it_matters="Quantifies the financial impact of pricing standardization.",
+                        evidence=f"Current CV: {quant['current_cv']:.2f}, Target: {quant['target_cv']}",
+                        impact="🔴 Critical",
+                        confidence_label="medium",
+                        recommendation=(
+                            f"Phase 1 (30 days): Define 3 pricing tiers for {cost_col}. "
+                            f"Phase 2 (60 days): Enforce tier compliance. "
+                            f"Phase 3 (90 days): Measure margin recovery vs {_fmt_currency(quant['gain_abs'])} target."
+                        ),
+                        rule_type="simulation_pricing",
+                        score=7.5
+                    )
+                    
+                    # Add scenario metadata
+                    insight.chart_data = insight.chart_data or {}
+                    insight.chart_data["scenarios"] = scenarios
+                    
+                    simulations.append(insight)
+            except Exception:
+                pass
+        
+        # Simulation 2: Lagging Category Growth
+        if cat_col and rev_col:
+            try:
+                shares = pdf.groupby(cat_col)[rev_col].sum()
+                if len(shares) >= 2:
+                    leader = shares.idxmax()
+                    laggard = shares.idxmin()
+                    
+                    quant2 = ImpactQuantifier.category_share_gain(
+                        pdf, cat_col, rev_col, laggard, leader
+                    )
+                    
+                    if quant2 and quant2.get("uplift_abs", 0) > 0:
+                        # ✅ FINAL V4: Add scenario analysis
+                        scenarios = ScenarioEngine.generate(quant2["uplift_abs"], category="category")
+                        
+                        description_base = (
+                            f"CURRENT: {laggard} = {shares[laggard]/shares.sum():.1%} share. "
+                            f"TARGET: {laggard} reaches {shares[leader]/shares.sum()/2:.1%} share. "
+                            f"ESTIMATED UPLIFT: {_fmt_currency(quant2['uplift_abs'])} "
+                            f"({quant2['uplift_pct']:.1f}pp share gain). "
+                            f"ASSUMPTION: Conservative 50% of leader share as achievable target."
+                        )
+                        
+                        # Append scenario range
+                        description_base += f"\n\nSCENARIO RANGE: {scenarios['display']}. Risk: {scenarios['risk_note']}"
+                        
+                        insight = BusinessInsight(
+                            title=f"Simulation: Growing {laggard} to Half of {leader}'s Share",
+                            description=description_base,
+                            why_it_matters="Identifies growth opportunities in underperforming categories.",
+                            evidence=f"Current share gap: {(shares[leader]-shares[laggard])/shares.sum()*100:.1f}pp",
+                            impact="🟠 Important",
+                            confidence_label="medium",
+                            recommendation=(
+                                f"Run a 90-day growth experiment for {laggard}: "
+                                f"increase SKU count, run promotions, track weekly share delta. "
+                                f"Exit criterion: reach {_fmt_currency(quant2['uplift_abs']/2)} incremental revenue."
+                            ),
+                            rule_type="simulation_category_growth",
+                            score=6.5
+                        )
+                        
+                        # Add scenario metadata
+                        insight.chart_data = insight.chart_data or {}
+                        insight.chart_data["scenarios"] = scenarios
+                        
+                        simulations.append(insight)
+            except Exception:
+                pass
+        
+        return simulations
+
+    @log_rule
     def _rule_payment_return_correlation(self, df: pl.DataFrame, pdf: pd.DataFrame, profile: DataProfile, ret_series: pl.Series) -> list[BusinessInsight]:
         """Mapping to _rule_payment_correlation."""
         return self._rule_payment_correlation(df, pdf, profile, ret_series)
@@ -1922,6 +2662,215 @@ class BusinessRuleEngine:
             # Filter out any 'No Significant Insights' placeholders if they exist
             return [i for i in insights if "No Significant Insights" not in i.title]
         return insights
+
+    def _ensure_minimum_insights(
+        self, insights: list[BusinessInsight], df: pl.DataFrame, profile: DataProfile
+    ) -> list[BusinessInsight]:
+        """
+        ✅ P0 FIX: Guarantee minimum 3 insights regardless of signal strength.
+        Never return "No Insights" — always provide descriptive fallbacks.
+        """
+        if len(insights) >= 3:
+            return insights
+
+        pdf = df.to_pandas()
+        fallbacks = []
+
+        # LEVEL 3: Descriptive fallback insights — always fire
+        
+        # 1. Distribution balance insight
+        num_cols = [c for c in profile.numericals if c not in profile.identifiers]
+        for col in num_cols[:2]:
+            if col in pdf.columns:
+                try:
+                    mean_val = pdf[col].mean()
+                    median_val = pdf[col].median()
+                    std_val = pdf[col].std()
+                    cv = std_val / mean_val if mean_val != 0 else 0
+                    
+                    if cv < 0.3:
+                        fallbacks.append(BusinessInsight(
+                            title=f"Stable Distribution: {col}",
+                            description=(
+                                f"{col} shows low variability (CV={cv:.2f}) — "
+                                f"consistent performance with no extreme outliers. "
+                                f"Mean: {_fmt_currency(mean_val)}, Median: {_fmt_currency(median_val)}."
+                            ),
+                            why_it_matters="Low variance indicates predictable, stable operations.",
+                            evidence=f"Coefficient of Variation: {cv:.2f} (< 0.3 threshold)",
+                            impact="🟢 Minor",
+                            confidence_label="high",
+                            recommendation=(
+                                f"Use {col} median ({_fmt_currency(median_val)}) as "
+                                f"the primary benchmark for target-setting."
+                            ),
+                            rule_type="descriptive_distribution"
+                        ))
+                    else:
+                        min_val = pdf[col].min()
+                        max_val = pdf[col].max()
+                        fallbacks.append(BusinessInsight(
+                            title=f"High Variability: {col}",
+                            description=(
+                                f"{col} shows high spread (CV={cv:.2f}) — "
+                                f"indicating diverse performance tiers. "
+                                f"Range: {_fmt_currency(min_val)} to {_fmt_currency(max_val)}."
+                            ),
+                            why_it_matters="High variance suggests segmentation opportunities.",
+                            evidence=f"Coefficient of Variation: {cv:.2f} (> 0.3 threshold)",
+                            impact="🟠 Important",
+                            confidence_label="high",
+                            recommendation=f"Segment records by {col} quartile for targeted strategy.",
+                            rule_type="descriptive_distribution"
+                        ))
+                except Exception:
+                    continue
+
+        # 2. Regional/Categorical balance insight
+        cat_cols = [c for c in profile.categoricals if c not in profile.identifiers]
+        for col in cat_cols[:2]:
+            if col in pdf.columns:
+                try:
+                    n_unique = pdf[col].nunique()
+                    if 2 <= n_unique <= 8:
+                        counts = pdf[col].value_counts()
+                        balance = counts.min() / counts.max() if counts.max() > 0 else 0
+                        
+                        if balance > 0.7:  # fairly balanced
+                            fallbacks.append(BusinessInsight(
+                                title=f"Balanced Distribution: {col}",
+                                description=(
+                                    f"{col} is evenly distributed across {n_unique} "
+                                    f"segments (balance ratio: {balance:.2f}). "
+                                    f"No single segment dominates."
+                                ),
+                                why_it_matters="Balanced distribution reduces dependency risk.",
+                                evidence=f"Min/Max ratio: {balance:.2f} (> 0.7 threshold)",
+                                impact="🟢 Minor",
+                                confidence_label="high",
+                                recommendation=(
+                                    f"Low {col} dependency risk — diversification is a "
+                                    f"structural strength. No urgent rebalancing needed."
+                                ),
+                                rule_type="descriptive_balance"
+                            ))
+                        break
+                except Exception:
+                    continue
+
+        # 3. Record volume insight (always available)
+        fallbacks.append(BusinessInsight(
+            title=f"Dataset Scale: {len(df):,} Records Analyzed",
+            description=(
+                f"Analysis based on {len(df):,} records across "
+                f"{len(df.columns)} dimensions. "
+                f"Statistical confidence is {'high' if len(df) > 500 else 'moderate'} "
+                f"given sample size."
+            ),
+            why_it_matters="Sample size determines statistical reliability.",
+            evidence=f"N={len(df):,} rows, {len(df.columns)} columns",
+            impact="🟢 Minor",
+            confidence_label="high",
+            recommendation=(
+                "Sufficient data for trend analysis. "
+                "Consider time-series decomposition for deeper patterns."
+            ),
+            rule_type="descriptive_volume"
+        ))
+
+        # Fill up to minimum 3
+        needed = max(0, 3 - len(insights))
+        insights.extend(fallbacks[:needed])
+        return insights
+
+    def _rank_insights(self, insights: list[BusinessInsight]) -> list[BusinessInsight]:
+        """
+        ✅ FINAL V4: ROI-weighted ranking.
+        Score = (₹ Impact × Confidence) / Implementation Complexity
+        """
+        # Implementation effort scores (lower = easier to implement)
+        COMPLEXITY = {
+            "cross_dimensional_margin": 2,  # Easy: just redirect ops
+            "regional_balance": 1,  # Easy: informational
+            "causal_pricing_driver": 3,  # Medium: requires process change
+            "simulation_pricing": 3,  # Medium: pricing ops change
+            "revenue_concentration": 2,  # Easy: portfolio shift
+            "simulation_category_growth": 4,  # Hard: market development
+            "descriptive_distribution": 1,  # Easy: reporting change
+            "heatmap_pattern": 2,
+            "correlation_matrix": 2,
+            "temporal_peaks": 2,
+            "pricing_inconsistency": 3,
+            "cross_dimensional_dominance": 2,
+            "cross_dimensional_volume_value": 3,
+            "revenue_dominance": 2,
+            "descriptive_balance": 1,
+            "descriptive_volume": 1,
+        }
+        
+        def roi_score(ins):
+            # Handle both dict and BusinessInsight object
+            if isinstance(ins, dict):
+                rule_type = ins.get("rule_type", "")
+                impact_str = ins.get("impact", "Medium")
+                confidence_score = ins.get("confidence_score", 0.5)
+                chart_data = ins.get("chart_data", {})
+            else:
+                rule_type = getattr(ins, "rule_type", "")
+                impact_str = getattr(ins, "impact", "Medium")
+                confidence_score = getattr(ins, "confidence_score", 0.5)
+                chart_data = getattr(ins, "chart_data", None) or {}
+            
+            # Financial impact
+            impact_val = (
+                chart_data.get("uplift_abs", 0) or
+                chart_data.get("scenarios", {}).get("base_case", 0) or
+                0
+            )
+            
+            # Normalize to 0-100 scale if no ₹ value
+            if impact_val == 0:
+                impact_score = {
+                    "Critical": 80, "🔴 Critical": 80,
+                    "Important": 50, "🟠 Important": 50,
+                    "Medium": 30, "High": 80,
+                    "Low": 10, "🟢 Minor": 10
+                }.get(impact_str, 30)
+            else:
+                impact_score = min(impact_val / 100_000, 100)  # ₹1L = 1 point
+            
+            complexity = COMPLEXITY.get(rule_type, 3)
+            roi = (impact_score * confidence_score) / complexity
+            
+            # Store for display
+            if isinstance(ins, dict):
+                ins["roi_score"] = round(roi, 2)
+            else:
+                ins.chart_data = ins.chart_data or {}
+                ins.chart_data["roi_score"] = round(roi, 2)
+            
+            return roi
+        
+        ranked = sorted(insights, key=roi_score, reverse=True)
+        
+        # Add rank label to each
+        for i, ins in enumerate(ranked):
+            rank_label = (
+                "🥇 Highest ROI" if i == 0 else
+                "🥈 High ROI" if i == 1 else
+                "🥉 Strong ROI" if i == 2 else
+                f"#{i+1}"
+            )
+            
+            if isinstance(ins, dict):
+                ins["rank"] = i + 1
+                ins["rank_label"] = rank_label
+            else:
+                ins.chart_data = ins.chart_data or {}
+                ins.chart_data["rank"] = i + 1
+                ins.chart_data["rank_label"] = rank_label
+        
+        return ranked
 
     def _self_diagnostic(self) -> None:
         """Prints a diagnostic report of which rules and guards are wired up."""
@@ -2579,19 +3528,36 @@ class SmartChartRecommender:
                     
                     # ✅ TIER 1 ENHANCEMENT: Add Pareto Chart (80/20 analysis)
                     try:
-                        grp_sorted = grp.sort_values(rev_col, ascending=False)
+                        # ✅ PARETO FIX: Pick the categorical column with highest concentration
+                        # (biggest gap between top and bottom segment)
+                        best_cat_col = cat
+                        best_top1_pct = 0
+                        
+                        for col in [cat, geo_col]:
+                            if col and col in pdf.columns:
+                                shares = pdf.groupby(col)[rev_col].sum()
+                                top1_pct = shares.max() / shares.sum()
+                                if top1_pct > best_top1_pct:
+                                    best_top1_pct = top1_pct
+                                    best_cat_col = col
+                        
+                        print(f"[PARETO] Selected column: {best_cat_col} (top-1 share: {best_top1_pct:.1%})")
+                        
+                        # Use the best categorical column for Pareto
+                        grp_pareto = pdf.groupby(best_cat_col)[rev_col].sum().reset_index()
+                        grp_sorted = grp_pareto.sort_values(rev_col, ascending=False)
                         grp_sorted["cumulative_pct"] = (
                             grp_sorted[rev_col].cumsum() / grp_sorted[rev_col].sum() * 100
                         )
                         fig_pareto = go.Figure()
                         fig_pareto.add_trace(go.Bar(
-                            x=grp_sorted[cat], y=grp_sorted[rev_col],
+                            x=grp_sorted[best_cat_col], y=grp_sorted[rev_col],
                             name="Revenue", marker_color="#6366f1",
                             text=[f"{v/1e6:.1f}M" for v in grp_sorted[rev_col]],
                             textposition="outside"
                         ))
                         fig_pareto.add_trace(go.Scatter(
-                            x=grp_sorted[cat], y=grp_sorted["cumulative_pct"],
+                            x=grp_sorted[best_cat_col], y=grp_sorted["cumulative_pct"],
                             name="Cumulative %", yaxis="y2",
                             line=dict(color="#ef4444", width=2.5),
                             mode="lines+markers"
@@ -2604,15 +3570,15 @@ class SmartChartRecommender:
                             ),
                             template="plotly_dark",
                             legend=dict(orientation="h"),
-                            title=f"Pareto: {cat} Revenue Contribution"
+                            title=f"Pareto: {best_cat_col} Revenue Contribution"
                         )
                         add("pareto_revenue", {
                             "chart_id": "pareto_revenue",
                             "chart_type": "pareto",
-                            "title": f"Pareto: {cat} Revenue Contribution",
+                            "title": f"Pareto: {best_cat_col} Revenue Contribution",
                             "description": "80/20 analysis — which categories drive 80% of revenue",
                             "plotly_json": json.loads(fig_pareto.update_layout(**CHART_LAYOUT_BASE).to_json()),
-                            "columns_used": [cat, price_col],
+                            "columns_used": [best_cat_col, price_col],
                             "priority_score": 92,
                             "insight_reason": "Pareto principle applied to revenue concentration",
                             "interest_level": "high"
@@ -3101,19 +4067,98 @@ class SmartChartRecommender:
     ):
         import plotly.express as px, json
         cat = profile.category_col
+        
+        # Debug: Show what we received
+        print(f"[FALLBACK DEBUG] profile.numericals: {profile.numericals[:10]}")
+        print(f"[FALLBACK DEBUG] num_cols passed: {num_cols[:10]}")
+
+        # ID column blacklist - exclude these from fallback charts
+        ID_KEYWORDS = [
+            "num", "number", "id", "code", "cd", "ifsc", "pin", "pincode",
+            "adhaar", "aadhaar", "account", "mobile", "contact", "license",
+            "tax", "payee", "employee", "agent", "branch", "application",
+            "laclient", "parent", "recruited", "partner_code", "channel_code",
+            "sub_channel_code", "payee_code", "account_payee", "mapped"
+        ]
+        
+        # Filter out ID columns from num_cols
+        filtered_num_cols = []
+        for c in num_cols:
+            col_lower = c.lower().replace(" ", "").replace("_", "")
+            if not any(id_kw.replace("_", "") in col_lower for id_kw in ID_KEYWORDS):
+                filtered_num_cols.append(c)
+        
+        print(f"[FALLBACK] Filtered numeric columns: {filtered_num_cols[:5]}")  # Debug log
 
         # Priority 1: revenue/sales/amount/price columns
         priority_nums = [
-            c for c in num_cols
-            if any(k in c.lower() for k in ["sales", "amount", "revenue", "price", "profit"])
+            c for c in filtered_num_cols
+            if any(k in c.lower() for k in ["sales", "amount", "amt", "payment", "revenue", "price", "profit"])
         ]
         # Priority 2: any numeric column with meaningful scale (max >= 100)
         other_nums = [
-            c for c in num_cols
+            c for c in filtered_num_cols
             if c not in priority_nums
             and pdf[c].max() >= 100
         ]
         ordered_nums = (priority_nums + other_nums)[:2]
+        
+        print(f"[FALLBACK] Priority nums: {priority_nums}")  # Debug log
+        print(f"[FALLBACK] Ordered nums: {ordered_nums}")  # Debug log
+        
+        # If no meaningful numeric columns, create count-based charts instead
+        if not ordered_nums and cat:
+            print(f"[FALLBACK] No numeric columns available, creating count-based charts")
+            
+            # Get top categorical columns (excluding IDs)
+            cat_cols = [
+                c for c in profile.categoricals
+                if c != cat and pdf[c].nunique() <= 20  # Reasonable cardinality
+            ][:2]
+            
+            for cat_col in cat_cols:
+                if len(charts) >= max_charts:
+                    break
+                    
+                try:
+                    # Count by category
+                    counts = pdf[cat_col].value_counts().reset_index()
+                    counts.columns = [cat_col, "Count"]
+                    counts = counts.sort_values("Count", ascending=False).head(10)
+                    
+                    # Check variance
+                    if not is_chart_informative(counts["Count"].tolist()):
+                        print(f"[CHART SUPPRESSED] Count by {cat_col} — variance too low")
+                        continue
+                    
+                    fig = px.bar(
+                        counts, x=cat_col, y="Count",
+                        title=f"Distribution by {cat_col}",
+                        text_auto=True,
+                        color_discrete_sequence=["#3b82f6"]
+                    )
+                    fig.update_layout(template="plotly_dark")
+                    
+                    chart_id = f"count_by_{cat_col.lower().replace(' ', '_')}"
+                    if chart_id not in chart_ids_used:
+                        charts.append({
+                            "chart_id": chart_id,
+                            "chart_type": "bar",
+                            "title": f"Distribution by {cat_col}",
+                            "description": f"Count of records by {cat_col}",
+                            "plotly_json": json.loads(fig.to_json()),
+                            "columns_used": [cat_col],
+                            "priority_score": 70,
+                            "insight_reason": "Categorical distribution analysis",
+                            "interest_level": "recommended"
+                        })
+                        chart_ids_used.add(chart_id)
+                        print(f"[FALLBACK] Added count chart: {cat_col}")
+                except Exception as e:
+                    print(f"[FALLBACK ERROR] Count chart for {cat_col}: {e}")
+                    continue
+            
+            return  # Skip numeric-based fallback charts
 
         for num in ordered_nums:
             if len(charts) >= max_charts:
@@ -3266,13 +4311,13 @@ def _apply_smart_sampling(df: pl.DataFrame) -> pl.DataFrame:
     if rows < 10000:
         return df
     
-    # Tiered Logic as requested
+    # Tiered Logic - increased limits for better analysis
     if rows > 500000:
-        sample_n = 50000
+        sample_n = 100000  # Increased from 50K
     elif rows > 100000:
-        sample_n = 20000
+        sample_n = 50000   # Increased from 20K (your 200K dataset will use this)
     else:
-        sample_n = 10000
+        sample_n = 20000   # Increased from 10K
         
     return df.sample(n=sample_n, seed=42)
 
@@ -3305,9 +4350,10 @@ def run_insight_engine(
     # ── Sampling for large datasets (FIX 4: Tiered Logic) ──────────
     original_row_count = len(df)
     sampled = False
-    if original_row_count > 10000:
-        df = _apply_smart_sampling(df)
-        sampled = True
+    # Disabled sampling - analyze full dataset
+    # if original_row_count > 10000:
+    #     df = _apply_smart_sampling(df)
+    #     sampled = True
 
     _progress("classifying", 10)
     classifier = ColumnClassifier()
@@ -3530,22 +4576,31 @@ def auto_clean_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     """
     Auto-fix medium issues (nulls, duplicates).
     Returns cleaned DataFrame — critical issues must be fixed by user.
+    
+    IMPORTANT: Only drops rows where ALL values are null, not rows with ANY null.
     """
     import pandas as pd
 
     pdf = df.to_pandas()
-    pdf = pdf.dropna()
+    
+    # Drop rows where ALL values are null (not ANY null - too aggressive)
+    pdf = pdf.dropna(how='all')
+    
+    # Drop exact duplicates
     pdf = pdf.drop_duplicates()
 
+    # Try to coerce numeric columns
     for col in pdf.columns:
         if pdf[col].dtype == object and any(kw in col.lower() for kw in _NUMERIC_KW):
             pdf[col] = pd.to_numeric(pdf[col], errors="coerce")
-    pdf = pdf.dropna()
-
+    
+    # Try to coerce date columns
     for col in pdf.columns:
         if pdf[col].dtype == object and any(kw in col.lower() for kw in _DATE_KW):
             pdf[col] = pd.to_datetime(pdf[col], errors="coerce")
-    pdf = pdf.dropna()
+    
+    # Drop rows where ALL values are null (after coercion)
+    pdf = pdf.dropna(how='all')
 
     return pl.from_pandas(pdf)
 

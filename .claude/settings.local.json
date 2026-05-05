@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv\\\\Scripts\\\\activate)",
+      "Bash(python main.py)",
+      "PowerShell(try { $r = Invoke-RestMethod \"http://127.0.0.1:8000/\" -TimeoutSec 3; Write-Host \"OK: $\\($r.message\\)\" } catch { Write-Host \"FAILED: $_\" })",
+      "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-RestMethod \"http://127.0.0.1:8000/\" -TimeoutSec 4; Write-Host \"OK: $\\($r.message\\)\" } catch { Write-Host \"Not up: $_\" })",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(dir /s /b \"%TEMP%\\\\*.parquet\")",
+      "Bash(dir /s /b \"C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\engine\\\\data\\\\*.parquet\")",
+      "Bash(dir /s /b \"C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\engine\\\\sessions\\\\*.parquet\")",
+      "Bash(dir *)",
+      "Bash(python -c \"import report_generator; print\\('OK'\\)\")",
+      "Bash(python *)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Start-Process \"cmd.exe\" -ArgumentList \"/k\", \"cd /d C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\engine && C:\\\\venv\\\\Scripts\\\\python.exe -m uvicorn main:app --port 8000\" -WindowStyle Normal; Start-Process \"cmd.exe\" -ArgumentList \"/k\", \"cd /d C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\web && npm run dev -- --port 3000\" -WindowStyle Normal; Write-Host \"Both started\")",
+      "PowerShell(Start-Process \"cmd.exe\" -ArgumentList \"/k\", \"cd /d C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\engine && C:\\\\venv\\\\Scripts\\\\python.exe -m uvicorn main:app --port 8000\" -WindowStyle Normal; Start-Process \"cmd.exe\" -ArgumentList \"/k\", \"cd /d C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\web && npm run dev -- --port 3000\" -WindowStyle Normal; Write-Host \"Starting both...\")",
+      "PowerShell(Start-Sleep -Seconds 18; $b = try { \\(Invoke-WebRequest -Uri \"http://localhost:8000/health\" -TimeoutSec 5 -UseBasicParsing\\).StatusCode } catch { \"DOWN\" }; $f = try { \\(Invoke-WebRequest -Uri \"http://localhost:3000\" -TimeoutSec 5 -UseBasicParsing\\).StatusCode } catch { \"DOWN\" }; Write-Host \"Backend  \\(8000\\): $b\"; Write-Host \"Frontend \\(3000\\): $f\")",
+      "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(\"./venv/Scripts/uvicorn.exe\" main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(netstat -ano)",
+      "Bash(kill 17576)",
+      "Bash(npm run *)",
+      "Bash(git *)"
+    ]
+  }
+}

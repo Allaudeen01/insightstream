@@ -442,21 +442,54 @@ async def upload_dataset(
                 pdf = pdf.replace('', float('nan'))
                 
                 # Now intelligently coerce each column
+                # First, force-convert known numeric columns (insurance domain)
+                FORCE_NUMERIC_PATTERNS = [
+                    "amt", "amount", "payment", "price", "cost", "revenue", "sales",
+                    "vintage", "tenure", "age", "years", "commission", "premium",
+                    "salary", "wage", "fee", "charge", "balance", "value"
+                ]
+                
                 for col in pdf.columns:
+                    col_lower = col.lower().replace(" ", "").replace("_", "")
+                    
+                    # Force numeric conversion for known numeric patterns
+                    force_numeric = any(pattern in col_lower for pattern in FORCE_NUMERIC_PATTERNS)
+                    
                     # Try integer first
                     try:
                         converted = pd.to_numeric(pdf[col], errors='coerce')
                         non_null_orig = pdf[col].notna().sum()
                         non_null_conv = converted.notna().sum()
-                        if non_null_orig > 0 and (non_null_conv / non_null_orig) >= 0.5:
+                        
+                        # Use 50% threshold normally, but force if pattern matches
+                        threshold = 0.5 if not force_numeric else 0.1  # Lower threshold for known numeric columns
+                        
+                        if non_null_orig > 0 and (non_null_conv / non_null_orig) >= threshold:
                             pdf[col] = converted  # Use numeric — bad rows become NaN
+                            if force_numeric:
+                                print(f"[FORCE NUMERIC] {col} → {non_null_conv}/{non_null_orig} values converted")
+                        else:
+                            if force_numeric:
+                                print(f"[FORCE NUMERIC FAILED] {col} → only {non_null_conv}/{non_null_orig} values convertible (threshold={threshold})")
                         # else: leave as string for validator to flag
-                    except Exception:
+                    except Exception as e:
+                        if force_numeric:
+                            print(f"[FORCE NUMERIC ERROR] {col} → {type(e).__name__}: {str(e)}")
                         pass  # Leave as string
                 
                 # Safe conversion to Polars — all columns are now either float or str
                 df = pl.from_pandas(pdf)
                 print(f"Excel parsed. Shape: {df.shape}")
+                
+                # Debug: Show numeric columns detected
+                numeric_cols = [c for c in df.columns if df[c].dtype in [pl.Int64, pl.Int32, pl.Float64, pl.Float32]]
+                print(f"[NUMERIC COLS DETECTED] {len(numeric_cols)} columns: {numeric_cols[:10]}")  # Show first 10
+                
+                # Debug: Show all column names and types for empty numeric columns
+                for col in df.columns:
+                    if col in ["MINPAYMENTAMT", "Vintage"]:
+                        non_null = df[col].drop_nulls().len()
+                        print(f"[COLUMN DEBUG] {col}: dtype={df[col].dtype}, non_null_count={non_null}, sample={df[col].head(5).to_list()}")
             except Exception as e:
                 print(f"Excel parse failed: {type(e).__name__}: {str(e)}")
                 # Install check
@@ -474,8 +507,11 @@ async def upload_dataset(
         # ── Data Quality Audit ────────────────────────────────────────────
         quality_report = validate_dataframe(df)
         print(f"[quality] critical={quality_report['summary']['critical']}  medium={quality_report['summary']['medium']}")
+        print(f"[quality] DataFrame shape after validation: {df.shape}")
 
         if quality_report["summary"]["critical"] > 0:
+            print(f"[quality] CRITICAL ISSUES FOUND - returning early without session")
+            print(f"[quality] Issues: {quality_report.get('issues', [])}")
             return DatasetSchema(
                 filename=file.filename,
                 row_count=len(df),
@@ -486,8 +522,14 @@ async def upload_dataset(
 
         # Auto-fix medium issues (nulls, duplicates) silently
         if quality_report["summary"]["medium"] > 0:
+            print(f"[quality] Auto-cleaning medium issues...")
             df = auto_clean_dataframe(df)
             print(f"[quality] auto-cleaned → {df.shape}")
+            
+            # Check if cleaning removed all rows
+            if len(df) == 0:
+                print(f"[quality] ERROR: All rows removed during cleaning!")
+                raise ValueError("Data cleaning removed all rows. Please check your data quality.")
 
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -3331,4 +3373,14 @@ if __name__ == '__main__':
         port = preferred_port
         
     print(f"Starting InsightStream on port {port}...")
-    uvicorn.run(app, host='0.0.0.0', port=port, proxy_headers=True, forwarded_allow_ips="*")
+    # Note: Uvicorn doesn't have a direct body size limit parameter
+    # The limit is controlled by the ASGI server (usually unlimited for streaming uploads)
+    # If needed, configure via environment: UVICORN_LIMIT_MAX_REQUESTS
+    uvicorn.run(
+        app, 
+        host='0.0.0.0', 
+        port=port, 
+        proxy_headers=True, 
+        forwarded_allow_ips="*",
+        timeout_keep_alive=300  # 5 minutes for large uploads
+    )
