@@ -1760,22 +1760,22 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     if title:
                         elements.append(Paragraph(f"• {title}", finding_title_style))
                     if description:
-                        # Smart truncation at sentence boundary (up to 500 chars)
-                        if len(description) <= 500:
+                        # Smart truncation at sentence boundary (up to 600 chars)
+                        if len(description) <= 600:
                             short_desc = description
                         else:
-                            # Find last sentence boundary before 500 chars
-                            truncated = description[:500]
+                            # Find last sentence boundary before 600 chars
+                            truncated = description[:600]
                             # Look for last period, exclamation, or question mark
                             last_period = max(
                                 truncated.rfind('. '),
                                 truncated.rfind('! '),
                                 truncated.rfind('? ')
                             )
-                            if last_period > 300:  # Only use if we get at least 300 chars
+                            if last_period > 400:  # Only use if we get at least 400 chars
                                 short_desc = description[:last_period + 1].rstrip()
                             else:
-                                # Fallback to 500 char hard limit
+                                # Fallback to 600 char hard limit
                                 short_desc = truncated.rstrip()
                             short_desc += "…"
                         elements.append(Paragraph(self._md_to_rl(short_desc), finding_body_style))
@@ -1888,27 +1888,41 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     pdf_tmp["month"] = pdf_tmp[date_col].dt.to_period("M").astype(str)
                     monthly = pdf_tmp.groupby("month")[rev_col].sum().reset_index()
                     monthly = monthly.sort_values("month")
+                    monthly = monthly.tail(12)  # last 12 months only → prevents multi-year crowding
                     
                     if len(monthly) >= 2:
                         # Prepare monthly_data for chart
                         monthly_data = [(row["month"], row[rev_col]) for _, row in monthly.iterrows()]
                         
-                        # Calculate peak/trough
-                        peak_idx = monthly[rev_col].idxmax()
-                        trough_idx = monthly[rev_col].idxmin()
-                        peak_month_str = monthly.loc[peak_idx, "month"]
-                        trough_month_str = monthly.loc[trough_idx, "month"]
-                        peak_val = monthly.loc[peak_idx, rev_col]
-                        trough_val = monthly.loc[trough_idx, rev_col]
-                        pct_gap = ((peak_val - trough_val) / peak_val * 100) if peak_val > 0 else 0
-                        
-                        # Extract month names
-                        try:
-                            peak_month = _dt.strptime(peak_month_str, "%Y-%m").strftime("%B")
-                            trough_month = _dt.strptime(trough_month_str, "%Y-%m").strftime("%B")
-                        except:
-                            peak_month = peak_month_str
-                            trough_month = trough_month_str
+                        # Use temporal_insight months if available, else compute from filtered data
+                        _ti = next(
+                            (i for i in insights
+                             if isinstance(i, dict) and i.get("rule_type") == "temporal_peaks"),
+                            None
+                        )
+                        if _ti and _ti.get("chart_data", {}).get("peak_month"):
+                            peak_month  = _ti["chart_data"]["peak_month"]
+                            trough_month = _ti["chart_data"]["trough_month"]
+                            pct_gap      = _ti["chart_data"].get("pct_gap", 0)
+                            print(f"[temporal_fallback] Using insight peak/trough: {peak_month}/{trough_month}")
+                        else:
+                            # Calculate peak/trough from filtered data
+                            peak_idx = monthly[rev_col].idxmax()
+                            trough_idx = monthly[rev_col].idxmin()
+                            peak_month_str = monthly.loc[peak_idx, "month"]
+                            trough_month_str = monthly.loc[trough_idx, "month"]
+                            peak_val = monthly.loc[peak_idx, rev_col]
+                            trough_val = monthly.loc[trough_idx, rev_col]
+                            pct_gap = ((peak_val - trough_val) / peak_val * 100) if peak_val > 0 else 0
+                            
+                            # Extract month names
+                            try:
+                                peak_month = _dt.strptime(peak_month_str, "%Y-%m").strftime("%B")
+                                trough_month = _dt.strptime(trough_month_str, "%Y-%m").strftime("%B")
+                            except:
+                                peak_month = peak_month_str
+                                trough_month = trough_month_str
+                            print(f"[temporal_fallback] Computed peak/trough: {peak_month}/{trough_month}")
                         
                         chart_path = self._chart_monthly_revenue(
                             monthly_data,
