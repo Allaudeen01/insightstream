@@ -1870,7 +1870,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 _last_chart_completed_pair = False
         
         # ✅ FALLBACK: Generate time series from raw data if temporal_insight not found
-        elif df is not None and not df.is_empty():
+        elif df is not None and len(df) > 0:
             try:
                 import polars as pl
                 from datetime import datetime as _dt
