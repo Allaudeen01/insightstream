@@ -1063,7 +1063,13 @@ class PDFReportGenerator:
                 elements.append(Paragraph(f"⚠ Render error: {img_exc}", self.S["Fallback"]))
             elements.append(Spacer(1, 16))
 
-    def _chart_monthly_revenue(self, monthly_data: list) -> Optional[str]:
+    def _chart_monthly_revenue(
+        self,
+        monthly_data: list,
+        peak_month: str = "",
+        trough_month: str = "",
+        pct_gap: float = 0,
+    ) -> Optional[str]:
         """Generate a monthly revenue line chart. Returns PNG path or None."""
         if not monthly_data or len(monthly_data) < 2:
             return None
@@ -1098,6 +1104,75 @@ class PDFReportGenerator:
                             textcoords="offset points",
                             xytext=(0, 12), ha="center",
                             fontsize=9, color="#1a1a2e", fontweight="bold")
+
+            # ✅ Peak marker
+            if peak_month:
+                try:
+                    peak_label_idx = next(
+                        i for i, m in enumerate(months)
+                        if _dt.strptime(m, "%Y-%m").strftime("%B") == peak_month
+                    )
+                    ax.scatter(
+                        [labels[peak_label_idx]], [revenues[peak_label_idx]],
+                        marker="*", s=200, color="#10b981", zorder=5,
+                        label=f"Peak: {peak_month}"
+                    )
+                    ax.annotate(
+                        f"▲ {peak_month}",
+                        (labels[peak_label_idx], revenues[peak_label_idx]),
+                        textcoords="offset points", xytext=(0, 16),
+                        ha="center", fontsize=9,
+                        color="#10b981", fontweight="bold"
+                    )
+                except Exception:
+                    pass
+
+            # ✅ Trough marker
+            if trough_month:
+                try:
+                    trough_label_idx = next(
+                        i for i, m in enumerate(months)
+                        if _dt.strptime(m, "%Y-%m").strftime("%B") == trough_month
+                    )
+                    ax.scatter(
+                        [labels[trough_label_idx]], [revenues[trough_label_idx]],
+                        marker="v", s=150, color="#ef4444", zorder=5,
+                        label=f"Trough: {trough_month}"
+                    )
+                    ax.annotate(
+                        f"▼ {trough_month}",
+                        (labels[trough_label_idx], revenues[trough_label_idx]),
+                        textcoords="offset points", xytext=(0, -20),
+                        ha="center", fontsize=9,
+                        color="#ef4444", fontweight="bold"
+                    )
+                except Exception:
+                    pass
+
+            # ✅ Shaded band between trough and peak values
+            if peak_month and trough_month and revenues:
+                peak_val_num = max(revenues)
+                trough_val_num = min(revenues)
+                ax.axhspan(
+                    trough_val_num, peak_val_num,
+                    alpha=0.06, color="#6366f1", zorder=0
+                )
+                if pct_gap > 0:
+                    ax.text(
+                        0.98, 0.5,
+                        f"{pct_gap:.0f}% swing",
+                        transform=ax.transAxes,
+                        ha="right", va="center",
+                        fontsize=9, color="#94a3b8",
+                        style="italic"
+                    )
+
+            # ✅ Add legend if markers were added
+            if peak_month or trough_month:
+                ax.legend(
+                    loc="upper left", fontsize=8,
+                    framealpha=0.3, edgecolor="none"
+                )
 
             ax.set_title("Monthly Revenue Trend", fontsize=13,
                          fontweight="bold", pad=12, color="#1a1a2e")
@@ -1751,7 +1826,13 @@ class UnifiedReportGenerator(PDFReportGenerator):
         if temporal_insight:
             monthly_data = (temporal_insight.get("chart_data") or {}).get("monthly_data", [])
             print(f"[temporal_chart] monthly_data = {monthly_data[:2] if monthly_data else 'EMPTY'}")
-            chart_path = self._chart_monthly_revenue(monthly_data)
+            _cd = temporal_insight.get("chart_data") or {}
+            chart_path = self._chart_monthly_revenue(
+                monthly_data,
+                peak_month=_cd.get("peak_month", ""),
+                trough_month=_cd.get("trough_month", ""),
+                pct_gap=_cd.get("pct_gap", 0),
+            )
             if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
                 # Only add PageBreak if we're not already on a fresh page from frontend charts
                 if not _last_chart_completed_pair:
