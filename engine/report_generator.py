@@ -1760,9 +1760,23 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     if title:
                         elements.append(Paragraph(f"• {title}", finding_title_style))
                     if description:
-                        # Truncate to ~350 chars for the findings summary page
-                        short_desc = description[:350].rstrip()
-                        if len(description) > 350:
+                        # Smart truncation at sentence boundary (up to 500 chars)
+                        if len(description) <= 500:
+                            short_desc = description
+                        else:
+                            # Find last sentence boundary before 500 chars
+                            truncated = description[:500]
+                            # Look for last period, exclamation, or question mark
+                            last_period = max(
+                                truncated.rfind('. '),
+                                truncated.rfind('! '),
+                                truncated.rfind('? ')
+                            )
+                            if last_period > 300:  # Only use if we get at least 300 chars
+                                short_desc = description[:last_period + 1].rstrip()
+                            else:
+                                # Fallback to 500 char hard limit
+                                short_desc = truncated.rstrip()
                             short_desc += "…"
                         elements.append(Paragraph(self._md_to_rl(short_desc), finding_body_style))
                     if impact:
@@ -1854,6 +1868,75 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     log.error("Monthly trend chart embed failed: %s", _e)
                 # Update flag since we added content after frontend charts
                 _last_chart_completed_pair = False
+        
+        # ✅ FALLBACK: Generate time series from raw data if temporal_insight not found
+        elif df is not None and not df.is_empty():
+            try:
+                import polars as pl
+                from datetime import datetime as _dt
+                
+                # Find date and revenue columns
+                date_col = next((c for c in df.columns if any(k in c.lower() for k in ["date", "time", "day"])), None)
+                rev_col = next((c for c in df.columns if any(k in c.lower() for k in ["sales", "amount", "revenue"])), None)
+                
+                if date_col and rev_col:
+                    print(f"[temporal_fallback] Generating from df: date={date_col}, rev={rev_col}")
+                    # Convert to pandas for processing
+                    pdf_tmp = df.to_pandas()
+                    pdf_tmp[date_col] = pd.to_datetime(pdf_tmp[date_col], errors="coerce", dayfirst=True)
+                    pdf_tmp = pdf_tmp.dropna(subset=[date_col])
+                    pdf_tmp["month"] = pdf_tmp[date_col].dt.to_period("M").astype(str)
+                    monthly = pdf_tmp.groupby("month")[rev_col].sum().reset_index()
+                    monthly = monthly.sort_values("month")
+                    
+                    if len(monthly) >= 2:
+                        # Prepare monthly_data for chart
+                        monthly_data = [(row["month"], row[rev_col]) for _, row in monthly.iterrows()]
+                        
+                        # Calculate peak/trough
+                        peak_idx = monthly[rev_col].idxmax()
+                        trough_idx = monthly[rev_col].idxmin()
+                        peak_month_str = monthly.loc[peak_idx, "month"]
+                        trough_month_str = monthly.loc[trough_idx, "month"]
+                        peak_val = monthly.loc[peak_idx, rev_col]
+                        trough_val = monthly.loc[trough_idx, rev_col]
+                        pct_gap = ((peak_val - trough_val) / peak_val * 100) if peak_val > 0 else 0
+                        
+                        # Extract month names
+                        try:
+                            peak_month = _dt.strptime(peak_month_str, "%Y-%m").strftime("%B")
+                            trough_month = _dt.strptime(trough_month_str, "%Y-%m").strftime("%B")
+                        except:
+                            peak_month = peak_month_str
+                            trough_month = trough_month_str
+                        
+                        chart_path = self._chart_monthly_revenue(
+                            monthly_data,
+                            peak_month=peak_month,
+                            trough_month=trough_month,
+                            pct_gap=pct_gap,
+                        )
+                        
+                        if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
+                            if not _last_chart_completed_pair:
+                                elements.append(PageBreak())
+                            elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
+                            elements.append(HRFlowable(width="100%", thickness=1,
+                                                       color=colors.HexColor(C.RULE_LIGHT)))
+                            elements.append(Spacer(1, 10))
+                            try:
+                                img = RLImage(chart_path, width=480, height=210)
+                                elements.append(img)
+                                elements.append(Spacer(1, 6))
+                                caption = f"Revenue trajectory across all months — peak: {peak_month}, trough: {trough_month}."
+                                elements.append(Paragraph(caption, self.S["Insight"]))
+                                elements.append(Spacer(1, 16))
+                                _last_chart_completed_pair = False
+                                print(f"[temporal_fallback] Chart generated successfully")
+                            except Exception as _e:
+                                log.error("Fallback monthly trend chart embed failed: %s", _e)
+            except Exception as _e:
+                log.warning("Fallback time series generation failed: %s", _e)
 
         # ✅ ADD MISSING SECTIONS 6 & 7
         print(f"[PRE-SECTION6] insights type={type(insights)}, len={len(insights) if insights else 0}, df is None={df is None}")
