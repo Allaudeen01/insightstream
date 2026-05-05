@@ -171,6 +171,13 @@ export default function InsightsPage() {
                 let image_base64 = "";
                 let error = "";
 
+                // Scroll chart into view before capturing to ensure it's fully rendered
+                if (container) {
+                    container.scrollIntoView({ behavior: "instant", block: "center" });
+                    // Wait for render after scroll
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+
                 if (plotlyEl && Plotly) {
                     try {
                         image_base64 = await Plotly.toImage(plotlyEl, {
