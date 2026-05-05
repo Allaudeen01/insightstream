@@ -187,7 +187,7 @@ class C:
     PAGE_W, PAGE_H = A4
     MARGIN         = 0.75 * inch
     SAFE_IMG_W     = 480
-    SAFE_IMG_H     = 280
+    SAFE_IMG_H     = 240  # Reduced to allow 2 charts per page comfortably
 
     BRAND_DARK   = "#1A1A2E"
     BRAND_LIGHT  = "#F0F4FF"
@@ -1041,19 +1041,27 @@ class PDFReportGenerator:
 
         try:
             # KeepTogether prevents title orphaning from its chart image
+            # Use reduced height to prevent overflow that causes chart dropping
             chart_block = KeepTogether([
                 Paragraph(title, self.S["ChartTitle"]),
                 RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H),
                 Spacer(1, 6),
                 Paragraph(f"📊  {insight}", self.S["Insight"]),
-                Spacer(1, 22),
+                Spacer(1, 16),  # Reduced from 22 to save space
             ])
             elements.append(chart_block)
         except Exception as exc:
-            log.error("ReportLab failed loading %s: %s", chart_path, exc)
+            # Fallback: add without KeepTogether if block is too large
+            log.warning("KeepTogether failed for %s, using fallback: %s", title, exc)
             elements.append(Paragraph(title, self.S["ChartTitle"]))
-            elements.append(Paragraph(f"⚠ Render error: {exc}", self.S["Fallback"]))
-            elements.append(Spacer(1, 22))
+            try:
+                elements.append(RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H))
+                elements.append(Spacer(1, 6))
+                elements.append(Paragraph(f"📊  {insight}", self.S["Insight"]))
+            except Exception as img_exc:
+                log.error("ReportLab failed loading %s: %s", chart_path, img_exc)
+                elements.append(Paragraph(f"⚠ Render error: {img_exc}", self.S["Fallback"]))
+            elements.append(Spacer(1, 16))
 
     def _chart_monthly_revenue(self, monthly_data: list) -> Optional[str]:
         """Generate a monthly revenue line chart. Returns PNG path or None."""

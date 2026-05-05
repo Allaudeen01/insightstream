@@ -2948,8 +2948,12 @@ class SmartChartRecommender:
                     annotation_position="top right"
                 )
                 
-                fig.update_layout(template="plotly_dark",
-                                  barmode="overlay" if color_col else "relative")
+                # Reduce height to prevent excessive whitespace in PDF
+                fig.update_layout(
+                    template="plotly_dark",
+                    barmode="overlay" if color_col else "relative",
+                    height=320  # Reduced from default ~450 to 320
+                )
                 if not color_col:
                     fig.update_traces(marker_color="#6366f1")
                 add("price_dist", {
