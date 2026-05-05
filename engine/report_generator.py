@@ -1881,8 +1881,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 
                 if date_col and rev_col:
                     print(f"[temporal_fallback] Generating from df: date={date_col}, rev={rev_col}")
-                    # Convert to pandas for processing
-                    pdf_tmp = df.to_pandas()
+                    # df is already pandas at this point (converted at top of build_from_assets)
+                    pdf_tmp = df.copy()
                     pdf_tmp[date_col] = pd.to_datetime(pdf_tmp[date_col], errors="coerce", dayfirst=True)
                     pdf_tmp = pdf_tmp.dropna(subset=[date_col])
                     pdf_tmp["month"] = pdf_tmp[date_col].dt.to_period("M").astype(str)
