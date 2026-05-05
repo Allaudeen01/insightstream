@@ -167,7 +167,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
     HRFlowable, Image as RLImage, Paragraph,
-    SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
+    SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak, KeepTogether
 )
 
 log = logging.getLogger(__name__)
@@ -1017,34 +1017,43 @@ class PDFReportGenerator:
     def embed_chart_safely(self, elements: list, chart_path: Optional[str],
                            title: str, insight: str) -> None:
         """Triple-guard chart embedding — never raises, never crashes the PDF build."""
-        elements.append(Paragraph(title, self.S["ChartTitle"]))
-
         if not chart_path:
+            elements.append(Paragraph(title, self.S["ChartTitle"]))
             elements.append(Paragraph(
                 "⚠ Chart skipped — required column not found in dataset.",
                 self.S["Fallback"]))
-            elements.append(Spacer(1, 12)); return
+            elements.append(Spacer(1, 12))
+            return
 
         if not os.path.exists(chart_path):
+            elements.append(Paragraph(title, self.S["ChartTitle"]))
             elements.append(Paragraph(
                 f"⚠ Chart file missing: {chart_path}", self.S["Fallback"]))
-            elements.append(Spacer(1, 12)); return
+            elements.append(Spacer(1, 12))
+            return
 
         if os.path.getsize(chart_path) == 0:
+            elements.append(Paragraph(title, self.S["ChartTitle"]))
             elements.append(Paragraph(
                 "⚠ Chart file is empty (render error).", self.S["Fallback"]))
-            elements.append(Spacer(1, 12)); return
+            elements.append(Spacer(1, 12))
+            return
 
         try:
-            img = RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H)
-            elements.append(img)
-            elements.append(Spacer(1, 6))
-            elements.append(Paragraph(f"📊  {insight}", self.S["Insight"]))
+            # KeepTogether prevents title orphaning from its chart image
+            chart_block = KeepTogether([
+                Paragraph(title, self.S["ChartTitle"]),
+                RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H),
+                Spacer(1, 6),
+                Paragraph(f"📊  {insight}", self.S["Insight"]),
+                Spacer(1, 22),
+            ])
+            elements.append(chart_block)
         except Exception as exc:
             log.error("ReportLab failed loading %s: %s", chart_path, exc)
+            elements.append(Paragraph(title, self.S["ChartTitle"]))
             elements.append(Paragraph(f"⚠ Render error: {exc}", self.S["Fallback"]))
-
-        elements.append(Spacer(1, 22))
+            elements.append(Spacer(1, 22))
 
     def _chart_monthly_revenue(self, monthly_data: list) -> Optional[str]:
         """Generate a monthly revenue line chart. Returns PNG path or None."""
@@ -1715,14 +1724,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     chart.get("insight", "Segmented data analysis.")
                 )
                 valid_charts += 1
-            
-            # Only add page break between pairs, never after the last chart
-            is_last_chart = (i == total_charts - 1)
-            is_pair_complete = (valid_charts % 2 == 0)
-            if is_pair_complete and not is_last_chart:
-                elements.append(PageBreak())
         
-        # Track if the last frontend chart completed a pair (we're already on a new page)
+        # Let ReportLab handle natural pagination - no manual PageBreaks in chart loop
+        # Track chart count for temporal/deep insights logic below
         _last_chart_completed_pair = (valid_charts > 0 and valid_charts % 2 == 0)
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
@@ -1766,8 +1770,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
         print(f"[PRE-SECTION6] insights type={type(insights)}, len={len(insights) if insights else 0}, df is None={df is None}")
         print(f"[build_from_assets] df passed to section 6: type={type(df)}, is None={df is None}")
         
-        # Only add PageBreak before Deep Insights if we're not already on a fresh page
-        if insights and not _last_chart_completed_pair:
+        # Always start Deep Insights on a fresh page
+        if insights:
             elements.append(PageBreak())
         
         elements.extend(self._build_section_6_deep_insights(
