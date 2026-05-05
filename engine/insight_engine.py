@@ -2534,26 +2534,91 @@ class SmartChartRecommender:
                 if not is_chart_informative(grp[rev_col].tolist()):
                     print(f"[CHART SUPPRESSED] {target_label} by {cat} — all values flat")
                 else:
+                    # ✅ TIER 1 ENHANCEMENT: Add % contribution labels
+                    total_rev = grp[rev_col].sum()
+                    grp["_pct"] = (grp[rev_col] / total_rev * 100).round(1)
+                    grp["_label"] = grp.apply(
+                        lambda r: f"{r[rev_col]/1e6:.1f}M ({r['_pct']:.0f}%)", axis=1
+                    )
+                    
                     fig = px.bar(
                         grp, x=rev_col, y=cat, orientation="h",
                         title=f"{target_label} by {cat}",
                         color=rev_col, color_continuous_scale="Viridis",
-                        text_auto=".2s"
+                        text=grp["_label"]  # Use explicit labels instead of text_auto
                     )
-                fig.update_layout(template="plotly_dark",
-                                  coloraxis_showscale=False, showlegend=False,
-                                  xaxis_title=target_label)
-                add("revenue_by_cat", {
-                    "chart_id": "revenue_by_cat",
-                    "chart_type": "bar",
-                    "title": f"{target_label} by {cat}",
-                    "description": f"Total {target_label} breakdown across {cat} segments",
-                    "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
-                    "columns_used": [cat, price_col] + ([qty_col] if qty_col else []),
-                    "priority_score": 90,
-                    "insight_reason": "Core business revenue metric",
-                    "interest_level": "high"
-                })
+                    fig.update_traces(textposition="inside", textfont_size=11)
+                    
+                    # ✅ TIER 1 ENHANCEMENT: Annotate top bar with % contribution
+                    top_val = grp[rev_col].max()
+                    top_cat = grp.loc[grp[rev_col].idxmax(), cat]
+                    top_pct = (top_val / total_rev * 100)
+                    fig.add_annotation(
+                        x=top_val, y=top_cat,
+                        text=f"Top: {top_pct:.0f}% of total",
+                        showarrow=True, arrowhead=2,
+                        font=dict(color="#ffffff", size=11),
+                        bgcolor="#6366f1", borderpad=4,
+                        xanchor="left", ax=20, ay=0
+                    )
+                    
+                    fig.update_layout(template="plotly_dark",
+                                      coloraxis_showscale=False, showlegend=False,
+                                      xaxis_title=target_label)
+                    add("revenue_by_cat", {
+                        "chart_id": "revenue_by_cat",
+                        "chart_type": "bar",
+                        "title": f"{target_label} by {cat}",
+                        "description": f"Total {target_label} breakdown across {cat} segments",
+                        "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                        "columns_used": [cat, price_col] + ([qty_col] if qty_col else []),
+                        "priority_score": 90,
+                        "insight_reason": "Core business revenue metric",
+                        "interest_level": "high"
+                    })
+                    
+                    # ✅ TIER 1 ENHANCEMENT: Add Pareto Chart (80/20 analysis)
+                    try:
+                        grp_sorted = grp.sort_values(rev_col, ascending=False)
+                        grp_sorted["cumulative_pct"] = (
+                            grp_sorted[rev_col].cumsum() / grp_sorted[rev_col].sum() * 100
+                        )
+                        fig_pareto = go.Figure()
+                        fig_pareto.add_trace(go.Bar(
+                            x=grp_sorted[cat], y=grp_sorted[rev_col],
+                            name="Revenue", marker_color="#6366f1",
+                            text=[f"{v/1e6:.1f}M" for v in grp_sorted[rev_col]],
+                            textposition="outside"
+                        ))
+                        fig_pareto.add_trace(go.Scatter(
+                            x=grp_sorted[cat], y=grp_sorted["cumulative_pct"],
+                            name="Cumulative %", yaxis="y2",
+                            line=dict(color="#ef4444", width=2.5),
+                            mode="lines+markers"
+                        ))
+                        fig_pareto.update_layout(
+                            yaxis2=dict(
+                                title="Cumulative %", overlaying="y",
+                                side="right", range=[0, 110],
+                                ticksuffix="%"
+                            ),
+                            template="plotly_dark",
+                            legend=dict(orientation="h"),
+                            title=f"Pareto: {cat} Revenue Contribution"
+                        )
+                        add("pareto_revenue", {
+                            "chart_id": "pareto_revenue",
+                            "chart_type": "pareto",
+                            "title": f"Pareto: {cat} Revenue Contribution",
+                            "description": "80/20 analysis — which categories drive 80% of revenue",
+                            "plotly_json": json.loads(fig_pareto.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                            "columns_used": [cat, price_col],
+                            "priority_score": 92,
+                            "insight_reason": "Pareto principle applied to revenue concentration",
+                            "interest_level": "high"
+                        })
+                    except Exception as e:
+                        print(f"[PARETO CHART] Failed to generate: {e}")
             except Exception:
                 pass
 
@@ -2873,6 +2938,16 @@ class SmartChartRecommender:
                     marginal="rug",
                     opacity=0.8
                 )
+                
+                # ✅ TIER 1 ENHANCEMENT: Add median line annotation
+                median_val = pdf[price_col].median()
+                fig.add_vline(
+                    x=median_val, line_dash="dash",
+                    line_color="#ef4444", line_width=2,
+                    annotation_text=f"Median: {median_val:,.0f}",
+                    annotation_position="top right"
+                )
+                
                 fig.update_layout(template="plotly_dark",
                                   barmode="overlay" if color_col else "relative")
                 if not color_col:
