@@ -3042,12 +3042,28 @@ class SmartChartRecommender:
                 )
                 
                 # ✅ TIER 1 ENHANCEMENT: Add median line annotation
+                # Use add_shape + add_annotation to target only main histogram (not rug)
                 median_val = pdf[price_col].median()
-                fig.add_vline(
-                    x=median_val, line_dash="dash",
-                    line_color="#ef4444", line_width=2,
-                    annotation_text=f"Median: {median_val:,.0f}",
-                    annotation_position="top right"
+                fig.add_shape(
+                    type="line",
+                    x0=median_val, x1=median_val,
+                    y0=0, y1=1,
+                    yref="paper",
+                    line=dict(color="#ef4444", width=2, dash="dash"),
+                    row=2, col=1   # target only the histogram subplot, not the rug
+                )
+                fig.add_annotation(
+                    x=median_val,
+                    y=0.85,        # position in paper coordinates
+                    yref="paper",
+                    text=f"Median: {median_val:,.0f}",
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowcolor="#ef4444",
+                    font=dict(color="#ef4444", size=11),
+                    bgcolor="rgba(0,0,0,0.5)",
+                    borderpad=3,
+                    ax=40, ay=0
                 )
                 
                 # Reduce height to prevent excessive whitespace in PDF

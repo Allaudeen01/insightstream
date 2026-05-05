@@ -1685,9 +1685,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     if title:
                         elements.append(Paragraph(f"• {title}", finding_title_style))
                     if description:
-                        # Truncate to ~200 chars for the findings summary page
-                        short_desc = description[:220].rstrip()
-                        if len(description) > 220:
+                        # Truncate to ~350 chars for the findings summary page
+                        short_desc = description[:350].rstrip()
+                        if len(description) > 350:
                             short_desc += "…"
                         elements.append(Paragraph(self._md_to_rl(short_desc), finding_body_style))
                     if impact:
