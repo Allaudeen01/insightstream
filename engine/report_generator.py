@@ -1716,10 +1716,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 )
                 valid_charts += 1
             
-            # Only add page break after every 2 charts if there are more charts coming
+            # Only add page break between pairs, never after the last chart
             is_last_chart = (i == total_charts - 1)
-            if (valid_charts > 0 and valid_charts % 2 == 0 and not is_last_chart):
+            is_pair_complete = (valid_charts % 2 == 0)
+            if is_pair_complete and not is_last_chart:
                 elements.append(PageBreak())
+        
+        # Track if the last frontend chart completed a pair (we're already on a new page)
+        _last_chart_completed_pair = (valid_charts > 0 and valid_charts % 2 == 0)
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
         temporal_insight = next(
@@ -1737,7 +1741,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
             print(f"[temporal_chart] monthly_data = {monthly_data[:2] if monthly_data else 'EMPTY'}")
             chart_path = self._chart_monthly_revenue(monthly_data)
             if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
-                elements.append(PageBreak())
+                # Only add PageBreak if we're not already on a fresh page from frontend charts
+                if not _last_chart_completed_pair:
+                    elements.append(PageBreak())
                 elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
                 elements.append(HRFlowable(width="100%", thickness=1,
                                            color=colors.HexColor(C.RULE_LIGHT)))
@@ -1753,10 +1759,17 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     elements.append(Spacer(1, 16))
                 except Exception as _e:
                     log.error("Monthly trend chart embed failed: %s", _e)
+                # Update flag since we added content after frontend charts
+                _last_chart_completed_pair = False
 
         # ✅ ADD MISSING SECTIONS 6 & 7
         print(f"[PRE-SECTION6] insights type={type(insights)}, len={len(insights) if insights else 0}, df is None={df is None}")
         print(f"[build_from_assets] df passed to section 6: type={type(df)}, is None={df is None}")
+        
+        # Only add PageBreak before Deep Insights if we're not already on a fresh page
+        if insights and not _last_chart_completed_pair:
+            elements.append(PageBreak())
+        
         elements.extend(self._build_section_6_deep_insights(
             insights, metrics=kpis, domain=domain_id, df=df
         ))
