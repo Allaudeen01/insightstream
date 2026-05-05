@@ -2867,6 +2867,63 @@ class SmartChartRecommender:
                                 "insight_reason": "Cross-category geographic performance analysis",
                                 "interest_level": "high"
                             })
+                            
+                            # ✅ TIER 2 ENHANCEMENT: Region × Category Revenue Heatmap
+                            try:
+                                pivot = (
+                                    pdf_tmp.groupby([region_col, cat_col])["_revenue"]
+                                    .sum()
+                                    .unstack(cat_col)
+                                    .fillna(0)
+                                )
+                                # Format values for display (in millions)
+                                pivot_display = (pivot / 1_000_000).round(2)
+                                text_matrix = [
+                                    [f"₹{v:.1f}M" if v >= 1 else f"₹{v*1000:.0f}K"
+                                     for v in row]
+                                    for row in pivot_display.values
+                                ]
+                                fig_heat = go.Figure(data=go.Heatmap(
+                                    z=pivot_display.values,
+                                    x=pivot_display.columns.tolist(),
+                                    y=pivot_display.index.tolist(),
+                                    colorscale="Blues",
+                                    text=text_matrix,
+                                    texttemplate="%{text}",
+                                    textfont={"size": 12, "color": "white"},
+                                    hoverongaps=False,
+                                    showscale=True,
+                                    colorbar=dict(
+                                        title="Revenue (M)",
+                                        tickformat=".1f",
+                                        ticksuffix="M"
+                                    )
+                                ))
+                                fig_heat.update_layout(
+                                    template="plotly_dark",
+                                    xaxis_title=cat_col,
+                                    yaxis_title=region_col,
+                                    xaxis=dict(side="bottom"),
+                                    margin=dict(l=80, r=80, t=20, b=60),
+                                )
+                                add("geo_heatmap", {
+                                    "chart_id": "geo_heatmap",
+                                    "chart_type": "heatmap",
+                                    "title": f"Revenue Heatmap: {region_col} × {cat_col}",
+                                    "description": f"Revenue intensity across all {region_col}–{cat_col} combinations",
+                                    "plotly_json": json.loads(fig_heat.update_layout(**{
+                                        **CHART_LAYOUT_BASE,
+                                        "yaxis": {
+                                            "gridcolor": "rgba(255,255,255,0.05)",
+                                        }
+                                    }).to_json()),
+                                    "columns_used": [region_col, cat_col, revenue_col],
+                                    "priority_score": 86,
+                                    "insight_reason": "Multi-dimensional revenue concentration — spot which category dominates each region",
+                                    "interest_level": "high"
+                                })
+                            except Exception as _e:
+                                print(f"[geo_heatmap] failed: {_e}")
                     else:
                         fig = px.bar(
                             grp, x=geo_col, y=rev_label,
