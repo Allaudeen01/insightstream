@@ -1648,6 +1648,7 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_simulation, "simulation", df, profile))
         all_insights.extend(safe_rule_call(self._rule_rating_analysis, "rating_analysis", df, profile))
         all_insights.extend(safe_rule_call(self._rule_category_satisfaction_cross, "category_satisfaction", df, profile))
+        all_insights.extend(safe_rule_call(self._rule_customer_concentration, "customer_concentration", df, profile))
 
         # ── Post-Processing ──────────────────────────────────────────────
         all_insights = self._deduplicate(all_insights)
@@ -1769,7 +1770,12 @@ class BusinessRuleEngine:
                 else:
                     # Balanced portfolio - celebrate it!
                     dist_title = f"Balanced Portfolio Distribution: {cat}"
-                    dist_desc = f"Revenue is efficiently distributed across {n_segments} {cat} segments (top: {top_pct:.0f}%, expected: {expected_share:.0f}%), maximizing operational stability. HHI of {hhi:.0f} indicates healthy diversification."
+                    dist_desc = (
+                        f"Revenue is efficiently distributed across {n_segments} {cat} segments. "
+                        f"Top segment ({top_name}) contributes {_fmt_currency(top_val)} ({top_pct:.0f}% vs "
+                        f"expected {expected_share:.0f}%) — only {dominance_ratio:.1f}x the equal-share baseline. "
+                        f"HHI of {hhi:.0f} confirms healthy diversification with no single-source dependency."
+                    )
                     dist_why = "A diversified portfolio is the gold standard for risk mitigation and suggests broad market appeal."
                     dist_evidence = f"Dominance ratio: {dominance_ratio:.1f}x | HHI: {hhi:.0f} (unconcentrated) | {n_segments} segments"
                     dist_dec = "Maintain current allocation. Leverage the stability of this portfolio to experiment with high-margin niche segments."
@@ -2741,13 +2747,19 @@ class BusinessRuleEngine:
             trough_val = revenues[trough_idx]
             pct_gap = ((peak_val - trough_val) / peak_val) * 100
             
-            # TIER 1.2: Compute trend slope
+            # TIER 1.2: Compute trend slope and R²
             revenues_arr = np.array(revenues)
             months_arr = np.arange(len(revenues))
             slope, intercept = np.polyfit(months_arr, revenues_arr, 1)
             avg_rev = np.mean(revenues_arr)
             slope_pct = (slope / avg_rev) * 100 if avg_rev > 0 else 0  # monthly growth rate
-            
+
+            # R² tells us whether the linear fit explains meaningful variance
+            predicted = slope * months_arr + intercept
+            ss_res = np.sum((revenues_arr - predicted) ** 2)
+            ss_tot = np.sum((revenues_arr - avg_rev) ** 2)
+            r_squared = float((1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0)
+
             trend_direction = "growing" if slope_pct > 1 else "declining" if slope_pct < -1 else "flat"
             
             # TIER 1.2: Simple seasonality detection (std of month-of-year averages)
@@ -2784,15 +2796,19 @@ class BusinessRuleEngine:
             ]
             mom_str = ("..." if len(months) > MAX_CHART_MONTHS else "") + " → ".join(mom_parts)
             
-            # TIER 1.2: Build richer insight description
+            # TIER 1.2: Build richer insight description — honest about R²
+            if r_squared < 0.10:
+                trend_line = f"Flat (R²={r_squared:.2f} — no meaningful directional signal)"
+            else:
+                trend_line = f"{trend_direction} at {slope_pct:+.1f}%/mo (R²={r_squared:.2f})"
             description = (
-                f"Revenue trend is {trend_direction} at {slope_pct:+.1f}% per month. "
+                f"Revenue trend: {trend_line}. "
                 f"Peak: {peak_month} ({self._format_inr(peak_val)}), "
                 f"Trough: {trough_month} ({self._format_inr(trough_val)}) — {pct_gap:.0f}% gap. "
             )
             if has_seasonality:
                 description += f"Seasonality detected (CV={seasonality_cv:.2f} across calendar months). "
-            description += f"Trend: {mom_str}."
+            description += f"Monthly breakdown: {mom_str}."
 
             return [BusinessInsight(
                 title=f"Revenue {trend_direction.title()}: {peak_month} Peak, {trough_month} Trough",
@@ -2804,7 +2820,7 @@ class BusinessRuleEngine:
                 evidence=(
                     f"Peak: {peak_month} ({self._format_inr(peak_val)}) | "
                     f"Trough: {trough_month} ({self._format_inr(trough_val)}) | "
-                    f"Gap: {pct_gap:.1f}% | Trend: {slope_pct:+.1f}%/mo"
+                    f"Gap: {pct_gap:.1f}% | R²={r_squared:.2f} | Slope: {slope_pct:+.1f}%/mo"
                 ),
                 impact="🔴 Critical" if pct_gap > 30 or abs(slope_pct) > 5 else "🟠 Important",
                 recommendation=(
@@ -3059,18 +3075,25 @@ class BusinessRuleEngine:
                         min_val = ct.min().min()
                         min_idx = ct.stack().idxmin()
                         worst_cat, worst_payment = min_idx
-                        
+
                         # Calculate concentration
                         total_rev = ct.sum().sum()
                         best_pct = (max_val / total_rev * 100) if total_rev > 0 else 0
-                        
+                        worst_pct = (min_val / total_rev * 100) if total_rev > 0 else 0
+
+                        _var_qualifier = (
+                            "vary significantly" if variance_coef >= 0.25
+                            else "show moderate variation"
+                        )
                         description = (
                             f"{best_cat} × {best_payment} generates {_fmt_currency(max_val)} "
                             f"({best_pct:.1f}% of total revenue) — the strongest category-payment "
                             f"combination in the dataset. "
-                            f"Payment method preferences vary significantly by category "
+                            f"Weakest: {worst_cat} × {worst_payment} at {_fmt_currency(min_val)} "
+                            f"({worst_pct:.1f}% of total). "
+                            f"Payment method preferences {_var_qualifier} by category "
                             f"(variance coefficient: {variance_coef:.2f}), indicating that "
-                            f"different products attract different payment behaviors."
+                            f"different products attract different payment behaviours."
                         )
                         
                         insights.append(BusinessInsight(
@@ -3543,6 +3566,90 @@ class BusinessRuleEngine:
             rule_type="category_satisfaction",
             score=8.5,
         )]
+
+    def _rule_customer_concentration(
+        self, df: pl.DataFrame, profile: DataProfile
+    ) -> list[BusinessInsight]:
+        """Customer concentration and repeat-purchase rate analysis."""
+        cust_col = next(
+            (c for c in profile.identifiers
+             if any(k in c.lower() for k in ["customer", "cust", "client", "buyer"])),
+            None,
+        )
+        if not cust_col:
+            return []
+        rev_col = profile.revenue_col or profile.price_col
+        if not rev_col or rev_col not in df.columns:
+            return []
+        try:
+            pdf = df.to_pandas()
+            customer_rev = pdf.groupby(cust_col)[rev_col].sum().sort_values(ascending=False)
+            total = customer_rev.sum()
+            n_customers = len(customer_rev)
+            if n_customers < 5 or total == 0:
+                return []
+
+            top10 = min(10, n_customers)
+            top10_share = customer_rev.head(top10).sum() / total * 100
+            top10_pct_of_base = top10 / n_customers * 100
+            purchase_counts = pdf.groupby(cust_col).size()
+            repeat_rate = (purchase_counts > 1).mean() * 100
+            avg_orders = purchase_counts.mean()
+
+            is_high_conc = top10_share > 25
+            is_low_ret = repeat_rate < 30
+
+            if is_high_conc:
+                impact = "🔴 Critical"
+                rec = (
+                    f"Top {top10} customers ({top10_pct_of_base:.0f}% of base) drive "
+                    f"{top10_share:.0f}% of revenue — key-account concentration risk. "
+                    "Implement dedicated account management and revenue diversification "
+                    "across the broader customer base."
+                )
+            elif is_low_ret:
+                impact = "🟠 Important"
+                rec = (
+                    f"Repeat purchase rate of {repeat_rate:.0f}% is below the 30% threshold. "
+                    "Retention campaigns (loyalty programmes, personalised re-engagement) "
+                    "are the highest-ROI lever available."
+                )
+            else:
+                impact = "🟢 Minor"
+                rec = (
+                    "Healthy customer distribution and repeat-purchase behaviour. "
+                    "Continue nurturing repeat buyers and monitor concentration quarterly."
+                )
+
+            description = (
+                f"{n_customers:,} unique customers averaging {avg_orders:.1f} orders each. "
+                f"Top {top10} customers account for {top10_share:.1f}% of revenue "
+                f"({top10_pct_of_base:.1f}% of the customer base). "
+                f"Repeat purchase rate: {repeat_rate:.1f}%."
+            )
+            return [BusinessInsight(
+                title="Customer Concentration & Retention",
+                description=description,
+                why_it_matters=(
+                    "Customer concentration determines key-account risk; repeat purchase rate "
+                    "determines organic growth potential without incremental acquisition cost."
+                ),
+                evidence=(
+                    f"Unique customers: {n_customers:,} | Top-{top10} share: {top10_share:.1f}% | "
+                    f"Repeat rate: {repeat_rate:.1f}% | Avg orders/customer: {avg_orders:.1f}"
+                ),
+                decision_implication=(
+                    "If repeat rate < 30%: retention campaigns out-ROI new acquisition. "
+                    "If top-10 share > 25%: key-account risk needs active management."
+                ),
+                impact=impact,
+                recommendation=rec,
+                rule_type="customer_concentration",
+                score=8.5,
+            )]
+        except Exception as e:
+            log.warning(f"[customer_concentration] Failed: {e}")
+            return []
 
     def _deduplicate(self, insights: list[BusinessInsight]) -> list[BusinessInsight]:
         """Remove duplicates by title AND by (column, rule_family) pair."""
@@ -4813,14 +4920,6 @@ class SmartChartRecommender:
                             bgcolor="#6366f1", borderpad=4,
                             xanchor="left", ax=20, ay=0
                         )
-                    else:
-                        # Replace with "Balanced distribution" annotation
-                        fig.add_annotation(
-                            x=grp[rev_col].mean(), y=grp.loc[grp.index[len(grp)//2], cat],
-                            text=f"Balanced: {spread_pp:.1f}pp spread",
-                            font=dict(color="#94a3b8", size=10),
-                            showarrow=False,
-                        )
                     
                     fig.update_layout(template="plotly_dark",
                                       coloraxis_showscale=False, showlegend=False,
@@ -5043,14 +5142,14 @@ class SmartChartRecommender:
                         textfont=dict(color="#10b981", size=11),
                         name="Peak", showlegend=True
                     )
-                    # Trough marker — red triangle
+                    # Trough marker — red triangle (text above marker to avoid x-axis overlap)
                     fig.add_scatter(
                         x=[trough_month], y=[trough_val],
                         mode="markers+text",
                         marker=dict(size=14, color="#ef4444",
                                     symbol="triangle-down", line=dict(color="white", width=1)),
                         text=[f"Trough: {trough_val/1e6:.1f}M"],
-                        textposition="bottom center",
+                        textposition="top center",
                         textfont=dict(color="#ef4444", size=11),
                         name="Trough", showlegend=True
                     )
@@ -5350,7 +5449,40 @@ class SmartChartRecommender:
             except Exception:
                 pass
 
-        # ── 9. Fallback generic charts if we still have space ─────────────
+        # ── 9. Customer Purchase Frequency (bar) ──────────────────────────
+        cust_col = next(
+            (c for c in profile.identifiers
+             if any(k in c.lower() for k in ["customer", "cust", "client", "buyer"])),
+            None,
+        )
+        if cust_col and cust_col in pdf.columns:
+            try:
+                freq = pdf.groupby(cust_col).size().value_counts().sort_index().reset_index()
+                freq.columns = ["Purchases", "Customers"]
+                freq = freq[freq["Purchases"] <= 20]  # cap x-axis at 20
+                if len(freq) >= 2 and is_chart_informative(freq["Customers"].tolist()):
+                    fig = px.bar(
+                        freq, x="Purchases", y="Customers",
+                        title="Customer Purchase Frequency",
+                        labels={"Purchases": "Number of Purchases", "Customers": "Number of Customers"},
+                    )
+                    fig.update_traces(marker_color="#6366f1")
+                    fig.update_layout(template="plotly_dark")
+                    add("customer_freq", {
+                        "chart_id": "customer_freq",
+                        "chart_type": "bar",
+                        "title": "Customer Purchase Frequency",
+                        "description": "How many customers made 1, 2, 3… purchases — shows retention and loyalty distribution",
+                        "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                        "columns_used": [cust_col],
+                        "priority_score": 78,
+                        "insight_reason": "Customer behaviour and retention signal",
+                        "interest_level": "high",
+                    })
+            except Exception:
+                pass
+
+        # ── 10. Fallback generic charts if we still have space ─────────────
         if len(charts) < 4 and num_cols and profile.categoricals:
             self._add_fallback_charts(pdf, profile, num_cols, charts,
                                       chart_ids_used, max_charts)

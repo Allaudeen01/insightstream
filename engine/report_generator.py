@@ -1329,8 +1329,8 @@ class PDFReportGenerator:
             # High digit density → data dump
             elif len(s) > 50 and sum(1 for c in s if c in '0123456789.,') / max(len(s), 1) > 0.6:
                 s = "[Strategic insight unavailable \u2013 raw data suppressed]"
-            elif len(s) > 400:
-                s = s[:400] + "\u2026"
+            elif len(s) > 900:
+                s = s[:900] + "\u2026"
             cleaned[key] = s
         return cleaned
 
@@ -2660,22 +2660,22 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     if title:
                         elements.append(Paragraph(f"• {title}", finding_title_style))
                     if description:
-                        # Smart truncation at sentence boundary (up to 600 chars)
-                        if len(description) <= 600:
+                        # Smart truncation at sentence boundary (up to 900 chars)
+                        if len(description) <= 900:
                             short_desc = description
                         else:
-                            # Find last sentence boundary before 600 chars
-                            truncated = description[:600]
+                            # Find last sentence boundary before 900 chars
+                            truncated = description[:900]
                             # Look for last period, exclamation, or question mark
                             last_period = max(
                                 truncated.rfind('. '),
                                 truncated.rfind('! '),
                                 truncated.rfind('? ')
                             )
-                            if last_period > 400:  # Only use if we get at least 400 chars
+                            if last_period > 600:  # Only use if we get at least 600 chars
                                 short_desc = description[:last_period + 1].rstrip()
                             else:
-                                # Fallback to 600 char hard limit
+                                # Fallback to 900 char hard limit
                                 short_desc = truncated.rstrip()
                             short_desc += "…"
                         elements.append(Paragraph(self._md_to_rl(short_desc), finding_body_style))
