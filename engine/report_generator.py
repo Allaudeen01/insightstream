@@ -2529,6 +2529,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(Paragraph(
             f"Official Strategic Analysis  •  {date.today().strftime('%B %d, %Y')}",
             self.S["Subtitle"]))
+        elements.append(Spacer(1, 0.3 * inch))
+        _vstamp_style = ParagraphStyle(
+            '_VStamp', fontSize=10, fontName=PDF_FONT_BOLD,
+            textColor=colors.white,
+            backColor=colors.HexColor('#6366f1'),
+            borderPad=6, alignment=1,
+        )
+        elements.append(Paragraph(f"ENGINE v4 — {date.today().isoformat()}", _vstamp_style))
         elements.append(PageBreak())
 
         # 2. PAGE 2: EXECUTIVE SUMMARY & KPIs
