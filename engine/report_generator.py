@@ -2053,14 +2053,6 @@ class PDFReportGenerator:
             topMargin=C.MARGIN,  bottomMargin=C.MARGIN)
         elements: list = []
 
-        # ── FIX 3: Debug marker — confirms new code is active ─────────────
-        _debug_style = ParagraphStyle(
-            '_DebugMarker', fontSize=8,
-            textColor=colors.red, fontName=PDF_FONT_REGULAR
-        )
-        elements.append(Paragraph("CHART FIX ACTIVE v2", _debug_style))
-        # ─────────────────────────────────────────────────────────────────
-
         # 1. Domain Detection & Asset Prep
         target_metric = domain_template.get("target_metric", "Value") if domain_template else "Value"
         final_title = domain_template.get("report_title", title) if domain_template else title
@@ -2529,14 +2521,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
             topMargin=C.MARGIN,  bottomMargin=C.MARGIN)
         elements: list = []
 
-        # ── FIX 3: Debug marker — confirms new code is active ─────────────
-        _debug_style = ParagraphStyle(
-            '_DebugMarker2', fontSize=8,
-            textColor=colors.red, fontName=PDF_FONT_REGULAR
-        )
-        elements.append(Paragraph("CHART FIX ACTIVE v2", _debug_style))
-        # ─────────────────────────────────────────────────────────────────
-
         # 1. PAGE 1: TITLE PAGE
         elements.append(Spacer(1, 2 * inch))
         elements.append(Paragraph(project_name.upper(), self.S["Section"]))
@@ -2713,9 +2697,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
         valid_charts = 0
         total_charts = len(charts)
         log.info(f"[Charts] Processing {total_charts} charts for PDF")
-        
+        seen_chart_titles: set = set()
+
         for i, chart in enumerate(charts):
             chart_title = chart.get("title", f"Chart {i+1}")
+            if chart_title in seen_chart_titles:
+                log.info(f"[Chart {i+1}] Skipping duplicate: {chart_title}")
+                continue
+            seen_chart_titles.add(chart_title)
             log.info(f"[Chart {i+1}/{total_charts}] Processing: {chart_title}")
             
             # Try to get image from base64 first
