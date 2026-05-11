@@ -3571,16 +3571,27 @@ class BusinessRuleEngine:
         self, df: pl.DataFrame, profile: DataProfile
     ) -> list[BusinessInsight]:
         """Customer concentration and repeat-purchase rate analysis."""
+        all_cols = list(df.columns)
+        # CustomerID can be an identifier or a high-cardinality categorical — search broadly
+        cust_keywords = ["customer", "cust", "client", "buyer"]
         cust_col = next(
-            (c for c in profile.identifiers
-             if any(k in c.lower() for k in ["customer", "cust", "client", "buyer"])),
+            (c for c in (profile.identifiers + profile.categoricals + all_cols)
+             if any(k in c.lower() for k in cust_keywords)),
             None,
         )
         if not cust_col:
             return []
-        rev_col = profile.revenue_col or profile.price_col
+        # Revenue column: prefer explicit revenue_col, then any "total/sales/amount" col, then price_col
+        rev_col = profile.revenue_col or next(
+            (c for c in all_cols
+             if any(k in c.lower() for k in ["total", "sales", "revenue", "amount"])
+             and c not in profile.identifiers
+             and c != cust_col),
+            None,
+        ) or profile.price_col
         if not rev_col or rev_col not in df.columns:
             return []
+        print(f"[customer_concentration] cust_col={cust_col}, rev_col={rev_col}")
         try:
             pdf = df.to_pandas()
             customer_rev = pdf.groupby(cust_col)[rev_col].sum().sort_values(ascending=False)
@@ -5407,31 +5418,36 @@ class SmartChartRecommender:
         if price_col:
             try:
                 color_col = cat if cat and pdf[cat].nunique() <= 5 else None
+                # No marginal="rug" — it creates a 2-row subplot that causes add_vline
+                # to render the annotation twice (once per subplot row).
                 fig = px.histogram(
                     pdf.dropna(subset=[price_col]),
                     x=price_col,
                     color=color_col,
                     title=f"{price_col} Distribution",
                     nbins=30,
-                    marginal="rug",
-                    opacity=0.8
+                    opacity=0.8,
                 )
-                
-                # Add median line annotation (paper coordinates, no row/col to avoid subplot errors)
+
+                # Single median line — no annotation_text on add_vline to avoid duplication;
+                # use add_annotation separately so we control position precisely.
                 median_val = pdf[price_col].median()
                 fig.add_vline(
                     x=median_val,
                     line=dict(color="#ef4444", width=2, dash="dash"),
-                    annotation_text=f"Median: {median_val:,.0f}",
-                    annotation_position="top right",
-                    annotation_font=dict(color="#ef4444", size=11),
                 )
-                
-                # Reduce height to prevent excessive whitespace in PDF
+                fig.add_annotation(
+                    x=median_val, y=1.0, yref="paper",
+                    text=f"Median: {median_val:,.0f}",
+                    showarrow=False, xanchor="left",
+                    font=dict(color="#ef4444", size=11),
+                    bgcolor="rgba(0,0,0,0.4)", borderpad=3,
+                )
+
                 fig.update_layout(
                     template="plotly_dark",
                     barmode="overlay" if color_col else "relative",
-                    height=320  # Reduced from default ~450 to 320
+                    height=320,
                 )
                 if not color_col:
                     fig.update_traces(marker_color="#6366f1")
