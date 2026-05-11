@@ -3638,6 +3638,24 @@ class BusinessRuleEngine:
                 f"({top10_pct_of_base:.1f}% of the customer base). "
                 f"Repeat purchase rate: {repeat_rate:.1f}%."
             )
+            # decision_implication: a single clean sentence based on actual values
+            # (not template "If X then Y" text that bleeds into body copy)
+            if is_high_conc:
+                _implication = (
+                    f"Top {top10} customers drive {top10_share:.0f}% of revenue — "
+                    f"dedicate account management resources and diversify the revenue base."
+                )
+            elif is_low_ret:
+                _implication = (
+                    f"A {repeat_rate:.0f}% repeat rate means most customers buy once and leave — "
+                    f"retention programmes will deliver higher ROI than new acquisition spend."
+                )
+            else:
+                _implication = (
+                    f"Both concentration ({top10_share:.1f}%) and retention ({repeat_rate:.1f}%) "
+                    f"metrics are healthy — maintain current relationship strategy."
+                )
+
             return [BusinessInsight(
                 title="Customer Concentration & Retention",
                 description=description,
@@ -3649,10 +3667,7 @@ class BusinessRuleEngine:
                     f"Unique customers: {n_customers:,} | Top-{top10} share: {top10_share:.1f}% | "
                     f"Repeat rate: {repeat_rate:.1f}% | Avg orders/customer: {avg_orders:.1f}"
                 ),
-                decision_implication=(
-                    "If repeat rate < 30%: retention campaigns out-ROI new acquisition. "
-                    "If top-10 share > 25%: key-account risk needs active management."
-                ),
+                decision_implication=_implication,
                 impact=impact,
                 recommendation=rec,
                 rule_type="customer_concentration",
@@ -4567,6 +4582,8 @@ class InsightNarrator:
                 final_desc = self._narrate_pricing(ins)
             elif rt in ("revenue_dominance", "revenue_by_category", "cross_dimensional_dominance"):
                 final_desc = self._narrate_revenue(ins)
+            elif rt == "customer_concentration":
+                final_desc = self._narrate_customer(ins)
             else:
                 final_desc = self._narrate_default(ins)
 
@@ -4736,11 +4753,19 @@ class InsightNarrator:
         
         return narrative
 
+    def _narrate_customer(self, ins: "BusinessInsight") -> str:
+        """Customer concentration narrator — description only, implication as a clean close."""
+        narrative = ins.description.rstrip()
+        # Append the pre-branched implication sentence (never the raw "If X…" template)
+        if ins.decision_implication:
+            narrative = narrative + " " + ins.decision_implication
+        return narrative
+
     def _narrate_default(self, ins: "BusinessInsight") -> str:
         """
         FIX 4: Conversational default narrator — NO MORE BOILERPLATE!
         Pure prose, naturally integrated context, no template headers.
-        
+
         CRITICAL FIX: Ensure proper spacing between concatenated segments to prevent
         ReportLab character dropping bug.
         """

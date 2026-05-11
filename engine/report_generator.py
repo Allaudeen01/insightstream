@@ -1035,9 +1035,13 @@ class InsightNarrator:
             )
 
         # ── Sentence 2: revenue concentration / segment dominance ──────────
+        # Exclude customer_concentration — it has its own sentence below and
+        # its description triggers the "accounts for Y%" regex incorrectly.
         rev_insight = next(
             (i for i in insights
-             if isinstance(i, dict) and (
+             if isinstance(i, dict)
+             and i.get("rule_type") != "customer_concentration"
+             and (
                  "concentration" in i.get("title", "").lower()
                  or "concentration" in i.get("description", "").lower()
              )),
@@ -1087,6 +1091,28 @@ class InsightNarrator:
                         f"Revenue is heavily concentrated: top-performing segments "
                         f"account for {_pct} of total sales, creating both opportunity "
                         f"and dependency risk."
+                    )
+
+        # ── Sentence 2b: customer concentration (if present) ────────────
+        cust_insight = next(
+            (i for i in insights
+             if isinstance(i, dict) and i.get("rule_type") == "customer_concentration"),
+            None,
+        )
+        if cust_insight:
+            _cust_desc = cust_insight.get("description", "")
+            _m = re.search(r'Top \d+ customers account for ([\d\.]+)%', _cust_desc)
+            if _m:
+                _top10_share = float(_m.group(1))
+                if _top10_share > 25:
+                    sentences.append(
+                        f"Top 10 customers account for {_top10_share:.1f}% of revenue — "
+                        f"a concentration risk requiring active key-account management."
+                    )
+                else:
+                    sentences.append(
+                        f"Revenue is well-distributed across customers: the top 10 account "
+                        f"for only {_top10_share:.1f}% of total — low key-account dependency risk."
                     )
 
         # ── Sentence 3: seasonality — computed directly from df ──────────
