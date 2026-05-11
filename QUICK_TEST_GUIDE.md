@@ -1,135 +1,103 @@
-# Quick Test Guide - Insurance Dataset
+# 🚀 Quick Test Guide - Chart Fix
 
-## 🚀 Start Here
-
-### 1. Restart Backend
-```bash
-cd engine
-python -m uvicorn main:app --port 8000 --reload
-```
-
-### 2. Clear Browser
-- Press **Ctrl+Shift+Delete**
-- Clear cache and local storage
-- Or use **Incognito mode**
-
-### 3. Upload File
-Go to: http://localhost:3000/upload
+**Time**: 1 minute  
+**Goal**: See real charts in PDF
 
 ---
 
-## 📊 What to Look For
+## Step 1: Restart Backend (10 seconds)
 
-### Backend Terminal (Should Show):
-```
-=== UPLOAD DEBUG ===
-Filename: insurance_data.xlsx
-Bytes read: XXXXXX
-Shape: (227000, 55)  ← Should be 227000, not 0!
+**In the backend terminal**, press **Ctrl+C** to stop, then:
 
-ColumnMap → numeric='MINPAYMENTAMT'  ← Should NOT be None!
-            category='AGENTSTATUSCD'  ← Should be a status column
-            region='STATECD'          ← Should be a state column
-
-=== UPLOAD SUCCESS: (227000, 55) ===
+```powershell
+python engine/main.py
 ```
 
-### Frontend (Should Show):
-- **ROWS: 227000** (not 0!)
-- **COLUMNS: 55**
-- **Quality Score: A or B**
-- **"Continue to EDA" button enabled**
+**Wait for**:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
 
 ---
 
-## ❌ If Still Shows "0 ROWS"
+## Step 2: Export PDF (30 seconds)
 
-### Check Backend Logs For:
-
-**Option A: Critical Quality Issues**
-```
-[quality] CRITICAL ISSUES FOUND - returning early without session
-[quality] Issues: [...]
-```
-→ Data has critical quality problems
-
-**Option B: All Rows Removed**
-```
-[quality] ERROR: All rows removed during cleaning!
-```
-→ Cleaning logic too aggressive
-
-**Option C: Parse Failed**
-```
-=== UPLOAD FAILED: ValueError: ...
-```
-→ File format issue
+1. Open http://localhost:3000
+2. Upload a file (or use existing session)
+3. Go to Insights page
+4. Click "Export PDF"
+5. **Watch backend console** for chart messages
 
 ---
 
-## 🔍 Quick Diagnostics
+## Step 3: Check PDF (20 seconds)
 
-### Test 1: Small Sample
-```bash
-# Create 100-row test file
-head -101 insurance_data.csv > test_small.csv
+Open the downloaded PDF and look at **pages 4-5**:
+
+### ✅ SUCCESS:
+- See actual bar charts
+- See actual pie charts
+- No placeholder text
+
+### ❌ STILL BROKEN:
+- See "Revenue by Product" text
+- See "⚠ Chart skipped" messages
+- No actual images
+
+---
+
+## 🔍 What to Look For in Console
+
+### During PDF export, you should see:
+
 ```
-Upload `test_small.csv` - if this works, it's a size/timeout issue.
-
-### Test 2: Check File
-```bash
-# Check file size
-ls -lh insurance_data.xlsx
-
-# Check first few rows
-head -5 insurance_data.csv
+[Chart 1/4] No base64, attempting Plotly conversion
+[Plotly Convert] Successfully converted chart to /tmp/...
+[Chart 2/4] No base64, attempting Plotly conversion
+[Plotly Convert] Successfully converted chart to /tmp/...
 ```
 
-### Test 3: Browser Console
-- Press **F12**
-- Go to **Network** tab
-- Upload file
-- Click `/upload` request
-- Check **Response** tab
+**If you see this** → Charts are rendering ✅  
+**If you don't see this** → Old code still running ❌
 
 ---
 
-## ✅ Expected Results
+## 🐛 If Charts Still Don't Render
 
-### After Upload:
-- ✅ Shows 227K rows
-- ✅ Shows 55 columns
-- ✅ Quality score A or B
-- ✅ Can continue to EDA
+### Try:
+1. **Clear Python cache**:
+   ```powershell
+   Remove-Item -Path "engine\__pycache__" -Recurse -Force
+   python engine/main.py
+   ```
 
-### After Report Generation:
-- ✅ 8-10 page PDF
-- ✅ Charts show meaningful data
-- ✅ No ID numbers in charts
-- ✅ State-wise breakdowns present
-- ✅ Agent status distribution shown
+2. **Check file was saved**:
+   - Open `engine/report_generator.py`
+   - Search for `_convert_plotly_to_png`
+   - Should be there at line ~2065
 
----
-
-## 📞 If Issues Persist
-
-Share these from backend logs:
-1. The `=== UPLOAD DEBUG ===` section
-2. The `ColumnMap →` line
-3. Any `[quality]` error messages
-4. The `=== UPLOAD FAILED` section (if present)
+3. **Install kaleido** (optional):
+   ```powershell
+   pip install kaleido
+   ```
 
 ---
 
-## 🎯 Key Fixes Applied
+## ✅ Success = Real Charts!
 
-1. ✅ Added "amt" to revenue keywords → detects MINPAYMENTAMT
-2. ✅ Added "status", "cd" to category keywords → detects status columns
-3. ✅ Blacklisted 14 ID column patterns → excludes ID numbers
-4. ✅ Added insurance_agents domain → optimized thresholds
-5. ✅ Disabled sampling → analyzes all 227K rows
-6. ✅ Enhanced logging → shows exact failure point
+**Before**:
+```
+Revenue by Product
+⚠ Chart skipped
+```
+
+**After**:
+```
+Revenue by Product
+[BAR CHART IMAGE]
+📊 Total Revenue breakdown
+```
 
 ---
 
-## Status: 🟢 READY TO TEST
+**Ready?** Restart backend and test! 🎨

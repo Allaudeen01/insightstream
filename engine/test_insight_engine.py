@@ -1,44 +1,26 @@
 import polars as pl
-import pandas as pd
+from pathlib import Path
+import json
 from insight_engine import run_insight_engine
-import re
 
-def strip_emojis(text):
-    if not isinstance(text, str): return str(text)
-    return re.sub(r'[^\x00-\x7F]+', '', text)
+session_id = "027f9e7e-5686-4388-8d4d-f85a00c73d16"
+session_path = Path(r"C:\Users\ALI\AppData\Local\Temp\insightstream_sessions") / session_id
 
-def test_engine_v2():
-    # Mock data with an anomaly: Delivery Days and Returns are NOT correlated (Surprise!)
-    df = pl.DataFrame({
-        "order_id": [f"ORD_{i}" for i in range(100)],
-        "category": ["Electronics", "Fashion", "Home"] * 33 + ["Electronics"],
-        "price": [100, 20, 50] * 33 + [100],
-        "quantity": [1] * 100,
-        "returned": [0, 0, 1, 1, 0, 0, 1, 1, 0, 0] * 10,
-        "delivery_days": [2, 1, 15, 12, 3, 2, 14, 11, 4, 3] * 10,
-        "marketing_spend": [10, 5, 15] * 33 + [10]
-    })
-    
-    print("\nStarting E2E Decision Intelligence Test (V2)...")
-    
-    results = run_insight_engine(df)
-    
-    print("\n--- EXECUTIVE SUMMARY ---")
-    print(strip_emojis(results["executive_summary"]))
-    
-    print("\n--- STRATEGIC INSIGHTS (SYNTHESIZED) ---")
-    for ins in results["insights"]:
-        impact = strip_emojis(ins['impact']).strip()
-        print(f"\n[{impact}] {ins['title']}")
-        if ins.get("is_unexpected"):
-            print("WARNING: UNEXPECTED INSIGHT TRIGGERED")
-        print(strip_emojis(ins["description"]))
-        
-    print("\n--- CORE DRIVERS ---")
-    for d in results["key_drivers"]:
-        col = strip_emojis(d['column'])
-        type_str = strip_emojis(d.get('type', d.get('impact', 'unknown')))
-        print(f"Driver: {col} | Impact: {type_str} | r={d.get('r')}")
+print(f"Loading session: {session_id}")
 
-if __name__ == "__main__":
-    test_engine_v2()
+# Load DataFrame
+data_file = session_path / "data.parquet"
+df = pl.read_parquet(data_file)
+print(f"DataFrame loaded: {df.shape}")
+
+# Run insight engine
+print("\nRunning insight engine...")
+try:
+    result = run_insight_engine(df, max_insights=10, max_charts=0)
+    print(f"Success! Result keys: {result.keys()}")
+    print(f"Strategic brief items: {len(result.get('strategic_brief', []))}")
+    print(f"Executive summary length: {len(result.get('executive_summary', ''))}")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {str(e)}")
+    import traceback
+    traceback.print_exc()

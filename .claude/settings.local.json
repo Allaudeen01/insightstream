@@ -22,7 +22,11 @@
       "Bash(netstat -ano)",
       "Bash(kill 17576)",
       "Bash(npm run *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(Get-Content *)",
+      "PowerShell(Get-Content \"C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\requirements.txt\" | Where-Object { $_ -match '\\\\S' })",
+      "Bash(python3 -c \"from reportlab.platypus import KeepTogether, Paragraph; from reportlab.lib.styles import getSampleStyleSheet; s = getSampleStyleSheet\\(\\); p = Paragraph\\('test', s['Normal']\\); kt = KeepTogether\\([p]\\); print\\('_content:', hasattr\\(kt,'_content'\\)\\); print\\('_flowables:', hasattr\\(kt,'_flowables'\\)\\); print\\('text attr:', hasattr\\(p,'text'\\)\\); print\\('_text attr:', hasattr\\(p,'_text'\\)\\); print\\('p.text:', p.text\\)\")",
+      "PowerShell(python -c \"from reportlab.platypus import KeepTogether, Paragraph; from reportlab.lib.styles import getSampleStyleSheet; s = getSampleStyleSheet\\(\\); p = Paragraph\\('test ₹1.18 L', s['Normal']\\); kt = KeepTogether\\([p]\\); print\\('_content:', hasattr\\(kt,'_content'\\)\\); print\\('_flowables:', hasattr\\(kt,'_flowables'\\)\\); print\\('text attr:', hasattr\\(p,'text'\\)\\); print\\('_text attr:', hasattr\\(p,'_text'\\)\\); print\\('p.text repr:', repr\\(p.text\\)\\)\")"
     ]
   }
 }
