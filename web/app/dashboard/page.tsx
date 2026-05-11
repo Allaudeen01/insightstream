@@ -226,6 +226,8 @@ export default function DashboardPage() {
                     image_base64,
                     error,
                     insight: chart.description || "",
+                    // Included so the backend can render via kaleido when base64 capture fails
+                    plotly_json: chart.plotly_json || null,
                 });
 
                 setExportProgress(20 + Math.floor(((i + 1) / chartsToExport.length) * 50));

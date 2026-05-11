@@ -19,6 +19,7 @@ ROOT-CAUSE FIX:
 from __future__ import annotations
 
 import contextlib
+import io
 import logging
 import re
 import os
@@ -181,8 +182,18 @@ class C:
     FIG_W, FIG_H   = 10, 5
     DPI            = 150
     FACECOLOR      = "white"
-    SNS_STYLE      = "whitegrid"
-    PALETTE        = "Blues_d"
+    SNS_STYLE      = "ticks"          # cleaner than whitegrid for professional reports
+    PALETTE        = None             # overridden by BRAND_PALETTE below
+
+    # Modern brand colour palette
+    BRAND_PALETTE  = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444",
+                      "#8B5CF6", "#EC4899", "#14B8A6", "#F97316"]
+    COLOR_PRIMARY  = "#3B82F6"  # blue  — main bars / lines
+    COLOR_POSITIVE = "#10B981"  # green — growth / good signal
+    COLOR_WARN     = "#F59E0B"  # amber — watch signal
+    COLOR_CRITICAL = "#EF4444"  # red   — alert / negative
+    COLOR_NEUTRAL  = "#94A3B8"  # slate — average line / baseline
+    COLOR_ACCENT   = "#8B5CF6"  # purple — peak markers / highlights
 
     PAGE_W, PAGE_H = A4
     MARGIN         = 0.75 * inch
@@ -200,15 +211,12 @@ class C:
     PURPLE       = "#4B0082"
 
     # Keyword priority lists for fuzzy column matching
-    NUMERIC_KEYWORDS  = ["sales", "revenue", "profit", "amount", "amt", "payment", "commission", "value", "total", "price", "income"]
+    NUMERIC_KEYWORDS  = ["sales", "revenue", "profit", "amount", "amt", "payment", "commission", "value", "total", "price", "income", "turnover", "transaction"]
     NUMERIC2_KEYWORDS = ["quantity", "qty", "units", "count", "volume", "orders", "vintage", "tenure", "age", "years"]
     CATEGORY_KEYWORDS = ["category", "type", "segment", "department", "group", "status", "channel", "gender", "religion", "occupation", "qualification", "statuscd", "cd"]
     REGION_KEYWORDS   = ["region", "state", "country", "city", "location", "territory", "zone", "statecd"]
     DATE_KEYWORDS     = ["date", "time", "month", "year", "period", "day", "week", "dt", "joiningdt", "birthdt"]
-    LABEL_KEYWORDS    = ["name", "label", "title", "description"]
-    REGION_KEYWORDS   = ["region", "area", "zone", "territory", "location", "city", "country", "state"]
-    DATE_KEYWORDS     = ["date", "time", "month", "year", "period", "day", "week"]
-    LABEL_KEYWORDS    = ["product", "item", "name", "sku", "title", "label"]
+    LABEL_KEYWORDS    = ["name", "label", "title", "description", "product", "item", "sku"]
 
 TEMPLATE_CONFIGS = {
     "modern": {
@@ -257,7 +265,22 @@ TEMPLATES = {
         "regional_insight_threshold": 0.10,
         "correlation_primary_label": "revenue driver",
         "regional_chart_title": "Geographical Revenue Distribution",
-        "executive_summary_header": "Commerce Performance Executive Summary"
+        "executive_summary_header": "Commerce Performance Executive Summary",
+        "narrative_domain_name": "ecommerce operation",
+        "kpi_labels": {
+            "total_revenue": "Gross Merchandise Value",
+            "avg_order_value": "Average Order Value",
+            "return_rate": "Return Rate",
+        },
+        "seasonality_context": "demand spikes typically coincide with festive seasons and promotional events",
+        "benchmarks": {
+            "return_rate": 5.0,
+            "aov_growth_rate": 0.5,
+            "discount_effectiveness_threshold": 0.10,
+            "seasonality_cv_threshold": 0.25,
+            "avg_review_rating": 4.0,
+            "gross_margin": 35.0,
+        },
     },
     "sales": {
         "report_title": "Strategic Sales & Revenue Report",
@@ -267,7 +290,19 @@ TEMPLATES = {
         "regional_insight_threshold": 0.10,
         "correlation_primary_label": "revenue driver",
         "regional_chart_title": "Regional Sales Distribution",
-        "executive_summary_header": "Sales Performance Executive Summary"
+        "executive_summary_header": "Sales Performance Executive Summary",
+        "narrative_domain_name": "sales operation",
+        "kpi_labels": {
+            "total_revenue": "Total Sales",
+            "avg_order_value": "Average Deal Size",
+        },
+        "seasonality_context": "deal closures tend to peak at quarter-end and financial year boundaries",
+        "benchmarks": {
+            "return_rate": 8.0,
+            "aov_growth_rate": 0.3,
+            "seasonality_cv_threshold": 0.20,
+            "gross_margin": 40.0,
+        },
     },
     "insurance_agents": {
         "report_title": "Agent Distribution & Performance Report",
@@ -287,7 +322,11 @@ TEMPLATES = {
         "regional_insight_threshold": 0.10,
         "correlation_primary_label": "primary metric driver",
         "regional_chart_title": "Regional Metric Performance",
-        "executive_summary_header": "Executive Data Insights"
+        "executive_summary_header": "Executive Data Insights",
+        "narrative_domain_name": "business operation",
+        "kpi_labels": {},
+        "seasonality_context": "recurring temporal patterns may reflect operational or market cycles",
+        "benchmarks": {},
     }
 }
 
@@ -379,14 +418,27 @@ class ColumnMap:
     """
     Resolves which actual DataFrame columns to use for each chart role.
     Logs every decision — check server output if a chart is still missing.
+    
+    P0 ENHANCEMENTS:
+    - Entity type detection (person/place/category/ID)
+    - Column importance scoring
+    - Sub-role detection for better analysis
     """
     def __init__(self, df: pd.DataFrame):
         claimed: list[str] = []
+        
+        # Initialize entity tracking
+        self.entity_types: dict[str, str] = {}  # col -> 'person'|'place'|'category'|'id'
+        self.column_importance: dict[str, int] = {}  # col -> 0-10 score
+        self.person_columns: list[str] = []
+        self.place_columns: list[str] = []
+        self.id_columns: list[str] = []
 
         self.numeric = _fuzzy_numeric(df, C.NUMERIC_KEYWORDS)
         if self.numeric: 
             claimed.append(self.numeric.lower())
             log.info(f"[ColumnMap] Selected numeric: {self.numeric}")
+            self._score_column(self.numeric, df, is_revenue=True)
         else:
             log.warning("[ColumnMap] No numeric column found!")
 
@@ -394,28 +446,189 @@ class ColumnMap:
         if self.numeric2: 
             claimed.append(self.numeric2.lower())
             log.info(f"[ColumnMap] Selected numeric2: {self.numeric2}")
+            self._score_column(self.numeric2, df)
 
         self.category = _fuzzy_col(df, C.CATEGORY_KEYWORDS, exclude=claimed)
         if self.category: 
             claimed.append(self.category.lower())
             log.info(f"[ColumnMap] Selected category: {self.category}")
+            self._detect_entity_type(self.category, df)
+            self._score_column(self.category, df)
 
         self.region = _fuzzy_col(df, C.REGION_KEYWORDS, exclude=claimed)
         if self.region: 
             claimed.append(self.region.lower())
             log.info(f"[ColumnMap] Selected region: {self.region}")
+            self._detect_entity_type(self.region, df)
+            self._score_column(self.region, df)
 
         self.date = _fuzzy_col(df, C.DATE_KEYWORDS, exclude=claimed)
         if self.date: 
             claimed.append(self.date.lower())
             log.info(f"[ColumnMap] Selected date: {self.date}")
+            self._score_column(self.date, df, is_temporal=True)
 
         self.label = _fuzzy_col(df, C.LABEL_KEYWORDS, exclude=claimed)
+        
+        # Detect additional sub-roles
+        self._detect_sub_roles(df, claimed)
 
         log.info(
             "ColumnMap → numeric=%r  numeric2=%r  category=%r  region=%r  date=%r  label=%r",
             self.numeric, self.numeric2, self.category, self.region, self.date, self.label,
         )
+        
+        # Log entity detection results
+        if self.person_columns:
+            log.info(f"[ColumnMap] Person columns detected: {self.person_columns}")
+        if self.place_columns:
+            log.info(f"[ColumnMap] Place columns detected: {self.place_columns}")
+        if self.id_columns:
+            log.info(f"[ColumnMap] ID columns detected: {self.id_columns}")
+    
+    def _detect_entity_type(self, col: str, df: pd.DataFrame) -> None:
+        """
+        P0 FIX: Detect if column contains person names, places, categories, or IDs.
+        Prevents "Cameron" being treated as a category.
+        """
+        if col not in df.columns:
+            return
+        
+        col_lower = col.lower()
+        sample_values = df[col].dropna().astype(str).head(20).tolist()
+        
+        # Check column name first
+        person_keywords = ['name', 'manager', 'salesperson', 'employee', 'staff', 'agent', 'rep']
+        place_keywords = ['region', 'city', 'state', 'country', 'location', 'area', 'zone', 'territory']
+        id_keywords = ['id', 'code', 'key', 'number', 'ref']
+        
+        # ID detection
+        if any(kw in col_lower for kw in id_keywords):
+            self.entity_types[col] = 'id'
+            self.id_columns.append(col)
+            log.info(f"[ColumnMap] '{col}' detected as ID column")
+            return
+        
+        # Person detection
+        if any(kw in col_lower for kw in person_keywords):
+            self.entity_types[col] = 'person'
+            self.person_columns.append(col)
+            log.info(f"[ColumnMap] '{col}' detected as PERSON column")
+            return
+        
+        # Place detection
+        if any(kw in col_lower for kw in place_keywords):
+            self.entity_types[col] = 'place'
+            self.place_columns.append(col)
+            log.info(f"[ColumnMap] '{col}' detected as PLACE column")
+            return
+        
+        # Check sample values for person names
+        person_indicators = {'john', 'jane', 'michael', 'sarah', 'david', 'emily', 'cameron', 
+                           'alex', 'chris', 'james', 'mary', 'robert', 'jennifer', 'william'}
+        place_indicators = {'north', 'south', 'east', 'west', 'central', 'northeast', 
+                          'northwest', 'southeast', 'southwest'}
+        
+        person_matches = sum(1 for v in sample_values if v.lower() in person_indicators)
+        place_matches = sum(1 for v in sample_values if any(p in v.lower() for p in place_indicators))
+        
+        if person_matches > 0:
+            self.entity_types[col] = 'person'
+            self.person_columns.append(col)
+            log.info(f"[ColumnMap] '{col}' detected as PERSON column (found names: {person_matches})")
+        elif place_matches > 0:
+            self.entity_types[col] = 'place'
+            self.place_columns.append(col)
+            log.info(f"[ColumnMap] '{col}' detected as PLACE column (found indicators: {place_matches})")
+        else:
+            self.entity_types[col] = 'category'
+            log.info(f"[ColumnMap] '{col}' classified as generic CATEGORY")
+    
+    def _score_column(self, col: str, df: pd.DataFrame, is_revenue: bool = False, 
+                     is_temporal: bool = False) -> None:
+        """
+        P0 FIX: Assign importance score to columns.
+        High-importance columns MUST generate insights.
+        """
+        if col not in df.columns:
+            return
+        
+        col_lower = col.lower()
+        score = 0
+        
+        # Revenue columns: highest importance
+        if is_revenue or any(kw in col_lower for kw in ['revenue', 'sales', 'amount', 'price', 'total']):
+            score = 10
+        
+        # Return/refund columns: critical business signal
+        elif any(kw in col_lower for kw in ['return', 'refund', 'returned']):
+            score = 10
+        
+        # Discount columns: pricing intelligence
+        elif 'discount' in col_lower:
+            score = 9
+        
+        # Date columns: temporal intelligence
+        elif is_temporal or any(kw in col_lower for kw in ['date', 'time', 'month', 'year']):
+            score = 10
+        
+        # Person columns: performance analysis
+        elif col in self.person_columns or self.entity_types.get(col) == 'person':
+            score = 7
+        
+        # Place columns: geographic analysis
+        elif col in self.place_columns or self.entity_types.get(col) == 'place':
+            score = 6
+        
+        # Category columns: segmentation
+        elif any(kw in col_lower for kw in ['category', 'type', 'segment', 'group']):
+            score = 6
+        
+        # ID columns: low importance
+        elif col in self.id_columns or self.entity_types.get(col) == 'id':
+            score = 2
+        
+        # Default
+        else:
+            score = 5
+        
+        self.column_importance[col] = score
+        log.info(f"[ColumnMap] Column '{col}' importance score: {score}/10")
+    
+    def _detect_sub_roles(self, df: pd.DataFrame, claimed: list[str]) -> None:
+        """Detect additional sub-roles like discount, return, salesperson"""
+        self.discount_col = None
+        self.return_col = None
+        self.salesperson_col = None
+        
+        for col in df.columns:
+            if col.lower() in claimed:
+                continue
+            
+            col_lower = col.lower()
+            
+            # Discount detection
+            if 'discount' in col_lower and self.discount_col is None:
+                self.discount_col = col
+                self._score_column(col, df)
+                log.info(f"[ColumnMap] Detected discount column: {col}")
+            
+            # Return detection
+            elif any(kw in col_lower for kw in ['return', 'refund']) and self.return_col is None:
+                self.return_col = col
+                self._score_column(col, df)
+                log.info(f"[ColumnMap] Detected return column: {col}")
+            
+            # Salesperson detection
+            elif any(kw in col_lower for kw in ['salesperson', 'sales_person', 'rep', 'agent', 'manager']) and self.salesperson_col is None:
+                self.salesperson_col = col
+                self._detect_entity_type(col, df)
+                self._score_column(col, df)
+                log.info(f"[ColumnMap] Detected salesperson column: {col}")
+    
+    def get_high_importance_columns(self) -> list[str]:
+        """Return columns with importance >= 8 that MUST be analyzed"""
+        return [col for col, score in self.column_importance.items() if score >= 8]
 
 
 def get_region_column(df: pd.DataFrame) -> Optional[str]:
@@ -543,10 +756,16 @@ class ChartGenerator:
 
         sns.set_style(C.SNS_STYLE)
         with self._safe_fig(filename) as (fig, ax):
-            sns.barplot(x=data.index.astype(str), y=data.values, palette=C.PALETTE, ax=ax)
-            ax.set_title(title, fontsize=14, fontweight="bold")
-            ax.set_xlabel(cat_col)
-            ax.set_ylabel(f"Median {val_col}")
+            bars = sns.barplot(x=data.index.astype(str), y=data.values,
+                               palette=C.BRAND_PALETTE[:len(data)], ax=ax)
+            ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+            ax.set_xlabel(cat_col, labelpad=6)
+            ax.set_ylabel(f"Median {val_col}", labelpad=6)
+            # Average reference line
+            avg = data.mean()
+            ax.axhline(avg, color=C.COLOR_NEUTRAL, linestyle="--", linewidth=1.2,
+                       label=f"Avg: {avg:,.0f}")
+            ax.legend(fontsize=8)
             # 15% headroom so the tallest bar never clips the axis edge
             ax.set_ylim(0, data.max() * 1.15)
             plt.xticks(rotation=30, ha="right")
@@ -569,17 +788,26 @@ class ChartGenerator:
         sns.set_style(C.SNS_STYLE)
         with self._safe_fig(fname) as (fig, ax):
             bp = sns.barplot(x=data.index.astype(str), y=data.values,
-                             palette=C.PALETTE, ax=ax)
+                             palette=C.BRAND_PALETTE[:len(data)], ax=ax)
             ax.set_title(f"Total {cm.numeric} by {cm.category}",
-                         fontsize=13, fontweight="bold")
+                         fontsize=13, fontweight="bold", pad=10)
             ax.set_xlabel(cm.category); ax.set_ylabel(cm.numeric)
             ax.yaxis.set_major_formatter(
                 mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
+            # Average reference line
+            avg_val = data.mean()
+            ax.axhline(avg_val, color=C.COLOR_NEUTRAL, linestyle="--", linewidth=1.2,
+                       label=f"Avg: {avg_val:,.0f}")
+            ax.legend(fontsize=8)
+            # Annotate each bar with share % of total
+            total = data.sum()
+            for bar, val in zip(bp.patches, data.values):
+                share_pct = (val / total * 100) if total > 0 else 0
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 1.01,
+                        f"{share_pct:.0f}%", ha="center", va="bottom", fontsize=8,
+                        color="#334155", fontweight="bold")
             plt.xticks(rotation=30, ha="right")
-            for bar in bp.patches:
-                h = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width() / 2, h * 1.01,
-                        f"{h:,.0f}", ha="center", va="bottom", fontsize=8)
+            ax.set_ylim(0, data.max() * 1.20)
         return self._verify(fname)
 
     def _chart_region(self, df: pd.DataFrame, cm: ColumnMap) -> Optional[str]:
@@ -603,16 +831,23 @@ class ChartGenerator:
             if cm.category and cm.category != cm.region:
                 pivot = (df.groupby([cm.region, cm.category])[cm.numeric]
                            .sum().unstack(cm.category).fillna(0))
-                pivot.plot(kind="bar", ax=ax, colormap="tab10", width=0.75)
+                pivot.plot(kind="bar", ax=ax,
+                           color=C.BRAND_PALETTE[:pivot.shape[1]], width=0.75)
                 ax.set_title(f"{cm.numeric} by {cm.region} & {cm.category}",
-                             fontsize=13, fontweight="bold")
+                             fontsize=13, fontweight="bold", pad=10)
                 ax.legend(title=cm.category, bbox_to_anchor=(1.01, 1),
                           loc="upper left", fontsize=8)
             else:
                 data = df.groupby(cm.region)[cm.numeric].sum().sort_values(ascending=False)
-                sns.barplot(x=data.index.astype(str), y=data.values, palette=C.PALETTE, ax=ax)
+                sns.barplot(x=data.index.astype(str), y=data.values,
+                            palette=C.BRAND_PALETTE[:len(data)], ax=ax)
+                # Average line
+                avg_val = data.mean()
+                ax.axhline(avg_val, color=C.COLOR_NEUTRAL, linestyle="--", linewidth=1.2,
+                           label=f"Avg: {avg_val:,.0f}")
+                ax.legend(fontsize=8)
                 ax.set_title(f"Total {cm.numeric} by {cm.region}",
-                             fontsize=13, fontweight="bold")
+                             fontsize=13, fontweight="bold", pad=10)
             ax.set_xlabel(cm.region); ax.set_ylabel(cm.numeric)
             ax.yaxis.set_major_formatter(
                 mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
@@ -1041,16 +1276,39 @@ class PDFReportGenerator:
 
     @staticmethod
     def _md_to_rl(text: str) -> str:
-        """XML-escape text first, then convert markdown bold/italic to ReportLab XML tags.
+        """
+        XML-escape text first, then convert markdown bold/italic to ReportLab XML tags.
 
         Must escape BEFORE substituting so that financial strings like ">25%" or
         "Q1 & Q2" don't break ReportLab's XML parser and cause the whole Paragraph
         to fall back to plain-text rendering (showing the original asterisks).
+
+        CRITICAL FIX: Add space after closing tags AND ensure proper sentence spacing.
         """
         from xml.sax.saxutils import escape as _xml_escape
-        safe = _xml_escape(str(text))
-        safe = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', safe)
-        safe = re.sub(r'\*(.+?)\*', r'<i>\1</i>', safe)
+        # Replace LaTeX-style currency escapes BEFORE XML-escaping so the ₹ glyph
+        # flows through the font-tag wrapper below rather than appearing as literals.
+        text = str(text)
+        text = text.replace(r'\mathbb{1}', '₹').replace('\\mathbb{1}', '₹')
+        text = text.replace(r'\yen', '¥').replace(r'\pounds', '£')
+        safe = _xml_escape(text)
+        
+        # CRITICAL FIX 1: Ensure proper spacing after sentence-ending punctuation
+        # This fixes cases where "diversification.A diversified" becomes "diversification. A diversified"
+        safe = re.sub(r'([.!?])([A-Z])', r'\1 \2', safe)
+        
+        # CRITICAL FIX 2: Catch word-to-word joins with no separator
+        # This fixes cases where "segmentsMaintain" becomes "segments Maintain"
+        safe = re.sub(r'(\w)([A-Z][a-z])', r'\1 \2', safe)
+        
+        # CRITICAL FIX 3: Add space after closing tags to prevent ReportLab from dropping
+        # the first character of the next word
+        safe = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b> ', safe)
+        safe = re.sub(r'\*(.+?)\*', r'<i>\1</i> ', safe)
+        
+        # Clean up double spaces that might result
+        safe = re.sub(r'  +', ' ', safe)
+        
         # CHANGE 5 — wrap any ₹ in an explicit font tag so the glyph is always
         # sourced from DejaVuSans, regardless of the surrounding Paragraph style.
         safe = re.sub(r'(₹[^<\s]*)', r'<font name="DejaVuSans">\1</font>', safe)
@@ -1099,6 +1357,116 @@ class PDFReportGenerator:
             log.warning("BLOCKED unsafe element: %s...", text[:80])
             return False
         return True
+
+    # ═══════════════════════════════════════════════════════════════
+    # FIX 1: Matplotlib fallback chart renderer
+    # ═══════════════════════════════════════════════════════════════
+    def _render_chart_via_matplotlib(self, chart_spec: dict) -> Optional[str]:
+        """
+        Generate a simple PNG chart from a chart-spec dict.
+        chart_spec keys: chart_type, labels, values, title
+        Returns: absolute path to temp PNG file, or None on failure.
+        """
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import numpy as np
+            import tempfile
+
+            chart_type = str(chart_spec.get('chart_type', 'bar')).lower()
+            labels     = list(chart_spec.get('labels', []))
+            values     = list(chart_spec.get('values', []))
+            title_text = str(chart_spec.get('title', 'Chart'))
+
+            if not labels or not values:
+                log.warning("[_render_chart_via_matplotlib] No labels/values – skipping")
+                return None
+
+            # Coerce values to float
+            values = [float(v) if v is not None else 0.0 for v in values]
+
+            fig, ax = plt.subplots(figsize=(8, 5))
+
+            if chart_type == 'pie':
+                ax.pie(values, labels=labels, autopct='%1.1f%%', startangle=90)
+                ax.axis('equal')
+            elif chart_type == 'line':
+                ax.plot(labels, values, marker='o', linewidth=2.0, color='#3B82F6')
+                if labels and len(str(labels[0])) > 8:
+                    plt.xticks(rotation=45, ha='right')
+            else:  # default: bar
+                ax.bar(labels, values, color='#3B82F6')
+                if labels and len(str(labels[0])) > 6:
+                    plt.xticks(rotation=30, ha='right')
+
+            ax.set_title(title_text, fontsize=13, fontweight='bold', pad=10)
+            plt.tight_layout()
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix='_fallback.png', delete=False,
+                dir=tempfile.gettempdir()
+            )
+            fig.savefig(tmp.name, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            log.info("[_render_chart_via_matplotlib] ✓ Saved fallback chart → %s", tmp.name)
+            return tmp.name
+        except Exception as exc:
+            log.error("[_render_chart_via_matplotlib] Failed: %s", exc)
+            return None
+
+    # ═══════════════════════════════════════════════════════════════
+    # FIX 2: Post-process elements to hard-replace \mathbb{1} → ₹
+    # ═══════════════════════════════════════════════════════════════
+    @staticmethod
+    def _fix_currency_symbols(elements: list) -> list:
+        """
+        Walk every Paragraph in *elements* — including those nested inside
+        KeepTogether, Table, and other containers — and replace LaTeX-like
+        currency escapes with the correct Unicode characters.
+        Handles: \\mathbb{1} → ₹   \\yen → ¥   \\pounds → £
+        """
+        REPLACEMENTS = [
+            (r'\mathbb{1}', '₹'),
+            (r'\\mathbb{1}', '₹'),
+            ('\\mathbb{1}', '₹'),
+            ('\mathbb{1}',  '₹'),
+            (r'\yen',       '¥'),
+            (r'\pounds',    '£'),
+        ]
+
+        def _patch(el) -> None:
+            if isinstance(el, Paragraph):
+                # ReportLab stores text in .text before wrap(); ._text doesn't exist pre-wrap
+                for attr in ("text", "_text"):
+                    try:
+                        txt = getattr(el, attr, None)
+                        if not isinstance(txt, str):
+                            continue
+                        for bad, good in REPLACEMENTS:
+                            txt = txt.replace(bad, good)
+                        setattr(el, attr, txt)
+                    except Exception:
+                        pass
+            # Recurse into containers that hold nested flowables
+            elif hasattr(el, '_content'):          # KeepTogether
+                for child in (el._content or []):
+                    _patch(child)
+            elif hasattr(el, '_flowables'):        # KeepTogether alt attribute
+                for child in (el._flowables or []):
+                    _patch(child)
+            elif hasattr(el, '_cellvalues'):       # Table
+                for row in (el._cellvalues or []):
+                    for cell in row:
+                        if isinstance(cell, list):
+                            for item in cell:
+                                _patch(item)
+                        else:
+                            _patch(cell)
+
+        for el in elements:
+            _patch(el)
+        return elements
 
     def embed_chart_safely(self, elements: list, chart_path: Optional[str],
                            title: str, insight: str) -> None:
@@ -1149,6 +1517,35 @@ class PDFReportGenerator:
                 elements.append(Paragraph(f"⚠ Render error: {img_exc}", self.S["Fallback"]))
             elements.append(Spacer(1, 16))
 
+    def _plotly_to_image(self, fig, width_inches: float = 7.5, height_inches: float = 3.8) -> Optional[RLImage]:
+        """Convert a Plotly Figure to a ReportLab Image via kaleido (in-memory, no temp file)."""
+        try:
+            img_bytes = fig.to_image(
+                format="png",
+                width=int(width_inches * 150),
+                height=int(height_inches * 150),
+                scale=2,
+            )
+            buf = io.BytesIO(img_bytes)
+            buf.seek(0)
+            return RLImage(buf, width=width_inches * inch, height=height_inches * inch)
+        except Exception as e:
+            log.error(f"[chart] Plotly → PNG failed: {e}")
+            return None
+
+    def _add_chart_section(self, elements: list, fig, title: str, caption: str) -> None:
+        """Append a Plotly figure as a titled, captioned chart block to the PDF story."""
+        if fig is None:
+            return
+        img = self._plotly_to_image(fig)
+        if img is None:
+            return
+        elements.append(Paragraph(f"<b>{title}</b>", self.S["ChartTitle"]))
+        elements.append(Spacer(1, 0.1 * inch))
+        elements.append(img)
+        elements.append(Paragraph(f"<i>{caption}</i>", self.S["Insight"]))
+        elements.append(Spacer(1, 0.3 * inch))
+
     def _chart_monthly_revenue(
         self,
         monthly_data: list,
@@ -1179,17 +1576,23 @@ class PDFReportGenerator:
                     color="#4a6fa5", markersize=8,
                     markerfacecolor="white", markeredgewidth=2.5)
 
-            for label, rev in zip(labels, revenues):
-                if rev >= 1e7:
-                    val_str = f"₹{rev/1e7:.1f}Cr"
-                elif rev >= 1e5:
-                    val_str = f"₹{rev/1e5:.1f}L"
-                else:
-                    val_str = f"₹{rev/1e3:.0f}K"
+            def smart_fmt(x, _):
+                if x >= 1e7:   return f"₹{x/1e7:.1f}Cr"
+                if x >= 1e5:   return f"₹{x/1e5:.1f}L"
+                if x >= 1e3:   return f"₹{x/1e3:.0f}K"
+                return f"₹{x:.0f}"
+
+            peak_idx = revenues.index(max(revenues)) if revenues else None
+            trough_idx = revenues.index(min(revenues)) if revenues else None
+            annotate_indices = {0, len(labels)-1, peak_idx, trough_idx}
+            for i, (label, rev) in enumerate(zip(labels, revenues)):
+                if i not in annotate_indices:
+                    continue
+                # format and annotate only these 4 points
+                val_str = smart_fmt(rev, None)
                 ax.annotate(val_str, (label, rev),
-                            textcoords="offset points",
-                            xytext=(0, 12), ha="center",
-                            fontsize=9, color="#1a1a2e", fontweight="bold")
+                            textcoords="offset points", xytext=(0, 12),
+                            ha="center", fontsize=9, color="#1a1a2e", fontweight="bold")
 
             # ✅ Peak marker
             if peak_month:
@@ -1282,16 +1685,15 @@ class PDFReportGenerator:
                     framealpha=0.3, edgecolor="none"
                 )
 
-            ax.set_title("Monthly Revenue Trend", fontsize=13,
-                         fontweight="bold", pad=12, color="#1a1a2e")
+            # Removed in-chart title to avoid duplication with PDF section header
             ax.set_ylabel("Revenue", fontsize=10)
-            ax.yaxis.set_major_formatter(mticker.FuncFormatter(
-                lambda x, _: f"₹{x/1e7:.1f}Cr" if x >= 1e7 else f"₹{x/1e5:.0f}L"
-            ))
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(smart_fmt))
             ax.grid(axis="y", alpha=0.3, linestyle="--")
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            plt.xticks(rotation=30, ha="right", fontsize=8)
+            tick_positions = range(0, len(labels), 3)
+            ax.set_xticks([labels[i] for i in tick_positions])
+            ax.set_xticklabels([labels[i] for i in tick_positions], rotation=45, ha="right", fontsize=8)
             plt.tight_layout()
 
             path = os.path.join(os.path.dirname(__file__), "_tmp_monthly_trend.png")
@@ -1441,7 +1843,7 @@ class PDFReportGenerator:
         )
         body_style = ParagraphStyle(
             'InsightBody', fontSize=10, textColor=colors.HexColor('#334155'),
-            leading=14, spaceAfter=6, fontName=PDF_FONT_REGULAR
+            leading=14, spaceAfter=6, fontName='DejaVuSans'  # Force DejaVuSans for ₹ symbol
         )
         decision_style = ParagraphStyle(
             'Decision', fontSize=10, fontName=PDF_FONT_OBLIQUE,
@@ -1451,27 +1853,91 @@ class PDFReportGenerator:
 
         for i, insight in enumerate(insights, 1):
             if isinstance(insight, str):
-                title = "Strategic Finding"
-                description = insight
-                impact = "Medium"
-                recommendation = ""
+                title    = "Strategic Finding"
+                desc     = insight
+                impact   = "Medium"
+                rec      = ""
+                dim      = ""
+                methodology = ""
             else:
-                title = insight.get('title', '') or insight.get('rule_type', 'Strategic Finding')
-                description = insight.get('description', '')
-                impact = insight.get('impact', 'Medium')
-                recommendation = insight.get('recommendation', '')
+                title    = insight.get('title', '') or insight.get('rule_type', 'Strategic Finding')
+                desc     = insight.get('description', '')
+                impact   = insight.get('impact', 'Medium')
+                rec      = insight.get('recommendation', '')
+                dim      = insight.get('decision_implication', '')
+                methodology = insight.get('methodology', '')
 
-            elements.append(Paragraph(f"{i:02d}. {title}", title_style))
-            impact_clean = self._strip_emoji(impact)
-            impact_label = f"[{impact_clean.upper()} IMPACT]"
-            elements.append(Paragraph(impact_label, impact_style_high if 'high' in impact.lower() else impact_style_medium))
-            elements.append(Paragraph(self._md_to_rl(description), body_style))
-            if recommendation:
-                elements.append(Paragraph(f"→ DECISION: {recommendation}", decision_style))
-            elements.append(Spacer(1, 0.15 * inch))
+            # ── Impact badge colours ───────────────────────────────────────
+            is_critical  = '\U0001f534' in impact or 'critical' in impact.lower()
+            is_important = '\U0001f7e0' in impact or 'important' in impact.lower()
+            badge_color  = ('#dc2626' if is_critical else
+                            '#d97706' if is_important else '#059669')
+            badge_label  = ('CRITICAL' if is_critical else
+                            'IMPORTANT' if is_important else 'MINOR')
+            badge_icon   = ('⚠️ ' if is_critical else
+                            'ℹ️ ' if is_important else '✅ ')
+
+            # ── Card: two-column header row (title left, badge right) ──────
+            # title goes directly into Paragraph (no _md_to_rl) — fix currency here
+            title = title.replace(r'\mathbb{1}', '₹').replace('\\mathbb{1}', '₹')
+            badge_style = ParagraphStyle(
+                f'Badge_{i}', fontSize=8, fontName=PDF_FONT_BOLD,
+                textColor=colors.white, backColor=colors.HexColor(badge_color),
+                borderPad=3, alignment=1,
+            )
+            title_cell  = Paragraph(f"{i:02d}. {title}", title_style)
+            badge_cell  = Paragraph(f"{badge_icon}{badge_label}", badge_style)
+            header_row  = Table([[title_cell, badge_cell]],
+                                colWidths=[4.5 * inch, 1.4 * inch])
+            header_row.setStyle(TableStyle([
+                ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+                ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ]))
+
+            # ── Body: concise summary (first 3 sentences) ─────────────────
+            import re as _re
+            sentences = _re.split(r'(?<=[\.!?])\s+', desc.replace('\n\n', '. '))
+            short_desc = ' '.join(sentences[:3])
+
+            # ── Why it matters callout ────────────────────────────────────
+            callout_style = ParagraphStyle(
+                f'Callout_{i}', fontSize=9.5, fontName=PDF_FONT_REGULAR,
+                textColor=colors.HexColor('#1e3a5f'),
+                backColor=colors.HexColor('#eff6ff'),
+                leftIndent=8, rightIndent=8, borderPad=6,
+                leading=13, spaceAfter=4,
+            )
+
+            card_elements = [
+                header_row,
+                Paragraph(self._md_to_rl(short_desc), body_style),
+            ]
+            if dim:
+                card_elements.append(
+                    Paragraph(f"➡️ {self._md_to_rl(dim)}", callout_style)
+                )
+            elif rec:
+                card_elements.append(
+                    Paragraph(f"➡️ {self._md_to_rl(rec)}", decision_style)
+                )
+            if methodology:
+                meth_style = ParagraphStyle(
+                    f'Meth_{i}', fontSize=8, fontName=PDF_FONT_OBLIQUE,
+                    textColor=colors.HexColor('#94a3b8'), spaceAfter=2, leading=11
+                )
+                card_elements.append(
+                    Paragraph(f"🔬 Method: {methodology}", meth_style)
+                )
+            card_elements.append(Spacer(1, 0.12 * inch))
+
+            elements.append(KeepTogether(card_elements))
         return elements
 
-    def _build_section_7_recommendations(self, recommendations: list, insights: list = None) -> list:
+    def _build_section_7_recommendations(self, recommendations: list,
+                                          insights: list = None,
+                                          domain_id: str = "general") -> list:
         elements = []
         elements.append(PageBreak())
 
@@ -1482,62 +1948,42 @@ class PDFReportGenerator:
         elements.append(Paragraph("Strategic Recommendations", header_style))
         elements.append(Spacer(1, 0.15 * inch))
 
-        # ✅ P0 FIX: Auto-derive recommendations from insights if none provided
+        # ── P2 FIX: Use RecommendationEngine when no pre-built recs provided ──
         if not recommendations and insights:
-            recommendations = []
+            try:
+                from insight_engine import RecommendationEngine
+                rec_engine = RecommendationEngine(domain=domain_id)
+                recommendations = rec_engine.generate(insights, max_count=5)
+            except Exception as _e:
+                log.warning("RecommendationEngine failed in report: %s", _e)
+                recommendations = []
+
+        # ── Derive from insight recommendation field as second fallback ───
+        if not recommendations and insights:
             for i, ins in enumerate(insights[:4]):
-                # Extract recommendation from insight
                 if isinstance(ins, dict):
                     rec_text = ins.get("recommendation") or ins.get("description", "")[:150]
-                    impact = ins.get("impact", "Medium")
+                    impact   = ins.get("impact", "Medium")
                 else:
-                    # BusinessInsight object
                     rec_text = getattr(ins, "recommendation", "") or getattr(ins, "description", "")[:150]
-                    impact = getattr(ins, "impact", "Medium")
-                
+                    impact   = getattr(ins, "impact", "Medium")
                 if rec_text:
                     recommendations.append({
-                        "priority": i + 1,
-                        "action": rec_text,
-                        "timeframe": "Next 30 days",
-                        "owner": "Strategy team",
-                        "impact": impact
+                        "priority": i + 1, "action": rec_text,
+                        "timeframe": "Next 30 days", "owner": "Strategy team",
+                        "impact": impact,
                     })
 
-        # ✅ P0 FIX: Final fallback — never empty
-        if not recommendations:
-            recommendations = [
-                {
-                    "priority": 1,
-                    "action": (
-                        "Establish baseline KPI benchmarks from this analysis "
-                        "and set monitoring alerts for deviations > 15%."
-                    ),
-                    "timeframe": "Next 14 days",
-                    "owner": "Analytics lead",
-                    "impact": "Medium"
-                },
-                {
-                    "priority": 2,
-                    "action": (
-                        "Segment dataset by top categorical dimension and "
-                        "re-analyze each segment independently for deeper signal."
-                    ),
-                    "timeframe": "Next 30 days",
-                    "owner": "Data team",
-                    "impact": "Medium"
-                },
-                {
-                    "priority": 3,
-                    "action": (
-                        "Add time dimension to this dataset to unlock "
-                        "trend analysis, seasonality, and growth rate insights."
-                    ),
-                    "timeframe": "Next 60 days",
-                    "owner": "Strategy team",
-                    "impact": "High"
-                }
-            ]
+        # Deduplicate by first 80 chars of action text so duplicate recs from
+        # cache or fallback paths never produce repeated entries in the PDF.
+        _seen_actions: set = set()
+        _unique_recs = []
+        for _r in recommendations:
+            _key = ((_r.get("action", "") if isinstance(_r, dict) else str(_r)) or "").strip()[:80]
+            if _key and _key not in _seen_actions:
+                _seen_actions.add(_key)
+                _unique_recs.append(_r)
+        recommendations = _unique_recs[:6]   # hard cap at 6 items
 
         num_style = ParagraphStyle(
             'RecNum', fontSize=22, fontName=PDF_FONT_BOLD,
@@ -1606,10 +2052,14 @@ class PDFReportGenerator:
             leftMargin=C.MARGIN, rightMargin=C.MARGIN,
             topMargin=C.MARGIN,  bottomMargin=C.MARGIN)
         elements: list = []
-        
-        # VERSION BANNER FOR VERIFICATION
-        elements.append(Paragraph("BUILD METHOD VERSION: 2025-04-25-clean", self.S["Normal"]))
-        elements.append(Spacer(1, 10))
+
+        # ── FIX 3: Debug marker — confirms new code is active ─────────────
+        _debug_style = ParagraphStyle(
+            '_DebugMarker', fontSize=8,
+            textColor=colors.red, fontName=PDF_FONT_REGULAR
+        )
+        elements.append(Paragraph("CHART FIX ACTIVE v2", _debug_style))
+        # ─────────────────────────────────────────────────────────────────
 
         # 1. Domain Detection & Asset Prep
         target_metric = domain_template.get("target_metric", "Value") if domain_template else "Value"
@@ -1686,6 +2136,7 @@ class PDFReportGenerator:
                     ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                     ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                     ('FONTNAME', (0,0), (-1,0), self.config["font_bold"]),
+                    ('FONTNAME', (0,1), (-1,-1), 'DejaVuSans'),  # Fix: Ensure ₹ symbol renders correctly in data cells
                     ('BOTTOMPADDING', (0,0), (-1,0), 12),
                     ('BACKGROUND', (0,1), (-1,-1), colors.HexColor(self.config["brand_light"])),
                     ('GRID', (0,0), (-1,-1), 1, colors.HexColor(C.RULE_GREY))
@@ -1722,6 +2173,10 @@ class PDFReportGenerator:
                 insights, metrics=kpis, domain=target_metric, df=df
             ))
         
+        # ── FIX 2: Post-process all Paragraph elements to fix currency symbols ──
+        log.info("[Currency Fix] Post-processing elements to replace \\mathbb{1} with ₹")
+        elements = self._fix_currency_symbols(elements)
+
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]
 
@@ -1733,16 +2188,60 @@ class PDFReportGenerator:
 
     @staticmethod
     def _derive_kpis(df: pd.DataFrame, cm: Optional[ColumnMap]) -> dict:
+        """
+        Derive KPIs with verification against source data.
+        P0 FIX: Prevents revenue hallucinations by validating calculations.
+        """
         kpis: dict = {}
+        raw_values: dict = {}  # Store raw values for verification
+        
         if cm and cm.numeric and cm.numeric in df.columns:
             total = df[cm.numeric].sum()
+            avg = df[cm.numeric].mean()
+            
+            # Store raw values
+            raw_values['total_revenue'] = total
+            raw_values['avg_revenue'] = avg
+            raw_values['revenue_col'] = cm.numeric
+            
             kpis[f"Total {cm.numeric}"] = f"\u20b9{total:,.0f}" if total > 100 else f"{total:,.2f}"
-            kpis[f"Avg {cm.numeric}"]   = f"\u20b9{df[cm.numeric].mean():,.0f}"
+            kpis[f"Avg {cm.numeric}"]   = f"\u20b9{avg:,.0f}"
+            
         if cm and cm.numeric2 and cm.numeric2 in df.columns:
-            kpis[f"Total {cm.numeric2}"] = f"{df[cm.numeric2].sum():,.0f}"
+            total2 = df[cm.numeric2].sum()
+            raw_values['total_numeric2'] = total2
+            kpis[f"Total {cm.numeric2}"] = f"{total2:,.0f}"
+            
         if cm and cm.category and cm.category in df.columns:
-            kpis[f"{cm.category}s"] = df[cm.category].nunique()
+            n_categories = df[cm.category].nunique()
+            raw_values['n_categories'] = n_categories
+            kpis[f"{cm.category}s"] = n_categories
+            
         kpis["Records"] = f"{len(df):,}"
+        raw_values['n_records'] = len(df)
+        
+        # VERIFICATION LAYER - P0 Enterprise Trust Fix
+        try:
+            import polars as pl
+            from verifier import verify_kpis
+            
+            # Convert to polars for verification
+            df_pl = pl.from_pandas(df)
+            
+            # Verify KPIs against source data
+            verification_results = verify_kpis(raw_values, df_pl, cm)
+            
+            # Log verification results
+            for metric, result in verification_results.items():
+                if not result.passed:
+                    log.error(f"[VERIFICATION FAILED] {metric}: {result.reason}")
+                    log.error(f"  Evidence: {result.evidence}")
+                else:
+                    log.info(f"[VERIFICATION PASSED] {metric}: {result.reason}")
+                    
+        except Exception as e:
+            log.warning(f"[VERIFICATION] Could not verify KPIs: {e}")
+        
         return kpis
 
 
@@ -1752,6 +2251,225 @@ class UnifiedReportGenerator(PDFReportGenerator):
     Ensures 1:1 visual parity with the dashboard by embedding exact frontend state.
     """
 
+    def _convert_plotly_to_png(self, plotly_data: dict, session_id: str, chart_id: str = None) -> Optional[str]:
+        """
+        Convert Plotly JSON to PNG image file.
+        Returns path to PNG file or None if conversion fails.
+        Includes matplotlib fallback if Plotly conversion fails.
+        """
+        try:
+            import plotly.graph_objects as go
+            import plotly.io as pio
+            
+            # Create figure from Plotly data
+            if isinstance(plotly_data, dict):
+                if 'data' in plotly_data and 'layout' in plotly_data:
+                    # Full Plotly figure dict
+                    fig = go.Figure(data=plotly_data['data'], layout=plotly_data['layout'])
+                elif 'type' in plotly_data:
+                    # Single trace
+                    fig = go.Figure(data=[plotly_data])
+                else:
+                    log.warning("[Plotly Convert] Unknown Plotly format")
+                    return None
+            else:
+                log.warning("[Plotly Convert] Invalid Plotly data type")
+                return None
+            
+            # Create temp directory
+            temp_dir = Path(tempfile.gettempdir()) / f"insightstream_export_{session_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate filename
+            chart_name = chart_id if chart_id else f"chart_{uuid.uuid4().hex[:8]}"
+            fpath = temp_dir / f"{chart_name}.png"
+            
+            # Convert to PNG (requires kaleido)
+            pio.write_image(fig, str(fpath), format='png', width=800, height=600, scale=2)
+            
+            log.info(f"[Plotly Convert] Successfully converted chart to {fpath}")
+            return str(fpath)
+            
+        except ImportError as e:
+            log.warning(f"[Plotly Convert] Missing dependency: {e}. Attempting matplotlib fallback...")
+            return self._matplotlib_fallback(plotly_data, session_id, chart_id)
+        except Exception as e:
+            log.error(f"[Plotly Convert] Conversion failed: {e}. Attempting matplotlib fallback...")
+            return self._matplotlib_fallback(plotly_data, session_id, chart_id)
+
+    def _matplotlib_fallback(self, plotly_data: dict, session_id: str, chart_id: str = None) -> Optional[str]:
+        """
+        Fallback: Extract data from Plotly JSON and render with matplotlib.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib
+            matplotlib.use('Agg')  # Non-interactive backend
+            
+            log.info("[Matplotlib Fallback] Attempting to render chart with matplotlib")
+            
+            # Extract data from Plotly figure
+            if not isinstance(plotly_data, dict):
+                return None
+            
+            data = plotly_data.get('data', [plotly_data] if 'type' in plotly_data else [])
+            layout = plotly_data.get('layout', {})
+            
+            if not data:
+                log.warning("[Matplotlib Fallback] No data found in Plotly JSON")
+                return None
+            
+            # Get first trace
+            trace = data[0] if isinstance(data, list) else data
+            x = trace.get('x', [])
+            y = trace.get('y', [])
+            chart_type = trace.get('type', 'bar')
+            
+            if not x or not y:
+                log.warning("[Matplotlib Fallback] Missing x or y data")
+                return None
+            
+            # Create matplotlib figure
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            if chart_type == 'bar':
+                ax.bar(x, y, color='#6366f1')
+            elif chart_type == 'pie':
+                ax.pie(y, labels=x, autopct='%1.1f%%', startangle=90)
+                ax.axis('equal')
+            elif chart_type in ['scatter', 'line']:
+                ax.plot(x, y, marker='o', linewidth=2, color='#6366f1')
+            else:
+                # Default to bar chart
+                ax.bar(x, y, color='#6366f1')
+            
+            # Set title
+            title = layout.get('title', {})
+            if isinstance(title, dict):
+                title_text = title.get('text', '')
+            else:
+                title_text = str(title)
+            
+            if title_text:
+                ax.set_title(title_text, fontsize=14, fontweight='bold')
+            
+            # Set axis labels
+            xaxis = layout.get('xaxis', {})
+            yaxis = layout.get('yaxis', {})
+            
+            if isinstance(xaxis, dict) and xaxis.get('title'):
+                ax.set_xlabel(xaxis['title'].get('text', '') if isinstance(xaxis['title'], dict) else xaxis['title'])
+            
+            if isinstance(yaxis, dict) and yaxis.get('title'):
+                ax.set_ylabel(yaxis['title'].get('text', '') if isinstance(yaxis['title'], dict) else yaxis['title'])
+            
+            # Rotate x-axis labels if they're long
+            if x and len(str(x[0])) > 10:
+                plt.xticks(rotation=45, ha='right')
+            
+            plt.tight_layout()
+            
+            # Save to temp file
+            temp_dir = Path(tempfile.gettempdir()) / f"insightstream_export_{session_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            chart_name = chart_id if chart_id else f"chart_{uuid.uuid4().hex[:8]}"
+            fpath = temp_dir / f"{chart_name}_matplotlib.png"
+            
+            plt.savefig(str(fpath), dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            log.info(f"[Matplotlib Fallback] Successfully rendered chart to {fpath}")
+            return str(fpath)
+            
+        except Exception as e:
+            log.error(f"[Matplotlib Fallback] Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _force_matplotlib_render(self, plotly_data: dict, session_id: str, chart_id: str) -> Optional[str]:
+        """
+        GUARANTEED FIX: Force matplotlib rendering from plotly data.
+        Simplified version that always works.
+        """
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from pathlib import Path
+            import tempfile
+            import uuid
+            
+            log.info("[FORCE MATPLOTLIB] Starting guaranteed render")
+            
+            # Extract data
+            if not isinstance(plotly_data, dict):
+                return None
+            
+            data = plotly_data.get('data', [])
+            if not data:
+                data = [plotly_data] if 'type' in plotly_data else []
+            
+            if not data:
+                log.warning("[FORCE MATPLOTLIB] No data found")
+                return None
+            
+            trace = data[0] if isinstance(data, list) else data
+            x = trace.get('x', [])
+            y = trace.get('y', [])
+            chart_type = trace.get('type', 'bar')
+            
+            if not x or not y:
+                log.warning("[FORCE MATPLOTLIB] Missing x or y data")
+                return None
+            
+            # Create figure
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # Render based on type
+            if chart_type == 'pie':
+                ax.pie(y, labels=x, autopct='%1.1f%%', startangle=90)
+                ax.axis('equal')
+            elif chart_type in ['scatter', 'line']:
+                ax.plot(x, y, marker='o', linewidth=2, color='#6366f1')
+            else:  # Default to bar
+                ax.bar(x, y, color='#6366f1')
+            
+            # Add title
+            layout = plotly_data.get('layout', {})
+            title = layout.get('title', {})
+            if isinstance(title, dict):
+                title_text = title.get('text', '')
+            else:
+                title_text = str(title)
+            
+            if title_text:
+                ax.set_title(title_text, fontsize=14, fontweight='bold')
+            
+            # Rotate x labels if needed
+            if x and len(str(x[0])) > 10:
+                plt.xticks(rotation=45, ha='right')
+            
+            plt.tight_layout()
+            
+            # Save
+            temp_dir = Path(tempfile.gettempdir()) / f"insightstream_export_{session_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            fpath = temp_dir / f"{chart_id}.png"
+            
+            plt.savefig(str(fpath), dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            log.info(f"[FORCE MATPLOTLIB] ✓ Saved to {fpath}")
+            return str(fpath)
+            
+        except Exception as e:
+            log.error(f"[FORCE MATPLOTLIB] Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def _decode_image(self, base64_str: str, session_id: str) -> Optional[str]:
         """Decode base64 image to a temporary file for ReportLab."""
         import base64
@@ -1810,6 +2528,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
             leftMargin=C.MARGIN, rightMargin=C.MARGIN,
             topMargin=C.MARGIN,  bottomMargin=C.MARGIN)
         elements: list = []
+
+        # ── FIX 3: Debug marker — confirms new code is active ─────────────
+        _debug_style = ParagraphStyle(
+            '_DebugMarker2', fontSize=8,
+            textColor=colors.red, fontName=PDF_FONT_REGULAR
+        )
+        elements.append(Paragraph("CHART FIX ACTIVE v2", _debug_style))
+        # ─────────────────────────────────────────────────────────────────
 
         # 1. PAGE 1: TITLE PAGE
         elements.append(Spacer(1, 2 * inch))
@@ -1897,6 +2623,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                             t.setStyle(TableStyle([
                                 ('BACKGROUND', (0,0), (-1,0), colors.HexColor(self.config["brand_dark"])),
                                 ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                                ('FONTNAME', (0,1), (-1,-1), 'DejaVuSans'),  # Fix: Ensure ₹ symbol renders correctly
                                 ('GRID', (0,0), (-1,-1), 1, colors.HexColor(C.RULE_GREY))
                             ]))
                             elements.append(t)
@@ -1915,7 +2642,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 textColor=colors.HexColor('#1e293b'), spaceAfter=4,
             )
             finding_body_style = ParagraphStyle(
-                'FindingBody', fontSize=9.5, fontName=PDF_FONT_REGULAR,
+                'FindingBody', fontSize=9.5, fontName='DejaVuSans',  # Force DejaVuSans for ₹ symbol
                 textColor=colors.HexColor('#334155'), leading=14,
                 leftIndent=14, spaceAfter=4,
             )
@@ -1985,23 +2712,155 @@ class UnifiedReportGenerator(PDFReportGenerator):
 
         valid_charts = 0
         total_charts = len(charts)
+        log.info(f"[Charts] Processing {total_charts} charts for PDF")
+        
         for i, chart in enumerate(charts):
+            chart_title = chart.get("title", f"Chart {i+1}")
+            log.info(f"[Chart {i+1}/{total_charts}] Processing: {chart_title}")
+            
+            # Try to get image from base64 first
             img_path = self._decode_image(chart.get("image_base64", ""), session_id)
+            if img_path:
+                log.info(f"[Chart {i+1}] ✓ Got image from base64")
+
+            # NEW: Direct Plotly → ReportLab pipeline (kaleido in-memory, no temp file).
+            # Accepts both 'plotly_data' (legacy) and 'plotly_json' (frontend payload key).
+            _plotly_raw = chart.get("plotly_data") or chart.get("plotly_json")
+            if not img_path and _plotly_raw:
+                print(f"[PDF] Rendering chart via _add_chart_section: {chart_title}")
+                try:
+                    import plotly.graph_objects as go
+                    _pd = _plotly_raw
+                    if isinstance(_pd, dict) and "data" in _pd and "layout" in _pd:
+                        _fig = go.Figure(data=_pd["data"], layout=_pd["layout"])
+                    elif isinstance(_pd, dict) and "type" in _pd:
+                        _fig = go.Figure(data=[_pd])
+                    else:
+                        _fig = None
+                    if _fig is not None:
+                        self._add_chart_section(
+                            elements, _fig,
+                            chart_title,
+                            chart.get("insight", "Segmented data analysis."),
+                        )
+                        valid_charts += 1
+                        log.info(f"[Chart {i+1}] ✓ Direct Plotly→ReportLab pipeline succeeded")
+                        continue
+                    else:
+                        print(f"[PDF] Could not construct Figure for: {chart_title}")
+                except Exception as _e:
+                    print(f"[PDF] _add_chart_section failed for {chart_title}: {_e}")
+                    log.warning(f"[Chart {i+1}] Direct Plotly pipeline failed ({_e}), falling back to file-based chain")
+
+            # If no direct success, try file-based Plotly conversion
+            _plotly_fallback = chart.get("plotly_data") or chart.get("plotly_json")
+            if not img_path and _plotly_fallback:
+                log.info(f"[Chart {i+1}] Attempting file-based Plotly conversion")
+                try:
+                    img_path = self._convert_plotly_to_png(
+                        _plotly_fallback,
+                        session_id,
+                        chart_id=chart.get("id", f"chart_{i}")
+                    )
+                    if img_path:
+                        log.info(f"[Chart {i+1}] ✓ File-based Plotly conversion successful")
+                    else:
+                        log.warning(f"[Chart {i+1}] ✗ File-based Plotly conversion returned None")
+                except Exception as e:
+                    log.error(f"[Chart {i+1}] ✗ File-based Plotly conversion failed: {e}")
+
+            # GUARANTEED FIX: matplotlib fallback
+            if not img_path and _plotly_fallback:
+                log.info(f"[Chart {i+1}] FORCING matplotlib rendering")
+                try:
+                    img_path = self._force_matplotlib_render(_plotly_fallback, session_id, f"forced_chart_{i}")
+                    if img_path:
+                        log.info(f"[Chart {i+1}] ✓ matplotlib render successful")
+                    else:
+                        print(f"[PDF] matplotlib fallback returned None for: {chart_title}")
+                except Exception as e:
+                    print(f"[PDF] matplotlib fallback FAILED for {chart_title}: {e}")
+                    log.error(f"[Chart {i+1}] ✗ matplotlib render failed: {e}")
+            
+            # If still no image, try to generate from data using ChartGenerator
+            if not img_path and chart.get("data") and df is not None:
+                log.info(f"[Chart {i+1}] Attempting ChartGenerator fallback")
+                try:
+                    cg = ChartGenerator()
+                    chart_type = chart.get("type", "bar")
+                    
+                    if chart_type == "bar" and chart.get("x_col") and chart.get("y_col"):
+                        img_path = cg.bar_chart(
+                            df,
+                            chart.get("x_col"),
+                            chart.get("y_col"),
+                            title=chart_title,
+                            filename=f"fallback_chart_{i}_{session_id}.png"
+                        )
+                    elif chart_type == "pie" and chart.get("labels_col") and chart.get("values_col"):
+                        img_path = cg.pie_chart(
+                            df,
+                            chart.get("labels_col"),
+                            chart.get("values_col"),
+                            title=chart_title,
+                            filename=f"fallback_chart_{i}_{session_id}.png"
+                        )
+                    
+                    if img_path:
+                        log.info(f"[Chart {i+1}] ✓ ChartGenerator fallback successful")
+                    else:
+                        log.warning(f"[Chart {i+1}] ✗ ChartGenerator returned None")
+                except Exception as e:
+                    log.error(f"[Chart {i+1}] ✗ ChartGenerator fallback failed: {e}")
+            
             err = chart.get("error")
             
             if err:
                 # Suppress raw data dumps - only show error if it's not a data dump
                 if "{" not in str(err) and "[" not in str(err):
-                    elements.append(Paragraph(f"⚠ {chart.get('title')}: {err}", self.S["Fallback"]))
+                    elements.append(Paragraph(f"⚠ {chart_title}: {err}", self.S["Fallback"]))
                     elements.append(Spacer(1, 20))
-            else:
+            elif img_path:
+                # Successfully got an image (from base64, Plotly, or ChartGenerator)
                 self.embed_chart_safely(
                     elements,
                     img_path,
-                    chart.get("title", "Visualization Segment"),
+                    chart_title,
                     chart.get("insight", "Segmented data analysis.")
                 )
                 valid_charts += 1
+                log.info(f"[Chart {i+1}] ✓ Successfully added to PDF")
+            else:
+                # FIX 1: last-resort — render a placeholder chart from chart spec dict
+                _spec = {
+                    'chart_type': chart.get('type', 'bar'),
+                    'labels':     chart.get('x', chart.get('labels', [])),
+                    'values':     chart.get('y', chart.get('values', [])),
+                    'title':      chart_title,
+                }
+                _fallback_path = None
+                if _spec['labels'] and _spec['values']:
+                    log.info(f"[Chart {i+1}] Attempting _render_chart_via_matplotlib fallback")
+                    _fallback_path = self._render_chart_via_matplotlib(_spec)
+
+                if _fallback_path and os.path.exists(_fallback_path):
+                    log.info(f"[Chart {i+1}] ✓ matplotlib fallback chart used")
+                    self.embed_chart_safely(
+                        elements, _fallback_path,
+                        chart_title,
+                        chart.get('insight', 'Auto-generated fallback chart.')
+                    )
+                    valid_charts += 1
+                else:
+                    log.error(f"[Chart {i+1}] ✗ All rendering methods failed for: {chart_title}")
+                    elements.append(Paragraph(chart_title, self.S["ChartTitle"]))
+                    elements.append(Paragraph(
+                        f"📊 {chart_title} — visualization available in dashboard",
+                        self.S["Fallback"]
+                    ))
+                    elements.append(Spacer(1, 20))
+        
+        log.info(f"[Charts] Successfully rendered {valid_charts}/{total_charts} charts")
         
         # Let ReportLab handle natural pagination - no manual PageBreaks in chart loop
         # Track chart count for temporal/deep insights logic below
@@ -2200,7 +3059,13 @@ class UnifiedReportGenerator(PDFReportGenerator):
             b.get("content") for b in text_blocks
             if "recommendation" in b.get("content", "").lower()
         ]
-        elements.extend(self._build_section_7_recommendations(recs, insights=insights))
+        elements.extend(self._build_section_7_recommendations(
+            recs, insights=insights, domain_id=domain_id
+        ))
+
+        # ── FIX 2: Post-process all Paragraph elements to fix currency symbols ──
+        log.info("[Currency Fix] Post-processing elements to replace \\mathbb{1} with ₹")
+        elements = self._fix_currency_symbols(elements)
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]

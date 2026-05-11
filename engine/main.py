@@ -165,12 +165,27 @@ def load_session(session_id: str) -> tuple[str, pl.DataFrame]:
     if not session_path.exists():
         raise FileNotFoundError(f"Session {session_id} not found")
     
+    # Check if data file exists
+    data_file = session_path / "data.parquet"
+    if not data_file.exists():
+        raise FileNotFoundError(f"Session data file not found for {session_id}")
+    
     # Load metadata
-    with open(session_path / "metadata.json", "r") as f:
-        metadata = json.load(f)
+    metadata_file = session_path / "metadata.json"
+    if not metadata_file.exists():
+        raise FileNotFoundError(f"Session metadata not found for {session_id}")
+    
+    try:
+        with open(metadata_file, "r") as f:
+            metadata = json.load(f)
+    except Exception as e:
+        raise ValueError(f"Failed to load session metadata: {str(e)}")
     
     # Load DataFrame
-    df = pl.read_parquet(session_path / "data.parquet")
+    try:
+        df = pl.read_parquet(data_file)
+    except Exception as e:
+        raise ValueError(f"Failed to load session data: {str(e)}")
     
     return metadata["filename"], df
 
@@ -302,6 +317,28 @@ async def export_dashboard_pdf(
             if "insight" in ch_copy:
                 ch_copy["insight"] = sanitize_insight(ch_copy["insight"], max_length=400)
             clean_charts.append(ch_copy)
+
+        # CHART FALLBACK: If every chart is missing both image_base64 and plotly_json
+        # (old frontend build that didn't send plotly_json), regenerate from viz engine.
+        needs_plotly = any(
+            not ch.get("image_base64") and not ch.get("plotly_json")
+            for ch in clean_charts
+        )
+        if needs_plotly and clean_charts:
+            print("[PDF Export] plotly_json absent — regenerating from viz engine as fallback")
+            try:
+                viz_resp = _internal_gen_viz(session_id=session_id, max_charts=12)
+                viz_by_id    = {c.chart_id: c for c in viz_resp.charts}
+                viz_by_title = {c.title: c    for c in viz_resp.charts}
+                for ch in clean_charts:
+                    if not ch.get("image_base64") and not ch.get("plotly_json"):
+                        match = (viz_by_id.get(ch.get("id", "")) or
+                                 viz_by_title.get(ch.get("title", "")))
+                        if match:
+                            ch["plotly_json"] = match.plotly_json
+                            print(f"[PDF Export] Enriched with plotly_json: {ch.get('title', '?')}")
+            except Exception as _ve:
+                print(f"[PDF Export] Viz fallback failed: {_ve}")
 
         # Prefer structured insight dicts from the engine cache (have real titles/descriptions)
         # over the plain action strings sent by the frontend.
@@ -1123,74 +1160,162 @@ def get_insights(session_id: str):
     Results are cached — subsequent calls are <5ms.
     Falls back to background-job result if /analyze was used.
     """
-    # ── Check background job result first ─────────────────────────
-    job = _jobs.get(session_id)
-    if job and job.status == "done" and job.result:
-        result = job.result
-    else:
-        # ── Check full result cache ──────────────────────────────
-        cached_resp = _cache.get(session_id, "insight_response")
-        if cached_resp is not None:
-            return cached_resp
-
-        result = _cache.get(session_id, "insight_result")
-
-    if result is None:
-        # ── Cold path: run synchronously ─────────────────────────
-        try:
-            filename, df = load_session(session_id)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        result = run_insight_engine(df, max_insights=10, max_charts=0)
-        _cache.put(session_id, "insight_result", result)
-
-    # Convert flat dicts → InsightCard objects
-    insight_cards = []
-    for ins in result["strategic_brief"]:
-        card = InsightCard(
-            title=ins.get("title") or "",
-            description=ins.get("description") or "",
-            impact=ins.get("impact") or "medium",
-            importance=ins.get("impact") or "medium",
-            recommendation=ins.get("recommendation") or "",
-            decision_implication=ins.get("decision_implication") or "",
-            confidence=ins.get("confidence") or "medium",
-            chart_type=ins.get("chart_type") or "none",
-            chart_data=ins.get("chart_data"),
-        )
-        insight_cards.append(card)
-
-    exec_summary = result["executive_summary"]
-    recommendations = result["recommendations"]
-    warnings = result["warnings"]
-    computed_metrics = result.get("computed_metrics", {})
-
-    # Persist to project DB
     try:
-        db.update_project(session_id, executive_summary=exec_summary,
-                          recommendations=json.dumps(recommendations[:5]))
-        db.add_history(session_id, "insight", None,
-                       f"Generated {len(insight_cards)} smart insights")
-    except Exception:
-        pass
+        # ── Validate session exists first ─────────────────────────────
+        if not session_exists(session_id):
+            print(f"[ERROR] Session {session_id} not found")
+            raise HTTPException(status_code=404, detail="Session not found or expired")
+        
+        # ── Check background job result first ─────────────────────────
+        job = _jobs.get(session_id)
+        if job and job.status == "done" and job.result:
+            result = job.result
+        else:
+            # ── Check full result cache ──────────────────────────────
+            cached_resp = _cache.get(session_id, "insight_response")
+            if cached_resp is not None:
+                print(f"[CACHE HIT] Returning cached insight response for {session_id}")
+                return cached_resp
 
-    # Safe Return Layer (Step 1 - safe return layer)
-    resp = InsightsResponse(
-        session_id=session_id,
-        executive_summary=exec_summary,
-        strategic_brief=insight_cards,
-        recommendations=recommendations,
-        warnings=warnings,
-        computed_metrics=computed_metrics,
-    )
-    
-    # Final Validation Guard
-    assert isinstance(resp.strategic_brief, list), "API Contract: strategic_brief must be a list"
-    print("INSIGHTS OUTPUT (Strict):", len(resp.strategic_brief), "cards mapped.")
-    
-    _cache.put(session_id, "insight_response", resp)
-    return resp
+            result = _cache.get(session_id, "insight_result")
+
+        if result is None:
+            # ── Cold path: run synchronously with timeout ─────────────────────────
+            print(f"[COLD PATH] Generating insights for session {session_id}")
+            try:
+                filename, df = load_session(session_id)
+                print(f"[LOADED] Session {session_id}: {filename}, shape={df.shape}")
+            except FileNotFoundError as e:
+                print(f"[ERROR] Session file not found: {e}")
+                raise HTTPException(status_code=404, detail="Session not found")
+            except Exception as e:
+                print(f"[ERROR] Failed to load session: {type(e).__name__}: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to load session data: {str(e)}")
+
+            # Run insight engine with timeout protection
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_insight_engine, df, 10, 0)
+                try:
+                    result = future.result(timeout=60)  # 60 second timeout
+                    _cache.put(session_id, "insight_result", result)
+                    print(f"[SUCCESS] Insights generated for {session_id}")
+                except concurrent.futures.TimeoutError:
+                    print(f"[ERROR] Insight generation timed out for session {session_id}")
+                    raise HTTPException(
+                        status_code=504,
+                        detail="Insight generation is taking longer than expected. Please try using the 'Analyze' button for background processing."
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Insight engine failed: {type(e).__name__}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
+
+        # Validate result structure
+        if not isinstance(result, dict):
+            print(f"[ERROR] Invalid result type: {type(result)}")
+            raise ValueError(f"Invalid insight result type: {type(result)}")
+        
+        if "strategic_brief" not in result:
+            print(f"[ERROR] Missing strategic_brief in result. Keys: {result.keys()}")
+            raise ValueError("Invalid insight result: missing strategic_brief")
+
+        # Convert flat dicts → InsightCard objects
+        insight_cards = []
+        strategic_brief = result.get("strategic_brief", [])
+        
+        if not isinstance(strategic_brief, list):
+            print(f"[ERROR] strategic_brief is not a list: {type(strategic_brief)}")
+            strategic_brief = []
+        
+        for idx, ins in enumerate(strategic_brief):
+            try:
+                if not isinstance(ins, dict):
+                    print(f"[WARNING] Insight {idx} is not a dict: {type(ins)}")
+                    continue
+                    
+                card = InsightCard(
+                    title=ins.get("title") or "",
+                    description=ins.get("description") or "",
+                    impact=ins.get("impact") or "medium",
+                    importance=ins.get("impact") or "medium",
+                    recommendation=ins.get("recommendation") or "",
+                    decision_implication=ins.get("decision_implication") or "",
+                    confidence=ins.get("confidence") or "medium",
+                    chart_type=ins.get("chart_type") or "none",
+                    chart_data=ins.get("chart_data"),
+                )
+                insight_cards.append(card)
+            except Exception as e:
+                print(f"[WARNING] Failed to convert insight {idx}: {type(e).__name__}: {str(e)}")
+                continue
+
+        exec_summary = result.get("executive_summary", "Analysis complete.")
+        raw_recommendations = result.get("recommendations", [])
+        warnings = result.get("warnings", [])
+        computed_metrics = result.get("computed_metrics", {})
+        
+        # Validate and convert recommendations to proper format
+        recommendations = []
+        for idx, rec in enumerate(raw_recommendations):
+            try:
+                # If it's already a dict with required fields, use it
+                if isinstance(rec, dict) and "action" in rec:
+                    recommendations.append(rec)
+                # If it's a string, convert to proper format
+                elif isinstance(rec, str):
+                    print(f"[WARNING] Recommendation {idx} is a string, converting to dict")
+                    recommendations.append({
+                        "priority": idx + 1,
+                        "action": rec,
+                        "timeframe": "Immediate",
+                        "owner": "Team",
+                        "linked_insight": "",
+                        "impact": "High"
+                    })
+                else:
+                    print(f"[WARNING] Skipping invalid recommendation {idx}: {type(rec)}")
+            except Exception as e:
+                print(f"[WARNING] Failed to process recommendation {idx}: {e}")
+                continue
+
+        # Persist to project DB
+        try:
+            db.update_project(session_id, executive_summary=exec_summary,
+                              recommendations=json.dumps(recommendations[:5]))
+            db.add_history(session_id, "insight", None,
+                           f"Generated {len(insight_cards)} smart insights")
+        except Exception as e:
+            print(f"[WARNING] Failed to persist to DB: {e}")
+            pass
+
+        # Safe Return Layer (Step 1 - safe return layer)
+        resp = InsightsResponse(
+            session_id=session_id,
+            executive_summary=exec_summary,
+            strategic_brief=insight_cards,
+            recommendations=recommendations,
+            warnings=warnings,
+            computed_metrics=computed_metrics,
+        )
+        
+        # Final Validation Guard
+        assert isinstance(resp.strategic_brief, list), "API Contract: strategic_brief must be a list"
+        print(f"[SUCCESS] INSIGHTS OUTPUT: {len(resp.strategic_brief)} cards mapped for session {session_id}")
+        
+        _cache.put(session_id, "insight_response", resp)
+        return resp
+    except HTTPException:
+        # Re-raise HTTP exceptions (404, 504, etc.)
+        raise
+    except Exception as e:
+        # Log the full error for debugging
+        import traceback
+        print(f"[ERROR] Insights endpoint failed for session {session_id}:")
+        print(f"[ERROR] {type(e).__name__}: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate insights: {str(e)}")
 
 
 # ============== KPI ENGINE ==============

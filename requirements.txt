@@ -1,0 +1,3 @@
+﻿statsmodels==0.14.0
+scipy
+kaleido==0.2.1

@@ -79,6 +79,7 @@ export default function InsightsPage() {
     const router = useRouter();
 
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const [data, setData] = useState<InsightsData | null>(null);
     const [vizData, setVizData] = useState<any>(null);
     const [activeTab, setActiveTab] = useState<"insights" | "charts">("charts");
@@ -106,11 +107,27 @@ export default function InsightsPage() {
     const fetchData = async (sid: string) => {
         try {
             setLoading(true);
+            setError(null);
             const [insightsRes, vizRes] = await Promise.all([
                 fetch(`${API_BASE}/insights/${sid}`),
                 fetch(`${API_BASE}/generate-viz/${sid}?max_charts=12`),
             ]);
-            if (!insightsRes.ok) throw new Error(`Insights fetch failed: ${insightsRes.status}`);
+            if (!insightsRes.ok) {
+                if (insightsRes.status === 404) {
+                    // Session expired (server restarted). Clear stale state.
+                    localStorage.removeItem("analysis_session");
+                    setError("session_expired");
+                    return;
+                }
+                if (insightsRes.status === 504) {
+                    // Timeout - insight generation taking too long
+                    const errorData = await insightsRes.json().catch(() => ({}));
+                    setError("timeout");
+                    console.error("Insight generation timed out:", errorData);
+                    return;
+                }
+                throw new Error(`Insights fetch failed: ${insightsRes.status}`);
+            }
             if (!vizRes.ok) throw new Error(`Viz fetch failed: ${vizRes.status}`);
 
             const insightsJson = await insightsRes.json();
@@ -119,8 +136,14 @@ export default function InsightsPage() {
 
             // Persist for the dashboard PDF export
             localStorage.setItem(`insights_${sid}`, JSON.stringify(insightsJson));
-        } catch (err) {
+        } catch (err: any) {
             console.error("Insights fetch error:", err);
+            // Network-level failure (backend down or CORS)
+            if (err instanceof TypeError && err.message === "Failed to fetch") {
+                setError("backend_unreachable");
+            } else {
+                setError(err.message || "unknown_error");
+            }
         } finally {
             setLoading(false);
         }
@@ -194,6 +217,8 @@ export default function InsightsPage() {
                     image_base64,
                     error,
                     insight: chart.description || "",
+                    // Included so the backend can render via kaleido when base64 capture fails
+                    plotly_json: chart.plotly_json || null,
                 });
 
                 setExportProgress(20 + Math.floor(((i + 1) / chartsToExport.length) * 50));
@@ -267,6 +292,46 @@ export default function InsightsPage() {
                 <Sidebar />
                 <div className="flex flex-1 items-center justify-center">
                     <Loader2 className="h-5 w-5 animate-spin text-zinc-400" strokeWidth={1.75} />
+                </div>
+            </div>
+        );
+    }
+
+    // ----- Error states -----
+    if (error) {
+        const isExpired = error === "session_expired";
+        const isUnreachable = error === "backend_unreachable";
+        const isTimeout = error === "timeout";
+        return (
+            <div className="flex h-screen bg-white">
+                <Sidebar />
+                <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-50">
+                        <AlertCircle className="h-6 w-6 text-red-500" strokeWidth={1.75} />
+                    </div>
+                    <div>
+                        <h2 className="text-[17px] font-semibold text-zinc-900">
+                            {isExpired ? "Analysis session expired" :
+                             isUnreachable ? "Backend unreachable" :
+                             isTimeout ? "Analysis taking longer than expected" :
+                             "Something went wrong"}
+                        </h2>
+                        <p className="mt-1.5 max-w-sm text-[13px] text-zinc-500">
+                            {isExpired
+                                ? "The server was restarted and your previous session was cleared. Please re-upload your file to run a fresh analysis."
+                                : isUnreachable
+                                ? `Could not connect to ${API_BASE}. Make sure the Python backend is running (python main.py).`
+                                : isTimeout
+                                ? "Your dataset is taking longer to analyze than expected. Try uploading a smaller file or use the 'Analyze' button on the dashboard for background processing."
+                                : error}
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => router.push("/upload")}
+                        className="mt-2 inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0]"
+                    >
+                        Upload new file
+                    </button>
                 </div>
             </div>
         );
