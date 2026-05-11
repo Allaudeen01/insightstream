@@ -4654,29 +4654,17 @@ class InsightNarrator:
         return narrative
 
     def _narrate_quality(self, ins: "BusinessInsight") -> str:
-        """
-        FIX 4: Plain-language quality risk narrative — no template headers.
-        
-        CRITICAL FIX: Ensure proper spacing between concatenated segments to prevent
-        ReportLab character dropping bug.
-        """
-        narrative = ins.description
-        
-        # FIX 4: Integrate naturally without "This matters because" prefix
+        """Quality risk narrative — description + why_it_matters only."""
+        narrative = ins.description.rstrip()
         if ins.why_it_matters:
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            why_text = ins.why_it_matters.removeprefix('Why it matters: ').removeprefix('WHY IT MATTERS: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + why_text
-        
-        # FIX 4: Integrate action naturally
-        if ins.decision_implication:
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + ins.decision_implication
-        elif ins.recommendation:
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + ins.recommendation
-        
+            why_text = (
+                ins.why_it_matters
+                .removeprefix('Why it matters: ')
+                .removeprefix('WHY IT MATTERS: ')
+                .strip()
+            )
+            if why_text:
+                narrative = narrative + ' ' + why_text
         return narrative
 
     def _narrate_simulation(self, ins: "BusinessInsight") -> str:
@@ -4704,53 +4692,31 @@ class InsightNarrator:
         return " ".join(parts)
 
     def _narrate_pricing(self, ins: "BusinessInsight") -> str:
-        """
-        FIX 4: Causal pricing narrative — connect cause and effect naturally, no headers.
-        
-        CRITICAL FIX: Ensure proper spacing between concatenated segments to prevent
-        ReportLab character dropping bug.
-        """
-        narrative = ins.description
-        
-        # FIX 4: Integrate impact naturally
+        """Pricing narrative — description + why_it_matters only."""
+        narrative = ins.description.rstrip()
         if ins.why_it_matters:
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            why_text = ins.why_it_matters.removeprefix('Impact: ').removeprefix('WHY IT MATTERS: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + why_text
-        
-        # FIX 4: Integrate decision naturally
-        if ins.decision_implication:
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            decision_text = ins.decision_implication.removeprefix('Decision: ').removeprefix('DECISION IMPLICATION: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + decision_text
-        
+            why_text = (
+                ins.why_it_matters
+                .removeprefix('Impact: ')
+                .removeprefix('WHY IT MATTERS: ')
+                .strip()
+            )
+            if why_text:
+                narrative = narrative + ' ' + why_text
         return narrative
 
     def _narrate_revenue(self, ins: "BusinessInsight") -> str:
-        """
-        FIX 4: Revenue concentration narrative — lead with magnitude, no headers.
-        
-        CRITICAL FIX: Ensure proper spacing between concatenated segments to prevent
-        ReportLab character dropping bug.
-        """
-        narrative = ins.description
-        
-        # FIX 4: Integrate strategic risk naturally
+        """Revenue concentration narrative — description + why_it_matters only."""
+        narrative = ins.description.rstrip()
         if ins.why_it_matters:
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            why_text = ins.why_it_matters.removeprefix('Strategic risk: ').removeprefix('WHY IT MATTERS: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + why_text
-        
-        # FIX 4: Integrate decision implication naturally
-        if ins.decision_implication:
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            decision_text = ins.decision_implication.removeprefix('Decision implication: ').removeprefix('DECISION IMPLICATION: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + decision_text
-        
+            why_text = (
+                ins.why_it_matters
+                .removeprefix('Strategic risk: ')
+                .removeprefix('WHY IT MATTERS: ')
+                .strip()
+            )
+            if why_text:
+                narrative = narrative + ' ' + why_text
         return narrative
 
     def _narrate_customer(self, ins: "BusinessInsight") -> str:
@@ -4763,39 +4729,23 @@ class InsightNarrator:
 
     def _narrate_default(self, ins: "BusinessInsight") -> str:
         """
-        FIX 4: Conversational default narrator — NO MORE BOILERPLATE!
-        Pure prose, naturally integrated context, no template headers.
-
-        CRITICAL FIX: Ensure proper spacing between concatenated segments to prevent
-        ReportLab character dropping bug.
+        Default narrator: description prose only.
+        evidence and decision_implication are rendered as separate UI elements
+        (methodology footnote and → callout respectively) — not concatenated inline.
         """
-        # Start with the main description
-        narrative = ins.description
-        
-        # FIX 4: Integrate why_it_matters naturally (no header)
+        narrative = ins.description.rstrip()
+        # Only append why_it_matters if it reads as a natural continuation sentence
+        # (not a header-prefixed block). Evidence and decision_implication are excluded
+        # to prevent stats metadata from bleeding into body copy.
         if ins.why_it_matters:
-            # Remove any existing "Why it matters:" prefix
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            why_text = ins.why_it_matters.removeprefix('Why it matters: ').removeprefix('WHY IT MATTERS: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + why_text
-        
-        # FIX 4: Integrate evidence naturally (no header)
-        if ins.evidence:
-            # Remove any existing "Evidence:" prefix
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            evidence_text = ins.evidence.removeprefix('Evidence: ').removeprefix('SUPPORTING EVIDENCE: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + evidence_text
-        
-        # FIX 4: Integrate decision implication naturally (no header)
-        if ins.decision_implication:
-            # Remove any existing prefix
-            # CRITICAL: Use removeprefix() not lstrip() - lstrip removes characters, not prefixes!
-            decision_text = ins.decision_implication.removeprefix('Decision: ').removeprefix('DECISION IMPLICATION: ')
-            # CRITICAL: Always add space before concatenation
-            narrative = narrative.rstrip() + ' ' + decision_text
-        
+            why_text = (
+                ins.why_it_matters
+                .removeprefix('Why it matters: ')
+                .removeprefix('WHY IT MATTERS: ')
+                .strip()
+            )
+            if why_text:
+                narrative = narrative + ' ' + why_text
         return narrative
 
 
