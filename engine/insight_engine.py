@@ -1036,6 +1036,18 @@ class ColumnClassifier:
                         if profile.geographic_col is None and entity_type not in ['person', 'id']:
                             profile.geographic_col = col
         
+        # Priority override: always prefer a column named exactly "Category" (case-insensitive).
+        # This prevents "Region" from winning over "Category" in column-order-dependent matching.
+        for col in profile.categoricals:
+            if col.lower() == "category":
+                entity_type = self._detect_entity_type(df, col)
+                if entity_type not in ['person', 'id']:
+                    n_unique = profile.profiles[col].n_unique
+                    if 2 <= n_unique <= 20:
+                        profile.category_col = col
+                        log.info(f"[SubRole] Exact-name override: category_col='{col}'")
+                break
+
         # Fallback: prefer non-person, non-ID columns for category
         if not profile.category_col and profile.categoricals:
             candidates = [c for c in profile.categoricals 
@@ -2305,13 +2317,15 @@ class BusinessRuleEngine:
                     title=f"Revenue Concentration: {seg_col}",
                     impact="🔴 Critical" if gap_pct > 15 else "🟠 Important",
                     description=(
-                        f"WHAT: {top[seg_col]} leads with {self._format_inr(top['total_rev'])} "
-                        f"({top_share:.1f}% of total revenue) while {bottom[seg_col]} trails at "
+                        f"{top[seg_col]} leads with {self._format_inr(top['total_rev'])} "
+                        f"({top_share:.1f}% of total revenue), while {bottom[seg_col]} trails at "
                         f"{self._format_inr(bottom['total_rev'])} ({bottom_share:.1f}%). "
-                        f"WHY: A {gap_pct:.1f}pp revenue gap across {seg_col} segments reveals "
-                        f"non-uniform performance. "
-                        f"EVIDENCE: {grouped.height} segments analyzed across "
-                        f"{sum(r['n_records'] for r in rows):,} records."
+                        f"This {gap_pct:.1f}-percentage-point gap across {grouped.height} {seg_col} segments "
+                        f"indicates non-uniform performance that warrants targeted intervention."
+                    ),
+                    why_it_matters=(
+                        f"A wide revenue gap across {seg_col} segments signals either demand-side imbalance "
+                        f"or execution gaps that compound over time."
                     ),
                     recommendation=(
                         f"Audit operations in {bottom[seg_col]} to identify whether the gap "
@@ -2359,12 +2373,17 @@ class BusinessRuleEngine:
                 col_plural = self._smart_plural(col_label)
                 insights.append(BusinessInsight(
                     title=f"Top 3 {col_plural} Drive {top3_share:.0f}% of Revenue",
-                    impact="Critical" if top3_share > 60 else "Important",
+                    impact="🔴 Critical" if top3_share > 60 else "🟠 Important",
                     description=(
-                        f"WHAT: Out of {n_unique} {col_plural.lower()}, just 3 ({top3_names}) "
-                        f"account for {top3_share:.1f}% of total revenue. "
-                        f"EVIDENCE: Top 3 = {self._format_inr(sum(r['total_rev'] for r in top3))} "
-                        f"out of {self._format_inr(total)} total."
+                        f"Out of {n_unique} {col_plural.lower()}, just three — {top3_names} — "
+                        f"account for {top3_share:.1f}% of total revenue "
+                        f"({self._format_inr(sum(r['total_rev'] for r in top3))} out of "
+                        f"{self._format_inr(total)}). "
+                        f"This concentration creates execution leverage but also single-point-of-failure risk."
+                    ),
+                    why_it_matters=(
+                        f"Heavy reliance on a small set of {col_plural.lower()} means a disruption "
+                        f"to any one of them disproportionately impacts overall revenue."
                     ),
                     recommendation=f"Run a feature/promotion playbook focused on {top3_names} for next quarter.",
                     rule_type=f"top_performers_{col.lower()}",
@@ -2396,9 +2415,10 @@ class BusinessRuleEngine:
                     title=f"{col} Distribution is Heavily Right-Skewed",
                     impact="🟠 Important",
                     description=(
-                        f"WHAT: {col} has mean {fmt(mean_val)} but median "
-                        f"{fmt(median_val)} — a {ratio:.1f}× gap. "
-                        f"WHY: A small number of high-value records are pulling the average up."
+                        f"{col} shows a {ratio:.1f}× mean-to-median gap "
+                        f"({fmt(mean_val)} mean vs {fmt(median_val)} median). "
+                        f"A small number of high-value records are pulling the average up, "
+                        f"making the mean a misleading benchmark for typical performance."
                     ),
                     evidence=f"Mean/median ratio of {ratio:.2f} indicates strong right-skew.",
                     recommendation=f"Switch dashboards to display median {col} ({fmt(median_val)}) instead of mean.",
@@ -2636,8 +2656,14 @@ class BusinessRuleEngine:
                     title=f"{col} Revenue Split: {gap_pct:.0f}% Gap",
                     impact="🟠 Important" if abs(gap_pct) < 25 else "🔴 Critical",
                     description=(
-                        f"WHAT: {a[col]} segment generates {self._format_inr(a['total_rev'])} total "
-                        f"({a['n']:,} orders) vs {b[col]} at {self._format_inr(b['total_rev'])} — a {gap_pct:.0f}% gap."
+                        f"The {a[col]} segment generates {self._format_inr(a['total_rev'])} "
+                        f"across {a['n']:,} orders, while {b[col]} trails at "
+                        f"{self._format_inr(b['total_rev'])} — a {gap_pct:.0f}% revenue gap. "
+                        f"This split warrants targeted acquisition investment in the underperforming segment."
+                    ),
+                    why_it_matters=(
+                        f"A {gap_pct:.0f}% gap between {col} segments signals an addressable "
+                        f"growth opportunity if the gap is driven by reach rather than demand."
                     ),
                     recommendation=f"Run a paid-acquisition test targeted specifically at {b[col]} for 30 days.",
                     rule_type=f"demographic_split_{col.lower()}",
@@ -4580,7 +4606,10 @@ class InsightNarrator:
                 final_desc = self._narrate_simulation(ins)
             elif rt in ("causal_pricing_driver", "pricing_inconsistency"):
                 final_desc = self._narrate_pricing(ins)
-            elif rt in ("revenue_dominance", "revenue_by_category", "cross_dimensional_dominance"):
+            elif (
+                rt in ("revenue_dominance", "cross_dimensional_dominance", "worst_revenue", "dominance")
+                or rt.startswith("revenue_by")
+            ):
                 final_desc = self._narrate_revenue(ins)
             elif rt == "customer_concentration":
                 final_desc = self._narrate_customer(ins)
@@ -4679,7 +4708,6 @@ class InsightNarrator:
         
         # Lead with upside if available
         if base:
-            from engine.report_generator import _fmt_inr  # lazy import to avoid circular
             parts.append(f"Simulated upside: ₹{base:,.0f} at base-case assumptions.")
         
         # Add main description
@@ -6019,7 +6047,7 @@ def drill_down(
             revenue=(rev_col, "sum") if rev_col else (rating_col, "count"),
         ).reset_index()
         summary["rev_share_pct"] = summary["revenue"] / summary["revenue"].sum() * 100 if rev_col else 0
-        from engine.time_series_analysis import TimeSeriesAnalyzer as _TSA
+        from time_series_analysis import TimeSeriesAnalyzer as _TSA
         comparisons = []
         cats = summary[cat_col].tolist()
         for i in range(len(cats)):

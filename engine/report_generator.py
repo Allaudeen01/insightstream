@@ -176,6 +176,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MODULE-LEVEL CURRENCY FORMATTER  — always ₹, always INR scale
+# ══════════════════════════════════════════════════════════════════════════════
+def _fmt_currency(value: float) -> str:
+    """Format a number as Indian Rupees with smart Cr / L / K scaling.
+
+    This function is the single source of truth for currency display.
+    It ALWAYS uses ₹ — no £, ¥, or other symbols can appear here.
+    """
+    try:
+        abs_val = abs(float(value))
+        sign = "" if float(value) >= 0 else "-"
+    except (TypeError, ValueError):
+        return str(value)
+    if abs_val >= 1_00_00_000:          # 1 Crore
+        return f"{sign}₹{abs_val / 1_00_00_000:.2f} Cr"
+    if abs_val >= 1_00_000:             # 1 Lakh
+        return f"{sign}₹{abs_val / 1_00_000:.2f} L"
+    if abs_val >= 1_000:
+        return f"{sign}₹{abs_val / 1_000:.1f}K"
+    return f"{sign}₹{abs_val:,.0f}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # DESIGN TOKENS
 # ══════════════════════════════════════════════════════════════════════════════
 class C:
@@ -1315,8 +1338,10 @@ class PDFReportGenerator:
         # Replace LaTeX-style currency escapes BEFORE XML-escaping so the ₹ glyph
         # flows through the font-tag wrapper below rather than appearing as literals.
         text = str(text)
+        # Force INR symbol — replace every known currency escape with ₹
         text = text.replace(r'\mathbb{1}', '₹').replace('\\mathbb{1}', '₹')
-        text = text.replace(r'\yen', '¥').replace(r'\pounds', '£')
+        text = text.replace(r'\yen', '₹').replace(r'\pounds', '₹')
+        text = text.replace('¥', '₹').replace('£', '₹')
         safe = _xml_escape(text)
         
         # CRITICAL FIX 1: Ensure proper spacing after sentence-ending punctuation
@@ -1361,11 +1386,19 @@ class PDFReportGenerator:
         return cleaned
 
     def _is_safe_element(self, el) -> bool:
-        """Return False if the element is a Paragraph containing a raw data dump."""
+        """Return False if the element is a Paragraph containing a raw data dump
+        or a stray lone-digit artifact (e.g. \\mathbb{1} rendering as bare '1')."""
         if not isinstance(el, Paragraph):
             return True
 
         text = el.getPlainText().strip()
+
+        # Strip lone single-digit Paragraphs — artifact from currency parse failures
+        # (\\mathbb{1} slipping through XML parser, or empty list-item numbers)
+        if re.match(r'^\s*\d\s*$', text):
+            log.warning("BLOCKED lone-digit element: '%s'", text)
+            return False
+
         if len(text) < 80:                     # short texts are fine
             return True
 
@@ -1450,16 +1483,30 @@ class PDFReportGenerator:
         Walk every Paragraph in *elements* — including those nested inside
         KeepTogether, Table, and other containers — and replace LaTeX-like
         currency escapes with the correct Unicode characters.
-        Handles: \\mathbb{1} → ₹   \\yen → ¥   \\pounds → £
+        Handles: \\mathbb{1} → ₹   \\yen → ₹   \\pounds → ₹   ¥ → ₹   £ → ₹
         """
         REPLACEMENTS = [
             (r'\mathbb{1}', '₹'),
             (r'\\mathbb{1}', '₹'),
             ('\\mathbb{1}', '₹'),
             ('\mathbb{1}',  '₹'),
-            (r'\yen',       '¥'),
-            (r'\pounds',    '£'),
+            (r'\yen',       '₹'),   # Force INR — no yen
+            (r'\pounds',    '₹'),   # Force INR — no pounds
+            ('¥',           '₹'),   # Replace any raw yen glyph
+            ('£',           '₹'),   # Replace any raw pound glyph
         ]
+
+        import re as _re
+
+        def _is_lone_digit(el) -> bool:
+            """Return True if el is a Paragraph whose plain text is a single digit."""
+            if not isinstance(el, Paragraph):
+                return False
+            try:
+                txt = el.getPlainText().strip()
+                return bool(_re.match(r'^\d$', txt))
+            except Exception:
+                return False
 
         def _patch(el) -> None:
             if isinstance(el, Paragraph):
@@ -1476,9 +1523,11 @@ class PDFReportGenerator:
                         pass
             # Recurse into containers that hold nested flowables
             elif hasattr(el, '_content'):          # KeepTogether
+                el._content = [c for c in (el._content or []) if not _is_lone_digit(c)]
                 for child in (el._content or []):
                     _patch(child)
             elif hasattr(el, '_flowables'):        # KeepTogether alt attribute
+                el._flowables = [c for c in (el._flowables or []) if not _is_lone_digit(c)]
                 for child in (el._flowables or []):
                     _patch(child)
             elif hasattr(el, '_cellvalues'):       # Table
@@ -1497,8 +1546,12 @@ class PDFReportGenerator:
     def embed_chart_safely(self, elements: list, chart_path: Optional[str],
                            title: str, insight: str) -> None:
         """Triple-guard chart embedding — never raises, never crashes the PDF build."""
+        from xml.sax.saxutils import escape as _xe
+        safe_title = self._md_to_rl(str(title))
+        safe_insight = self._md_to_rl(str(insight))
+
         if not chart_path:
-            elements.append(Paragraph(title, self.S["ChartTitle"]))
+            elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             elements.append(Paragraph(
                 "⚠ Chart skipped — required column not found in dataset.",
                 self.S["Fallback"]))
@@ -1506,14 +1559,14 @@ class PDFReportGenerator:
             return
 
         if not os.path.exists(chart_path):
-            elements.append(Paragraph(title, self.S["ChartTitle"]))
+            elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             elements.append(Paragraph(
-                f"⚠ Chart file missing: {chart_path}", self.S["Fallback"]))
+                f"⚠ Chart file missing: {_xe(chart_path)}", self.S["Fallback"]))
             elements.append(Spacer(1, 12))
             return
 
         if os.path.getsize(chart_path) == 0:
-            elements.append(Paragraph(title, self.S["ChartTitle"]))
+            elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             elements.append(Paragraph(
                 "⚠ Chart file is empty (render error).", self.S["Fallback"]))
             elements.append(Spacer(1, 12))
@@ -1523,24 +1576,24 @@ class PDFReportGenerator:
             # KeepTogether prevents title orphaning from its chart image
             # Use reduced height to prevent overflow that causes chart dropping
             chart_block = KeepTogether([
-                Paragraph(title, self.S["ChartTitle"]),
+                Paragraph(safe_title, self.S["ChartTitle"]),
                 RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H),
                 Spacer(1, 6),
-                Paragraph(f"📊  {insight}", self.S["Insight"]),
+                Paragraph(f"📊  {safe_insight}", self.S["Insight"]),
                 Spacer(1, 16),  # Reduced from 22 to save space
             ])
             elements.append(chart_block)
         except Exception as exc:
             # Fallback: add without KeepTogether if block is too large
             log.warning("KeepTogether failed for %s, using fallback: %s", title, exc)
-            elements.append(Paragraph(title, self.S["ChartTitle"]))
+            elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             try:
                 elements.append(RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H))
                 elements.append(Spacer(1, 6))
-                elements.append(Paragraph(f"📊  {insight}", self.S["Insight"]))
+                elements.append(Paragraph(f"📊  {safe_insight}", self.S["Insight"]))
             except Exception as img_exc:
                 log.error("ReportLab failed loading %s: %s", chart_path, img_exc)
-                elements.append(Paragraph(f"⚠ Render error: {img_exc}", self.S["Fallback"]))
+                elements.append(Paragraph(f"⚠ Render error: {_xe(str(img_exc))}", self.S["Fallback"]))
             elements.append(Spacer(1, 16))
 
     def _plotly_to_image(self, fig, width_inches: float = 7.5, height_inches: float = 3.8) -> Optional[RLImage]:
@@ -1559,18 +1612,21 @@ class PDFReportGenerator:
             log.error(f"[chart] Plotly → PNG failed: {e}")
             return None
 
-    def _add_chart_section(self, elements: list, fig, title: str, caption: str) -> None:
-        """Append a Plotly figure as a titled, captioned chart block to the PDF story."""
+    def _add_chart_section(self, elements: list, fig, title: str, caption: str) -> bool:
+        """Append a Plotly figure as a titled, captioned chart block. Returns True on success."""
         if fig is None:
-            return
+            return False
         img = self._plotly_to_image(fig)
         if img is None:
-            return
-        elements.append(Paragraph(f"<b>{title}</b>", self.S["ChartTitle"]))
+            log.warning("[_add_chart_section] kaleido render returned None for: %s", title)
+            return False
+        from xml.sax.saxutils import escape as _xe_cs
+        elements.append(Paragraph(f"<b>{_xe_cs(str(title))}</b>", self.S["ChartTitle"]))
         elements.append(Spacer(1, 0.1 * inch))
         elements.append(img)
-        elements.append(Paragraph(f"<i>{caption}</i>", self.S["Insight"]))
+        elements.append(Paragraph(f"<i>{_xe_cs(str(caption))}</i>", self.S["Insight"]))
         elements.append(Spacer(1, 0.3 * inch))
+        return True
 
     def _chart_monthly_revenue(
         self,
@@ -1904,14 +1960,17 @@ class PDFReportGenerator:
                             'ℹ️ ' if is_important else '✅ ')
 
             # ── Card: two-column header row (title left, badge right) ──────
-            # title goes directly into Paragraph (no _md_to_rl) — fix currency here
+            # XML-escape title to prevent &, <, > from breaking ReportLab's XML parser
+            from xml.sax.saxutils import escape as _xe_card
             title = title.replace(r'\mathbb{1}', '₹').replace('\\mathbb{1}', '₹')
+            title = title.replace('£', '₹').replace('¥', '₹')
+            safe_card_title = _xe_card(title)
             badge_style = ParagraphStyle(
                 f'Badge_{i}', fontSize=8, fontName=PDF_FONT_BOLD,
                 textColor=colors.white, backColor=colors.HexColor(badge_color),
                 borderPad=3, alignment=1,
             )
-            title_cell  = Paragraph(f"{i:02d}. {title}", title_style)
+            title_cell  = Paragraph(f"{i:02d}. {safe_card_title}", title_style)
             badge_cell  = Paragraph(f"{badge_icon}{badge_label}", badge_style)
             header_row  = Table([[title_cell, badge_cell]],
                                 colWidths=[4.5 * inch, 1.4 * inch])
@@ -2141,7 +2200,8 @@ class PDFReportGenerator:
 
         # 4. Regional Table (New)
         if md_table:
-            elements.append(Paragraph(f"Regional {target_metric} Distribution", self.S["Section"]))
+            from xml.sax.saxutils import escape as _xe_tm
+            elements.append(Paragraph(f"Regional {_xe_tm(str(target_metric))} Distribution", self.S["Section"]))
             # Convert MD table to a ReportLab Table
             lines = md_table.split("\n")
             table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
@@ -2548,9 +2608,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements: list = []
 
         # 1. PAGE 1: TITLE PAGE
+        from xml.sax.saxutils import escape as _xe_title
         elements.append(Spacer(1, 2 * inch))
-        elements.append(Paragraph(project_name.upper(), self.S["Section"]))
-        elements.append(Paragraph(final_title, self.S["Title"]))
+        elements.append(Paragraph(_xe_title(str(project_name).upper()), self.S["Section"]))
+        elements.append(Paragraph(_xe_title(str(final_title)), self.S["Title"]))
         elements.append(Spacer(1, 0.5 * inch))
         elements.append(Paragraph(
             f"Official Strategic Analysis  •  {date.today().strftime('%B %d, %Y')}",
@@ -2566,7 +2627,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(PageBreak())
 
         # 2. PAGE 2: EXECUTIVE SUMMARY & KPIs
-        elements.append(Paragraph(domain_template.get("executive_summary_header", "Executive Overview"), self.S["Section"]))
+        elements.append(Paragraph(_xe_title(domain_template.get("executive_summary_header", "Executive Overview")), self.S["Section"]))
         elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
         elements.append(Spacer(1, 20))
 
@@ -2577,7 +2638,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
 
         if ai_summary:
             elements.append(Paragraph("AI Intelligence Brief", self.S["ChartTitle"]))
-            elements.append(Paragraph(ai_summary, self.S["Insight"]))
+            elements.append(Paragraph(self._md_to_rl(ai_summary), self.S["Insight"]))
             elements.append(Spacer(1, 20))
 
         # 3. PAGE 3: REGIONAL ANALYSIS (Rendered if DF provided, suppressed if low-variance)
@@ -2603,7 +2664,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 if _reg_variance_pct >= 10:
                     elements.append(PageBreak())
                     _regional_page_added = True
-                    elements.append(Paragraph(domain_template.get("regional_chart_title", "Regional Breakdown"), self.S["Section"]))
+                    elements.append(Paragraph(_xe_title(domain_template.get("regional_chart_title", "Regional Breakdown")), self.S["Section"]))
                     elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
                     elements.append(Spacer(1, 20))
 
@@ -2632,7 +2693,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         md_table = ""
                     if md_table:
                         elements.append(Spacer(1, 20))
-                        elements.append(Paragraph(f"Regional {target_metric} Statistics", self.S["ChartTitle"]))
+                        elements.append(Paragraph(_xe_title(f"Regional {target_metric} Statistics"), self.S["ChartTitle"]))
                         lines = md_table.split("\n")
                         table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
                         table_data = [[cell.strip() for cell in row] for row in table_data]
@@ -2651,7 +2712,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
         # 4. PAGE 4: STRATEGIC FINDINGS & NOTES
         elements.append(PageBreak())
         if insights or text_blocks:
-            elements.append(Paragraph("Strategic Findings & Key Results", self.S["Section"]))
+            elements.append(Paragraph("Strategic Findings &amp; Key Results", self.S["Section"]))
             elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
             elements.append(Spacer(1, 20))
 
@@ -2684,7 +2745,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         recommendation = ""
 
                     if title:
-                        elements.append(Paragraph(f"• {title}", finding_title_style))
+                        elements.append(Paragraph(f"• {_xe_title(str(title))}", finding_title_style))
                     if description:
                         # Smart truncation at sentence boundary (up to 900 chars)
                         if len(description) <= 900:
@@ -2728,6 +2789,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
         elements.append(Spacer(1, 20))
 
+        # Pre-generate matplotlib charts from df — used as last-resort fallback when
+        # the frontend chart list has no image_base64 and no plotly_json.
+        _cg_chart_paths: dict[str, str] = {}
+        if df is not None:
+            try:
+                _cg = ChartGenerator()
+                _cg_result, _ = _cg.generate_all(df)
+                _cg_chart_paths = _cg_result
+                log.info(f"[Charts] Pre-generated {len(_cg_chart_paths)} ChartGenerator images: {list(_cg_chart_paths.keys())}")
+            except Exception as _cg_e:
+                log.warning(f"[Charts] ChartGenerator pre-generation failed: {_cg_e}")
+
         valid_charts = 0
         total_charts = len(charts)
         log.info(f"[Charts] Processing {total_charts} charts for PDF")
@@ -2735,12 +2808,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
 
         for i, chart in enumerate(charts):
             chart_title = chart.get("title", f"Chart {i+1}")
+            chart_id    = chart.get("id", f"chart_{i}")
+            has_b64     = bool(chart.get("image_base64", ""))
+            has_plotly  = bool(chart.get("plotly_json") or chart.get("plotly_data"))
             if chart_title in seen_chart_titles:
                 log.info(f"[Chart {i+1}] Skipping duplicate: {chart_title}")
                 continue
             seen_chart_titles.add(chart_title)
-            log.info(f"[Chart {i+1}/{total_charts}] Processing: {chart_title}")
-            
+            log.info(
+                f"[Chart {i+1}/{total_charts}] id={chart_id!r} | "
+                f"has_base64={has_b64} | has_plotly={has_plotly} | title={chart_title!r}"
+            )
+
             # Try to get image from base64 first
             img_path = self._decode_image(chart.get("image_base64", ""), session_id)
             if img_path:
@@ -2841,7 +2920,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
             if err:
                 # Suppress raw data dumps - only show error if it's not a data dump
                 if "{" not in str(err) and "[" not in str(err):
-                    elements.append(Paragraph(f"⚠ {chart_title}: {err}", self.S["Fallback"]))
+                    elements.append(Paragraph(
+                        f"⚠ {_xe_title(str(chart_title))}: {_xe_title(str(err))}",
+                        self.S["Fallback"]))
                     elements.append(Spacer(1, 20))
             elif img_path:
                 # Successfully got an image (from base64, Plotly, or ChartGenerator)
@@ -2875,13 +2956,36 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     )
                     valid_charts += 1
                 else:
-                    log.error(f"[Chart {i+1}] ✗ All rendering methods failed for: {chart_title}")
-                    elements.append(Paragraph(chart_title, self.S["ChartTitle"]))
-                    elements.append(Paragraph(
-                        f"📊 {chart_title} — visualization available in dashboard",
-                        self.S["Fallback"]
-                    ))
-                    elements.append(Spacer(1, 20))
+                    # ── Last resort: keyword-map chart title to pre-generated ChartGenerator image ──
+                    _tl = chart_title.lower()
+                    _cg_key = None
+                    if any(k in _tl for k in ("category", "product", "segment", "pareto")):
+                        _cg_key = "category"
+                    elif any(k in _tl for k in ("region", "location", "geography", "state", "city")):
+                        _cg_key = "region"
+                    elif any(k in _tl for k in ("distribution", "skew", "price", "histogram")):
+                        _cg_key = "distribution"
+                    elif any(k in _tl for k in ("correlation", "heatmap")):
+                        _cg_key = "correlation"
+                    elif any(k in _tl for k in ("order", "count", "volume", "records")):
+                        _cg_key = "order_count"
+
+                    _cg_img = _cg_chart_paths.get(_cg_key) if _cg_key else None
+                    if _cg_img and os.path.exists(_cg_img):
+                        log.info(f"[Chart {i+1}] ✓ ChartGenerator keyword-match ({_cg_key}) used for: {chart_title}")
+                        self.embed_chart_safely(
+                            elements, _cg_img, chart_title,
+                            chart.get('insight', 'Auto-generated chart from dataset.')
+                        )
+                        valid_charts += 1
+                    else:
+                        log.error(f"[Chart {i+1}] ✗ All rendering methods failed for: {chart_title}")
+                        elements.append(Paragraph(chart_title, self.S["ChartTitle"]))
+                        elements.append(Paragraph(
+                            f"📊 {chart_title} — visualization available in dashboard",
+                            self.S["Fallback"]
+                        ))
+                        elements.append(Spacer(1, 20))
         
         log.info(f"[Charts] Successfully rendered {valid_charts}/{total_charts} charts")
         
