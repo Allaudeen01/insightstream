@@ -11,7 +11,7 @@ import polars as pl
 import io
 import json
 import uuid
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Literal
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
@@ -676,11 +676,18 @@ def get_raw_data(session_id: str, page: int = 1, page_size: int = 100):
 
 class IssueItem(BaseModel):
     column: str
-    issue_type: str  # "missing" | "duplicate" | "outlier"
+    issue_type: str  # "missing" | "duplicate" | "outlier" | "multivariate_outlier"
     severity: str    # "low" | "medium" | "high"
     description: str
     count: int
     percentage: float
+    missingness_type: Optional[str] = None   # "MCAR" | "MAR" | "MNAR" | "TARGET_LEAKAGE"
+    missingness_reason: Optional[str] = None
+    columns_used: Optional[List[str]] = None  # populated for multivariate_outlier issues
+    suggested_action: Optional[str] = None   # best CleanAction.action for this issue
+    alternatives: Optional[List[str]] = None  # other valid actions
+    group_col: Optional[str] = None          # set when group-wise imputation is recommended
+    fill_col: Optional[str] = None           # set when fill-from-column is recommended
 
 class HealthCheckResponse(BaseModel):
     session_id: str
@@ -718,18 +725,27 @@ def get_health_check(session_id: str):
         ))
     
     # 2. Check for missing values per column
+    advisor = DataQualityAdvisor()
     for col in df.columns:
         null_count = df[col].null_count()
         if null_count > 0:
             null_pct = round(null_count / len(df) * 100, 2)
             severity = "high" if null_pct > 30 else ("medium" if null_pct > 10 else "low")
+            mtype, mreason = advisor.classify_missingness(col, df)
+            suggestion = advisor.suggest_action(col, df, mtype, null_pct)
             issues.append(IssueItem(
                 column=col,
                 issue_type="missing",
                 severity=severity,
                 description=f"{null_count} missing values ({null_pct}%)",
                 count=null_count,
-                percentage=null_pct
+                percentage=null_pct,
+                missingness_type=mtype,
+                missingness_reason=mreason,
+                suggested_action=suggestion["suggested_action"],
+                alternatives=suggestion["alternatives"],
+                group_col=suggestion["group_col"],
+                fill_col=suggestion["fill_col"],
             ))
     
     # 3. Check for outliers in numeric columns (IQR method)
@@ -756,6 +772,18 @@ def get_health_check(session_id: str):
                 percentage=outlier_pct
             ))
     
+    # 4. Multivariate outlier detection (IsolationForest — Gap 4)
+    for mv in advisor.multivariate_outlier_check(df):
+        issues.append(IssueItem(
+            column="_multivariate_",
+            issue_type=mv["issue_type"],
+            severity=mv["severity"],
+            description=mv["reason"],
+            count=mv["count"],
+            percentage=round(mv["count"] / len(df) * 100, 2),
+            columns_used=mv["columns_used"],
+        ))
+
     # Calculate quality score
     high_issues = sum(1 for i in issues if i.severity == "high")
     medium_issues = sum(1 for i in issues if i.severity == "medium")
@@ -779,8 +807,10 @@ def get_health_check(session_id: str):
     )
 
 class CleanAction(BaseModel):
-    action: str  # "drop_duplicates" | "drop_column" | "impute_mean" | "impute_median" | "impute_mode" | "drop_nulls"
+    action: str  # "drop_duplicates" | "drop_column" | "impute_mean" | "impute_median" | "impute_mode" | "drop_nulls" | "impute_group_median" | "impute_from_col"
     column: Optional[str] = None
+    group_col: Optional[str] = None   # for impute_group_median (Gap 6)
+    fill_col: Optional[str] = None    # for impute_from_col (Gap 7)
     enabled: bool = True  # Allow toggling actions
 
 class CleaningPreview(BaseModel):
@@ -813,6 +843,773 @@ def calculate_quality_score(df: pl.DataFrame) -> str:
         return "B"
     return "A"
 
+def impute_with_flag(df: pl.DataFrame, col: str, fill_value) -> pl.DataFrame:
+    """Impute nulls in *col* and add a companion {col}_was_missing Int8 flag.
+
+    The flag is created BEFORE filling so it captures the original null
+    pattern — preserving MNAR signal for any downstream model.
+    If fill_value is None (e.g. all-null column), the flag is still created
+    but the fill is skipped.
+    """
+    flag_col = f"{col}_was_missing"
+    df = df.with_columns(pl.col(col).is_null().cast(pl.Int8).alias(flag_col))
+    if fill_value is not None:
+        df = df.with_columns(pl.col(col).fill_null(fill_value))
+    return df
+
+
+class DataQualityAdvisor:
+    """Diagnose *why* values are missing (MCAR / MAR / MNAR).
+
+    Gap 2 implementation: semantic keyword heuristic first, then
+    Pearson correlation between the is_missing indicator and every
+    other numeric column.
+    """
+
+    _MNAR_KEYWORDS = [
+        "delivery", "delivered", "shipped", "dispatch",
+        "return", "returned", "refund", "resolved",
+        "closed", "completed", "end_date", "discharge",
+        "death", "churn", "churned", "cancel", "cancelled",
+    ]
+
+    def classify_missingness(
+        self,
+        col: str,
+        df: pl.DataFrame,
+        target: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Return (mechanism, reason_string) for *col*.
+
+        mechanism is one of 'MCAR', 'MAR', 'MNAR', 'TARGET_LEAKAGE'.
+        TARGET_LEAKAGE overrides all other mechanisms when the missingness
+        indicator correlates with the target column (|r| > 0.3).
+        """
+        col_lower = col.lower()
+
+        # ── 0. Target-conditional check (Gap 13) ────────────────────────
+        if target and target != col and target in df.columns:
+            try:
+                pdf = df.to_pandas()
+                missing_flag = pdf[col].isna().astype(int)
+                if missing_flag.sum() > 0:
+                    target_col = pdf[target]
+                    max_r = 0.0
+                    if pd.api.types.is_numeric_dtype(target_col):
+                        r = missing_flag.corr(target_col.fillna(target_col.median()))
+                        if pd.notna(r):
+                            max_r = abs(float(r))
+                    else:
+                        n_unique = target_col.nunique()
+                        if 2 <= n_unique <= 20:
+                            dummies = pd.get_dummies(target_col.fillna("_missing_"))
+                            for dc in dummies.columns:
+                                r = missing_flag.corr(dummies[dc].astype(float))
+                                if pd.notna(r) and abs(float(r)) > max_r:
+                                    max_r = abs(float(r))
+                    if max_r > 0.3:
+                        return (
+                            "TARGET_LEAKAGE",
+                            f"Missingness predicts target '{target}' (|r|={max_r:.2f}). "
+                            "Imputing this column will inject a label-leaking signal into the model.",
+                        )
+            except Exception:
+                pass
+
+        # ── 1. Semantic MNAR ────────────────────────────────────────────
+        if any(k in col_lower for k in self._MNAR_KEYWORDS):
+            return (
+                "MNAR",
+                f"Missing likely means the event '{col}' has not yet occurred "
+                f"(Missing Not At Random — do not impute).",
+            )
+
+        # ── 2. Correlation-based MAR ────────────────────────────────────
+        try:
+            pdf = df.to_pandas()
+            missing_flag = pdf[col].isna().astype(int)
+            if missing_flag.sum() == 0:
+                return "MCAR", "Column has no missing values."
+
+            num_cols = [
+                c for c in pdf.columns
+                if c != col and pd.api.types.is_numeric_dtype(pdf[c])
+            ][:20]  # cap at 20 to keep it fast
+
+            correlates: dict[str, float] = {}
+            for other in num_cols:
+                try:
+                    r = missing_flag.corr(pdf[other].fillna(0))
+                    if pd.notna(r) and abs(r) > 0.3:
+                        correlates[other] = round(float(r), 2)
+                except Exception:
+                    pass
+
+            if correlates:
+                top = sorted(correlates.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+                detail = ", ".join(f"{k}={v:+.2f}" for k, v in top)
+                return "MAR", f"Missingness correlates with: {detail}"
+        except Exception:
+            pass
+
+        # ── 3. Default MCAR ─────────────────────────────────────────────
+        return "MCAR", "No strong correlation with other features detected."
+
+    def suggest_action(
+        self,
+        col: str,
+        df: pl.DataFrame,
+        missingness_type: str,
+        null_pct: float,
+    ) -> dict:
+        """Return the best CleanAction fields for a missing-values IssueItem.
+
+        Considers missingness mechanism, column dtype, related columns, and the
+        discount/price keyword heuristic from Gap 7.
+        """
+        _NUMERIC = (pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8)
+        is_numeric = df[col].dtype in _NUMERIC
+
+        # ── detect a useful group_col (low-cardinality cat correlated with missingness) ──
+        group_col_hint: Optional[str] = None
+        try:
+            pdf = df.to_pandas()
+            missing_flag = pdf[col].isna().astype(int)
+            if missing_flag.sum() > 0:
+                best_r = 0.0
+                for c in df.columns:
+                    if c == col:
+                        continue
+                    if df[c].dtype not in (pl.Utf8, pl.Boolean, pl.Categorical):
+                        continue
+                    n_uniq = df[c].n_unique()
+                    if not (2 <= n_uniq <= 20):
+                        continue
+                    try:
+                        dummies = pd.get_dummies(pdf[c].fillna("_missing_"))
+                        for dc in dummies.columns:
+                            r = missing_flag.corr(dummies[dc].astype(float))
+                            if pd.notna(r) and abs(float(r)) > best_r:
+                                best_r = abs(float(r))
+                                group_col_hint = c
+                    except Exception:
+                        pass
+                if best_r < 0.2:
+                    group_col_hint = None
+        except Exception:
+            pass
+
+        # ── detect fill_col (discount/original price keyword pair) ──
+        fill_col_hint: Optional[str] = None
+        col_lower = col.lower()
+        if any(k in col_lower for k in _DISCOUNT_COL_KWS):
+            for other in df.columns:
+                if other != col and any(k in other.lower() for k in _ORIGINAL_COL_KWS):
+                    fill_col_hint = other
+                    break
+
+        # ── decision tree ────────────────────────────────────────────────
+        alts_numeric = ["impute_mean", "impute_mode", "drop_nulls"]
+        alts_cat = ["drop_nulls", "drop_column"]
+
+        if missingness_type == "TARGET_LEAKAGE":
+            return dict(
+                suggested_action="drop_column",
+                alternatives=["impute_median"] if is_numeric else ["impute_mode"],
+                group_col=None, fill_col=None,
+            )
+
+        if missingness_type == "MNAR":
+            action = "drop_column" if null_pct > 40 else "drop_nulls"
+            alts = ["impute_mode", "impute_median"] if is_numeric else ["impute_mode"]
+            return dict(suggested_action=action, alternatives=alts,
+                        group_col=None, fill_col=None)
+
+        if null_pct > 70:
+            return dict(
+                suggested_action="drop_column",
+                alternatives=["impute_median"] if is_numeric else ["impute_mode"],
+                group_col=None, fill_col=fill_col_hint,
+            )
+
+        if fill_col_hint:
+            return dict(
+                suggested_action="impute_from_col",
+                alternatives=["impute_median", "impute_mode"],
+                group_col=None, fill_col=fill_col_hint,
+            )
+
+        if group_col_hint and missingness_type == "MAR":
+            action = "impute_group_median" if is_numeric else "impute_mode"
+            return dict(
+                suggested_action=action,
+                alternatives=["impute_median", "impute_mode"],
+                group_col=group_col_hint, fill_col=None,
+            )
+
+        if is_numeric:
+            return dict(
+                suggested_action="impute_median",
+                alternatives=alts_numeric,
+                group_col=group_col_hint, fill_col=None,
+            )
+
+        return dict(
+            suggested_action="impute_mode",
+            alternatives=alts_cat,
+            group_col=None, fill_col=None,
+        )
+
+    def multivariate_outlier_check(self, df: pl.DataFrame) -> list[dict]:
+        """Flag rows anomalous in combination using IsolationForest (Gap 4).
+
+        Only runs when sklearn is available and dataset has ≥50 complete rows
+        across at least two numeric columns.
+        """
+        try:
+            from sklearn.ensemble import IsolationForest
+        except ImportError:
+            return []
+
+        numeric_cols = [
+            c for c in df.columns
+            if df[c].dtype in (pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8)
+        ][:10]
+
+        if len(numeric_cols) < 2:
+            return []
+
+        pdf = df[numeric_cols].to_pandas().dropna()
+        if len(pdf) < 50:
+            return []
+
+        clf = IsolationForest(contamination=0.05, random_state=42)
+        preds = clf.fit_predict(pdf)
+        anomaly_count = int((preds == -1).sum())
+
+        if anomaly_count == 0:
+            return []
+
+        return [{
+            "issue_type": "multivariate_outlier",
+            "count": anomaly_count,
+            "severity": "medium",
+            "reason": (
+                "IsolationForest detected rows with unusual value combinations. "
+                "Flag for review — do not auto-remove."
+            ),
+            "columns_used": numeric_cols,
+        }]
+
+
+class SchemaSnapshot:
+    """Capture training-time schema for drift detection at inference time (Gap 9).
+
+    Both methods are static — persist the dict from from_df() inside a CleaningRecipe
+    and pass it back to validate() against any future DataFrame.
+    """
+
+    _MAX_CAT_UNIQUE = 50  # columns with ≤ this many uniques are treated as categorical
+
+    @staticmethod
+    def from_df(df: pl.DataFrame) -> dict:
+        """Build a serializable schema snapshot from a training DataFrame."""
+        _NUMERIC = (pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8)
+
+        columns = list(df.columns)
+        dtypes = {c: str(df[c].dtype) for c in columns}
+
+        categorical_levels: dict[str, list] = {}
+        for c in columns:
+            if df[c].dtype in (pl.Utf8, pl.Boolean, pl.Categorical):
+                if df[c].n_unique() <= SchemaSnapshot._MAX_CAT_UNIQUE:
+                    categorical_levels[c] = sorted(
+                        str(v) for v in df[c].drop_nulls().unique().to_list()
+                    )
+
+        numeric_ranges: dict[str, dict] = {}
+        numeric_quantiles: dict[str, list] = {}
+        _PSI_PERCENTILES = (0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
+
+        for c in columns:
+            if df[c].dtype in _NUMERIC:
+                col_data = df[c].drop_nulls()
+                if len(col_data) > 0:
+                    numeric_ranges[c] = {
+                        "min": float(col_data.min()),
+                        "max": float(col_data.max()),
+                    }
+                if len(col_data) >= 10:
+                    numeric_quantiles[c] = [
+                        float(col_data.quantile(q)) for q in _PSI_PERCENTILES
+                    ]
+
+        return {
+            "columns": columns,
+            "dtypes": dtypes,
+            "categorical_levels": categorical_levels,
+            "numeric_ranges": numeric_ranges,
+            "numeric_quantiles": numeric_quantiles,
+            "train_rows": len(df),
+        }
+
+    # Training bucket proportions matching [P1,P5,P10,P25,P50,P75,P90,P95,P99]
+    _PSI_TRAIN_PCTS = [0.01, 0.04, 0.05, 0.15, 0.25, 0.25, 0.15, 0.05, 0.04, 0.01]
+
+    @staticmethod
+    def _compute_psi(actual_values: pl.Series, training_quantiles: list[float]) -> float:
+        """Population Stability Index using training quantile bins (Gap 12).
+
+        Bins: (-inf,P1), [P1,P5), [P5,P10), [P10,P25), [P25,P50),
+              [P50,P75), [P75,P90), [P90,P95), [P95,P99), [P99,+inf)
+
+        Industry thresholds: <0.1 stable, 0.1-0.25 moderate, >=0.25 significant.
+        """
+        import math
+        eps = 1e-4
+        vals = actual_values.drop_nulls().to_list()
+        n = len(vals)
+        if n == 0:
+            return 0.0
+
+        boundaries = [float("-inf")] + list(training_quantiles) + [float("inf")]
+        counts = [0] * 10
+        for v in vals:
+            for i in range(10):
+                if boundaries[i] <= v < boundaries[i + 1]:
+                    counts[i] += 1
+                    break
+
+        psi = 0.0
+        for i in range(10):
+            actual_pct = max(counts[i] / n, eps)
+            train_pct  = max(SchemaSnapshot._PSI_TRAIN_PCTS[i], eps)
+            psi += (actual_pct - train_pct) * math.log(actual_pct / train_pct)
+        return psi
+
+    @staticmethod
+    def validate(df: pl.DataFrame, snapshot: dict) -> list[dict]:
+        """Return a list of schema violation dicts comparing df against the snapshot.
+
+        Checks:
+        1. Missing columns (high)
+        2. Dtype changes (high)
+        3. Unseen categorical levels (medium)
+        4. Hard range breach (medium) — kept as complement to PSI
+        5. PSI-based numeric drift (medium / high) — replaces the 2-std mean-shift check
+        """
+        _NUMERIC = (pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8)
+        violations: list[dict] = []
+
+        snap_cols: list[str] = snapshot.get("columns", [])
+        snap_dtypes: dict = snapshot.get("dtypes", {})
+        snap_levels: dict = snapshot.get("categorical_levels", {})
+        snap_ranges: dict = snapshot.get("numeric_ranges", {})
+        snap_quantiles: dict = snapshot.get("numeric_quantiles", {})
+
+        # 1. Missing columns
+        for col in snap_cols:
+            if col not in df.columns:
+                violations.append({
+                    "column": col,
+                    "issue": "missing_column",
+                    "severity": "high",
+                    "detail": f"Column '{col}' was present at training but is absent.",
+                })
+
+        # 2. Dtype changes
+        for col, expected in snap_dtypes.items():
+            if col in df.columns:
+                actual = str(df[col].dtype)
+                if actual != expected:
+                    violations.append({
+                        "column": col,
+                        "issue": "dtype_changed",
+                        "severity": "high",
+                        "expected": expected,
+                        "actual": actual,
+                        "detail": f"Column '{col}' dtype changed from {expected} to {actual}.",
+                    })
+
+        # 3. Unseen categorical levels
+        for col, known in snap_levels.items():
+            if col in df.columns:
+                known_set = set(known)
+                new_vals = sorted(
+                    str(v) for v in df[col].drop_nulls().unique().to_list()
+                    if str(v) not in known_set
+                )
+                if new_vals:
+                    violations.append({
+                        "column": col,
+                        "issue": "new_categories",
+                        "severity": "medium",
+                        "new_values": new_vals[:20],
+                        "detail": f"{len(new_vals)} unseen category value(s) in '{col}'.",
+                    })
+
+        # 4. Hard range breach (kept — complementary to PSI, catches boundary violations)
+        for col, rng in snap_ranges.items():
+            if col not in df.columns or df[col].dtype not in _NUMERIC:
+                continue
+            col_data = df[col].drop_nulls()
+            if len(col_data) == 0:
+                continue
+            actual_min = float(col_data.min())
+            actual_max = float(col_data.max())
+            if actual_min < rng["min"] or actual_max > rng["max"]:
+                violations.append({
+                    "column": col,
+                    "issue": "range_breach",
+                    "severity": "medium",
+                    "training_range": [rng["min"], rng["max"]],
+                    "actual_range": [actual_min, actual_max],
+                    "detail": f"Values in '{col}' fall outside the training range.",
+                })
+
+        # 5. PSI-based drift (replaces 2-std mean-shift — catches bimodal/tail shifts)
+        for col, quantiles in snap_quantiles.items():
+            if col not in df.columns or df[col].dtype not in _NUMERIC:
+                continue
+            col_data = df[col].drop_nulls()
+            if len(col_data) == 0:
+                continue
+            psi = SchemaSnapshot._compute_psi(col_data, quantiles)
+            if psi >= 0.25:
+                violations.append({
+                    "column": col,
+                    "issue": "significant_drift",
+                    "severity": "high",
+                    "psi_value": round(psi, 4),
+                    "training_quantiles": quantiles,
+                    "detail": (
+                        f"PSI={psi:.4f} ≥ 0.25 — significant distribution shift in '{col}'. "
+                        "Model scores are likely unreliable; retraining is recommended."
+                    ),
+                })
+            elif psi >= 0.1:
+                violations.append({
+                    "column": col,
+                    "issue": "moderate_drift",
+                    "severity": "medium",
+                    "psi_value": round(psi, 4),
+                    "training_quantiles": quantiles,
+                    "detail": (
+                        f"PSI={psi:.4f} in [0.1, 0.25) — moderate distribution shift in '{col}'. "
+                        "Monitor closely; consider retraining."
+                    ),
+                })
+
+        return violations
+
+
+class CleaningRecipe:
+    """Fit a cleaning recipe on training data; apply it to any split without refitting (Gap 3).
+
+    Usage pattern:
+        recipe = CleaningRecipe.fit(train_df, actions)   # compute stats from train only
+        train_clean, _ = CleaningRecipe.apply(train_df, recipe)
+        test_clean,  _ = CleaningRecipe.apply(test_df,  recipe)  # same values, no leakage
+    """
+
+    @staticmethod
+    def fit(df: pl.DataFrame, actions: list["CleanAction"]) -> dict:
+        """Compute all imputation statistics from df and return a serializable recipe dict."""
+        from datetime import datetime, timezone
+
+        steps: list[dict] = []
+        for action in actions:
+            if not action.enabled:
+                continue
+            step: dict = {"action": action.action, "from_training": True}
+            if action.column:
+                step["column"] = action.column
+
+            col = action.column
+            if action.action == "impute_mean" and col and col in df.columns:
+                step["fill_value"] = df[col].mean()
+            elif action.action == "impute_median" and col and col in df.columns:
+                step["fill_value"] = df[col].median()
+            elif action.action == "impute_mode" and col and col in df.columns:
+                mode_list = df[col].mode().to_list()
+                step["fill_value"] = mode_list[0] if mode_list else None
+            elif (
+                action.action == "impute_group_median"
+                and col and col in df.columns
+                and action.group_col and action.group_col in df.columns
+            ):
+                step["group_col"] = action.group_col
+                step["global_median"] = df[col].median()
+                gm_df = df.group_by(action.group_col).agg(
+                    pl.col(col).median().alias("_gm")
+                )
+                # Serialize as {str(group_val): median} — JSON keys must be strings
+                step["group_medians"] = {
+                    str(row[action.group_col]): row["_gm"]
+                    for row in gm_df.to_dicts()
+                }
+            elif action.action == "impute_from_col" and col and action.fill_col:
+                step["fill_col"] = action.fill_col
+                # Pre-compute discount-flag decision so apply() is deterministic
+                step["creates_had_discount"] = (
+                    any(k in col.lower() for k in _DISCOUNT_COL_KWS)
+                    and any(k in action.fill_col.lower() for k in _ORIGINAL_COL_KWS)
+                )
+
+            steps.append(step)
+
+        return {
+            "version": 1,
+            "fitted_at": datetime.now(timezone.utc).isoformat(),
+            "train_rows": len(df),
+            "steps": steps,
+            "schema_snapshot": SchemaSnapshot.from_df(df),  # Gap 9
+        }
+
+    @staticmethod
+    def apply(df: pl.DataFrame, recipe: dict) -> tuple[pl.DataFrame, list[str]]:
+        """Apply a pre-fitted recipe to df. Never recomputes imputation statistics."""
+        changelog: list[str] = []
+
+        for step in recipe.get("steps", []):
+            action = step.get("action")
+            col = step.get("column")
+            fill_value = step.get("fill_value")
+
+            if action == "drop_duplicates":
+                before = len(df)
+                df = df.unique()
+                removed = before - len(df)
+                if removed > 0:
+                    changelog.append(f"Removed {removed} duplicate rows")
+
+            elif action == "drop_column" and col:
+                if col in df.columns:
+                    df = df.drop(col)
+                    changelog.append(f"Dropped column '{col}'")
+
+            elif action == "drop_nulls" and col:
+                before = len(df)
+                df = df.filter(pl.col(col).is_not_null())
+                removed = before - len(df)
+                if removed > 0:
+                    changelog.append(f"Dropped {removed} rows with null '{col}'")
+
+            elif action in ("impute_mean", "impute_median", "impute_mode") and col and fill_value is not None:
+                if col in df.columns:
+                    null_count = df[col].null_count()
+                    if null_count > 0:
+                        df = impute_with_flag(df, col, fill_value)
+                        flag_col = f"{col}_was_missing"
+                        stat_name = action.replace("impute_", "")
+                        changelog.append(
+                            f"Imputed {null_count} missing '{col}' with {stat_name} "
+                            f"({fill_value:.4g} from training); added '{flag_col}' flag"
+                        )
+
+            elif action == "impute_group_median" and col:
+                group_col = step.get("group_col")
+                group_medians_map: dict = step.get("group_medians", {})
+                global_median = step.get("global_median")
+                if col in df.columns and group_col and group_col in df.columns:
+                    null_count = df[col].null_count()
+                    if null_count > 0:
+                        flag_col = f"{col}_was_missing"
+                        df = df.with_columns(pl.col(col).is_null().cast(pl.Int8).alias(flag_col))
+                        # Reconstruct lookup DataFrame from serialized training medians
+                        gm_df = pl.DataFrame({
+                            group_col: list(group_medians_map.keys()),
+                            "_group_median": [
+                                float(v) if v is not None else None
+                                for v in group_medians_map.values()
+                            ],
+                        })
+                        try:
+                            gm_df = gm_df.with_columns(
+                                pl.col(group_col).cast(df[group_col].dtype)
+                            )
+                        except Exception:
+                            pass
+                        df = df.join(gm_df, on=group_col, how="left")
+                        df = df.with_columns(
+                            pl.when(pl.col(col).is_null())
+                            .then(pl.col("_group_median").fill_null(global_median))
+                            .otherwise(pl.col(col))
+                            .alias(col)
+                        ).drop("_group_median")
+                        changelog.append(
+                            f"Imputed {null_count} missing '{col}' with group-wise median "
+                            f"(by '{group_col}', fitted on training); added '{flag_col}' flag"
+                        )
+
+            elif action == "impute_from_col" and col:
+                fill_col = step.get("fill_col")
+                creates_had_discount = step.get("creates_had_discount", False)
+                if col in df.columns and fill_col and fill_col in df.columns:
+                    null_count = df[col].null_count()
+                    if null_count > 0:
+                        flag_col = f"{col}_was_missing"
+                        df = df.with_columns(pl.col(col).is_null().cast(pl.Int8).alias(flag_col))
+                        if creates_had_discount:
+                            df = df.with_columns(
+                                pl.when(pl.col(col).is_null())
+                                .then(pl.lit(0, dtype=pl.Int8))
+                                .otherwise(pl.lit(1, dtype=pl.Int8))
+                                .alias("had_discount")
+                            )
+                        df = df.with_columns(
+                            pl.when(pl.col(col).is_null())
+                            .then(pl.col(fill_col))
+                            .otherwise(pl.col(col))
+                            .alias(col)
+                        )
+                        msg = (
+                            f"Imputed {null_count} missing '{col}' from '{fill_col}' "
+                            f"(recipe, no refit); added '{flag_col}' flag"
+                        )
+                        if creates_had_discount:
+                            msg += (
+                                "; added 'had_discount' transparency flag "
+                                "(1 = item had a discounted price, 0 = no discount was applied)"
+                            )
+                        changelog.append(msg)
+
+        return df, changelog
+
+
+# ── Gap 11: Pluggable split strategies ──────────────────────────────────────
+
+def split_dataframe(
+    df: pl.DataFrame,
+    strategy: str,
+    train_fraction: float,
+    random_state: int = 42,
+    time_col: Optional[str] = None,
+    stratify_col: Optional[str] = None,
+    group_col: Optional[str] = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Return (train_df, test_df) using the requested strategy.
+
+    Raises HTTPException(422) when a required column is missing or the
+    strategy name is unknown.
+    """
+    _NUMERIC_DTYPES = (pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8)
+
+    if strategy == "positional":
+        idx = int(len(df) * train_fraction)
+        return df[:idx], df[idx:]
+
+    elif strategy == "random":
+        shuffled = df.sample(fraction=1.0, shuffle=True, seed=random_state)
+        idx = int(len(shuffled) * train_fraction)
+        return shuffled[:idx], shuffled[idx:]
+
+    elif strategy == "time":
+        if not time_col or time_col not in df.columns:
+            raise HTTPException(
+                status_code=422,
+                detail=f"strategy='time' requires time_col; "
+                       f"'{time_col}' not found in dataset.",
+            )
+        sorted_df = df.sort(time_col, nulls_last=True)
+        idx = int(len(sorted_df) * train_fraction)
+        return sorted_df[:idx], sorted_df[idx:]
+
+    elif strategy == "stratified":
+        if not stratify_col or stratify_col not in df.columns:
+            raise HTTPException(
+                status_code=422,
+                detail=f"strategy='stratified' requires stratify_col; "
+                       f"'{stratify_col}' not found in dataset.",
+            )
+        strat_col = stratify_col
+        df_work = df
+        # Bin high-cardinality numeric columns into quartiles
+        if df[strat_col].dtype in _NUMERIC_DTYPES and df[strat_col].n_unique() > 20:
+            pdf = df.to_pandas()
+            pdf["_strat_bin"] = pd.qcut(
+                pdf[strat_col].fillna(pdf[strat_col].median()),
+                q=4, labels=False, duplicates="drop",
+            )
+            df_work = pl.from_pandas(pdf)
+            strat_col = "_strat_bin"
+
+        train_parts: list[pl.DataFrame] = []
+        test_parts: list[pl.DataFrame] = []
+        for gval in df_work[strat_col].unique().to_list():
+            if gval is None:
+                continue
+            stratum = df_work.filter(pl.col(strat_col) == gval)
+            idx = max(1, int(len(stratum) * train_fraction))
+            train_parts.append(stratum[:idx])
+            if len(stratum) > idx:
+                test_parts.append(stratum[idx:])
+
+        train_df = pl.concat(train_parts) if train_parts else df_work[:0]
+        test_df  = pl.concat(test_parts)  if test_parts  else df_work[:0]
+
+        # Drop temporary bin column if added
+        for col in ("_strat_bin",):
+            if col in train_df.columns:
+                train_df = train_df.drop(col)
+            if col in test_df.columns:
+                test_df = test_df.drop(col)
+        return train_df, test_df
+
+    elif strategy == "group":
+        if not group_col or group_col not in df.columns:
+            raise HTTPException(
+                status_code=422,
+                detail=f"strategy='group' requires group_col; "
+                       f"'{group_col}' not found in dataset.",
+            )
+        import random as _random
+        rng = _random.Random(random_state)
+        all_groups = df[group_col].drop_nulls().unique().to_list()
+        rng.shuffle(all_groups)
+        n_train = max(1, int(len(all_groups) * train_fraction))
+        train_groups = set(all_groups[:n_train])
+        test_groups  = set(all_groups[n_train:])
+        return (
+            df.filter(pl.col(group_col).is_in(list(train_groups))),
+            df.filter(pl.col(group_col).is_in(list(test_groups))),
+        )
+
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown split_strategy '{strategy}'.")
+
+
+class FitRecipeRequest(BaseModel):
+    actions: list[CleanAction]
+    train_fraction: float = 0.8
+    split_strategy: Literal["positional", "random", "time", "stratified", "group"] = "positional"
+    random_state: int = 42
+    time_col: Optional[str] = None       # required when strategy="time"
+    stratify_col: Optional[str] = None   # required when strategy="stratified"
+    group_col: Optional[str] = None      # required when strategy="group"
+
+
+class ApplyRecipeRequest(BaseModel):
+    recipe: dict
+
+
+def _group_wise_median(df: pl.DataFrame, col: str, group_col: str) -> pl.DataFrame:
+    """Impute col in-place using per-group medians; global median fallback for unseen groups."""
+    global_median = df[col].median()
+    group_medians = (
+        df.group_by(group_col)
+        .agg(pl.col(col).median().alias("_group_median"))
+    )
+    df = df.join(group_medians, on=group_col, how="left")
+    df = df.with_columns(
+        pl.when(pl.col(col).is_null())
+        .then(pl.col("_group_median").fill_null(global_median))
+        .otherwise(pl.col(col))
+        .alias(col)
+    )
+    return df.drop("_group_median")
+
+
 def apply_actions_to_df(df: pl.DataFrame, actions: list[CleanAction]) -> tuple[pl.DataFrame, list[str]]:
     """Apply cleaning actions and return cleaned df with changelog."""
     changelog = []
@@ -838,26 +1635,110 @@ def apply_actions_to_df(df: pl.DataFrame, actions: list[CleanAction]) -> tuple[p
             if removed > 0:
                 changelog.append(f"Dropped {removed} rows with null '{action.column}'")
         elif action.action == "impute_mean" and action.column:
-            null_count = df[action.column].null_count()
+            col = action.column
+            if col not in df.columns:
+                continue
+            null_count = df[col].null_count()
             if null_count > 0:
-                mean_val = df[action.column].mean()
-                df = df.with_columns(pl.col(action.column).fill_null(mean_val))
-                changelog.append(f"Imputed {null_count} missing '{action.column}' with mean ({mean_val:.2f})")
+                mean_val = df[col].mean()
+                df = impute_with_flag(df, col, mean_val)
+                flag_col = f"{col}_was_missing"
+                if mean_val is not None:
+                    changelog.append(
+                        f"Imputed {null_count} missing '{col}' with mean ({mean_val:.2f}); "
+                        f"added '{flag_col}' flag"
+                    )
+                else:
+                    changelog.append(
+                        f"Flagged {null_count} missing '{col}' (all values null — no fill); "
+                        f"added '{flag_col}'"
+                    )
         elif action.action == "impute_median" and action.column:
-            null_count = df[action.column].null_count()
+            col = action.column
+            if col not in df.columns:
+                continue
+            null_count = df[col].null_count()
             if null_count > 0:
-                median_val = df[action.column].median()
-                df = df.with_columns(pl.col(action.column).fill_null(median_val))
-                changelog.append(f"Imputed {null_count} missing '{action.column}' with median ({median_val:.2f})")
+                median_val = df[col].median()
+                df = impute_with_flag(df, col, median_val)
+                flag_col = f"{col}_was_missing"
+                if median_val is not None:
+                    changelog.append(
+                        f"Imputed {null_count} missing '{col}' with median ({median_val:.2f}); "
+                        f"added '{flag_col}' flag"
+                    )
+                else:
+                    changelog.append(
+                        f"Flagged {null_count} missing '{col}' (all values null — no fill); "
+                        f"added '{flag_col}'"
+                    )
         elif action.action == "impute_mode" and action.column:
-            null_count = df[action.column].null_count()
+            col = action.column
+            if col not in df.columns:
+                continue
+            null_count = df[col].null_count()
             if null_count > 0:
-                mode_list = df[action.column].mode().to_list()
+                mode_list = df[col].mode().to_list()
                 mode_val = mode_list[0] if len(mode_list) > 0 else None
                 if mode_val is not None:
-                    df = df.with_columns(pl.col(action.column).fill_null(mode_val))
-                    changelog.append(f"Imputed {null_count} missing '{action.column}' with mode ('{mode_val}')")
-    
+                    df = impute_with_flag(df, col, mode_val)
+                    flag_col = f"{col}_was_missing"
+                    changelog.append(
+                        f"Imputed {null_count} missing '{col}' with mode ('{mode_val}'); "
+                        f"added '{flag_col}' flag"
+                    )
+        elif action.action == "impute_group_median" and action.column and action.group_col:
+            col = action.column
+            grp = action.group_col
+            if col in df.columns and grp in df.columns:
+                null_count = df[col].null_count()
+                if null_count > 0:
+                    flag_col = f"{col}_was_missing"
+                    df = df.with_columns(pl.col(col).is_null().cast(pl.Int8).alias(flag_col))
+                    df = _group_wise_median(df, col, grp)
+                    changelog.append(
+                        f"Imputed {null_count} missing '{col}' with group-wise median "
+                        f"(grouped by '{grp}'); added '{flag_col}' flag"
+                    )
+        elif action.action == "impute_from_col" and action.column and action.fill_col:
+            col = action.column
+            fill_col = action.fill_col
+            if col in df.columns and fill_col in df.columns:
+                null_count = df[col].null_count()
+                if null_count > 0:
+                    flag_col = f"{col}_was_missing"
+                    df = df.with_columns(pl.col(col).is_null().cast(pl.Int8).alias(flag_col))
+                    # Gap 7: discount transparency flag — created BEFORE filling
+                    creates_had_discount = (
+                        any(k in col.lower() for k in _DISCOUNT_COL_KWS)
+                        and any(k in fill_col.lower() for k in _ORIGINAL_COL_KWS)
+                    )
+                    if creates_had_discount:
+                        df = df.with_columns(
+                            pl.when(pl.col(col).is_null())
+                            .then(pl.lit(0, dtype=pl.Int8))
+                            .otherwise(pl.lit(1, dtype=pl.Int8))
+                            .alias("had_discount")
+                        )
+                    df = df.with_columns(
+                        pl.when(pl.col(col).is_null())
+                        .then(pl.col(fill_col))
+                        .otherwise(pl.col(col))
+                        .alias(col)
+                    )
+                    msg = (
+                        f"Imputed {null_count} missing '{col}' from '{fill_col}'; "
+                        f"added '{flag_col}' flag"
+                    )
+                    if creates_had_discount:
+                        msg += (
+                            "; added 'had_discount' transparency flag — "
+                            "A 'had_discount' column was created: "
+                            "models can use this signal explicitly "
+                            "(1 = item had a discounted price, 0 = no discount was applied)"
+                        )
+                    changelog.append(msg)
+
     return df, changelog
 
 @app.post("/preview-clean/{session_id}")
@@ -957,20 +1838,20 @@ def undo_cleaning(session_id: str):
         filename, _ = load_session(session_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     backup_path = SESSION_DIR / session_id / "backup.parquet"
-    
+
     if not backup_path.exists():
         raise HTTPException(status_code=404, detail="No backup available to restore")
-    
+
     try:
         # Restore from backup
         df = pl.read_parquet(backup_path)
         save_session(session_id, filename, df)
-        
+
         # Remove backup after restore
         backup_path.unlink()
-        
+
         return {
             "status": "ok",
             "message": "Data restored to original state",
@@ -980,6 +1861,412 @@ def undo_cleaning(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to restore backup: {str(e)}")
 
+
+# ── Gap 3: Train/test-aware cleaning endpoints ──────────────────────────────
+
+@app.post("/clean/fit/{session_id}")
+def fit_cleaning_recipe(session_id: str, request: FitRecipeRequest):
+    """
+    Split the dataset, compute all imputation statistics on the training split only,
+    and return a serializable recipe dict.
+
+    Strategy options: positional (default), random, time, stratified, group.
+    Apply the recipe to train and test separately via POST /clean/apply to prevent
+    data leakage — statistics are never recomputed on the test split.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    frac = max(0.5, min(0.95, request.train_fraction))
+    train_df, test_df = split_dataframe(
+        df,
+        strategy=request.split_strategy,
+        train_fraction=frac,
+        random_state=request.random_state,
+        time_col=request.time_col,
+        stratify_col=request.stratify_col,
+        group_col=request.group_col,
+    )
+
+    recipe = CleaningRecipe.fit(train_df, request.actions)
+    recipe["split_metadata"] = {
+        "strategy": request.split_strategy,
+        "random_state": request.random_state,
+        "time_col": request.time_col,
+        "group_col": request.group_col,
+        "stratify_col": request.stratify_col,
+    }
+
+    response: dict = {
+        "recipe": recipe,
+        "train_rows": len(train_df),
+        "test_rows": len(test_df),
+        "split_fraction": frac,
+        "split_strategy_used": request.split_strategy,
+        "note": (
+            "Statistics fitted on training rows only. "
+            "Call POST /clean/apply/{session_id} with this recipe on each split."
+        ),
+    }
+    if request.split_strategy == "group" and request.group_col:
+        response["train_groups"] = train_df[request.group_col].unique().to_list()
+        response["test_groups"]  = test_df[request.group_col].unique().to_list()
+    if request.split_strategy == "time":
+        response["sort_column"] = request.time_col
+    return response
+
+
+@app.post("/clean/apply/{session_id}")
+def apply_cleaning_recipe(session_id: str, request: ApplyRecipeRequest):
+    """
+    Apply a pre-fitted cleaning recipe (returned by /clean/fit) to the session
+    data without recomputing any statistics.  Safe to call on both the train
+    and test splits with the same recipe.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    recipe = request.recipe
+    if not isinstance(recipe, dict) or "steps" not in recipe:
+        raise HTTPException(status_code=422, detail="Invalid recipe: missing 'steps' key")
+
+    backup_path = SESSION_DIR / session_id / "backup.parquet"
+    try:
+        df.write_parquet(backup_path)
+    except Exception as e:
+        print(f"Warning: Could not save backup: {e}")
+
+    cleaned_df, changelog = CleaningRecipe.apply(df, recipe)
+    save_session(session_id, filename, cleaned_df)
+
+    try:
+        db.add_history(
+            session_id, "clean",
+            {"recipe_version": recipe.get("version"), "steps": len(recipe["steps"])},
+            f"Applied pre-fitted recipe ({len(recipe['steps'])} steps): {', '.join(changelog[:3])}"
+        )
+        db.update_project(session_id, row_count=len(cleaned_df), column_count=len(cleaned_df.columns))
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "row_count": len(cleaned_df),
+        "column_count": len(cleaned_df.columns),
+        "changes": changelog,
+        "recipe_version": recipe.get("version", 1),
+        "fitted_at": recipe.get("fitted_at"),
+        "can_undo": backup_path.exists(),
+    }
+
+
+# ── Gap 9: Schema contract / drift detection ─────────────────────────────────
+
+class ValidateSchemaRequest(BaseModel):
+    recipe: dict
+
+
+@app.post("/clean/validate-schema/{session_id}")
+def validate_schema(session_id: str, request: ValidateSchemaRequest):
+    """
+    Validate the current session data against the schema snapshot embedded in a
+    CleaningRecipe (produced by POST /clean/fit).
+
+    Returns violations in four categories:
+    - missing_column (high): column present at training is absent now
+    - dtype_changed (high): column dtype no longer matches training
+    - new_categories (medium): unseen categorical values detected
+    - range_breach / distribution_shift (medium): numeric values outside training bounds
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    recipe = request.recipe
+    snapshot = recipe.get("schema_snapshot")
+    if not snapshot:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Recipe does not contain a 'schema_snapshot'. "
+                "Re-fit the recipe via POST /clean/fit to include one."
+            ),
+        )
+
+    violations = SchemaSnapshot.validate(df, snapshot)
+    high = [v for v in violations if v.get("severity") == "high"]
+    medium = [v for v in violations if v.get("severity") == "medium"]
+
+    return {
+        "session_id": session_id,
+        "schema_ok": len(violations) == 0,
+        "violation_count": len(violations),
+        "high_severity": len(high),
+        "medium_severity": len(medium),
+        "violations": violations,
+        "note": (
+            "High-severity violations will likely cause the recipe to fail or produce "
+            "wrong results. Medium-severity issues should be investigated before "
+            "deploying the model."
+        ),
+    }
+
+
+# ── Gap 13: Target-conditional missingness endpoint ─────────────────────────
+
+class ClassifyMissingnessRequest(BaseModel):
+    target: Optional[str] = None
+
+
+@app.post("/clean/classify-missingness/{session_id}")
+def classify_missingness_endpoint(session_id: str, request: ClassifyMissingnessRequest):
+    """
+    Classify the missingness mechanism for every column that has null values.
+
+    Returns MCAR / MAR / MNAR / TARGET_LEAKAGE per column.
+    Pass target= to enable the target-conditional check (Gap 13): if missingness
+    correlates with the target column (|r| > 0.3), the column is flagged as
+    TARGET_LEAKAGE — the most actionable classification, overriding MNAR/MAR/MCAR.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.target and request.target not in df.columns:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Target column '{request.target}' not found in dataset.",
+        )
+
+    advisor = DataQualityAdvisor()
+    classifications: dict[str, dict] = {}
+    for col in df.columns:
+        if df[col].null_count() > 0:
+            mtype, reason = advisor.classify_missingness(col, df, request.target)
+            classifications[col] = {"type": mtype, "reason": reason}
+
+    return {
+        "session_id": session_id,
+        "target": request.target,
+        "column_count": len(classifications),
+        "classifications": classifications,
+    }
+
+
+# ── Gap 5: Target leakage detection ─────────────────────────────────────────
+
+_LEAKAGE_KEYWORDS = [
+    "total", "lifetime", "all_time", "alltime", "cumulative",
+    "running", "ytd", "ever", "aggregate", "overall",
+    "final", "end_", "last_", "trailing",
+]
+
+# Gap 7: keywords for transparent discount-imputation detection
+_DISCOUNT_COL_KWS = {"discount", "sale", "promo", "reduced", "deal", "actual_price"}
+_ORIGINAL_COL_KWS = {"original", "list", "mrp", "regular", "full", "base", "msrp"}
+
+
+def detect_temporal_leakage(
+    df: pl.DataFrame,
+    target: str,
+    time_col: Optional[str] = None,
+) -> list[dict]:
+    """Heuristic scan for features that are temporally leaky relative to *target*.
+
+    Two signals are checked independently and combined:
+    1. Keyword heuristic — column names containing aggregate/lifetime keywords.
+    2. Near-perfect correlation with the target (|r| > 0.95) — likely a proxy.
+    """
+    _NUMERIC = (pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8)
+    target_is_numeric = target in df.columns and df[target].dtype in _NUMERIC
+
+    warnings: list[dict] = []
+
+    for col in df.columns:
+        if col in (target, time_col):
+            continue
+
+        col_lower = col.lower()
+        reasons: list[str] = []
+
+        # Signal 1: keyword match
+        matched_kw = next((kw for kw in _LEAKAGE_KEYWORDS if kw in col_lower), None)
+        if matched_kw:
+            reasons.append(
+                f"Column name contains temporal-aggregate keyword '{matched_kw}'. "
+                f"This value may not exist at prediction time."
+            )
+
+        # Signal 2: near-perfect correlation with target
+        if target_is_numeric and df[col].dtype in _NUMERIC:
+            try:
+                pdf = df[[col, target]].drop_nulls().to_pandas()
+                r = pdf[col].corr(pdf[target])
+                if pd.notna(r) and abs(r) > 0.95:
+                    reasons.append(
+                        f"Suspiciously high correlation with target '{target}' "
+                        f"(r={r:+.2f}). May be derived from or identical to the target."
+                    )
+            except Exception:
+                pass
+
+        if reasons:
+            warnings.append({
+                "column": col,
+                "leakage_risk": "high" if len(reasons) > 1 else "medium",
+                "reasons": reasons,
+                "suggested_action": "drop_column",
+            })
+
+    return warnings
+
+
+class DetectLeakageRequest(BaseModel):
+    target: str
+    time_col: Optional[str] = None
+
+
+@app.post("/clean/detect-leakage/{session_id}")
+def detect_leakage(session_id: str, request: DetectLeakageRequest):
+    """
+    Scan the dataset for features that are likely to cause target leakage.
+
+    Two heuristics are applied:
+    - Column names containing temporal-aggregate keywords (total, lifetime, ytd, …)
+    - Features that correlate ≥ 0.95 with the target (proxy / derived columns)
+
+    Returns warnings with suggested actions. No data is modified.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.target not in df.columns:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Target column '{request.target}' not found in dataset",
+        )
+    if request.time_col and request.time_col not in df.columns:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Time column '{request.time_col}' not found in dataset",
+        )
+
+    leakage_warnings = detect_temporal_leakage(df, request.target, request.time_col)
+
+    return {
+        "session_id": session_id,
+        "target": request.target,
+        "time_col": request.time_col,
+        "warning_count": len(leakage_warnings),
+        "leakage_warnings": leakage_warnings,
+        "high_risk_columns": [w["column"] for w in leakage_warnings if w["leakage_risk"] == "high"],
+        "note": (
+            "Heuristic scan only — review each warning manually before dropping. "
+            "Pass suggested_action='drop_column' items to /clean/{session_id} to remove them."
+        ),
+    }
+
+
+# ── Gap 8: Near-duplicate detection (fuzzy matching) ─────────────────────────
+
+def detect_near_duplicates(
+    df: pl.DataFrame, col: str, threshold: int = 90
+) -> list[dict]:
+    """Pairwise fuzzy similarity on unique string values in *col*.
+
+    Uses rapidfuzz if available, falls back to thefuzz, then difflib.SequenceMatcher.
+    Caps at 500 unique values (O(n²) — ~125k comparisons) and returns at most 100 pairs.
+    """
+    try:
+        from rapidfuzz import fuzz as _fuzz
+        _ratio = lambda a, b: _fuzz.ratio(a, b)
+    except ImportError:
+        try:
+            from thefuzz import fuzz as _fuzz  # type: ignore
+            _ratio = lambda a, b: _fuzz.ratio(a, b)
+        except ImportError:
+            import difflib
+            _ratio = lambda a, b: difflib.SequenceMatcher(None, a, b).ratio() * 100
+
+    values = df[col].drop_nulls().unique().to_list()
+    if len(values) > 500:
+        values = values[:500]
+
+    near_dupes: list[dict] = []
+    for i in range(len(values)):
+        a = str(values[i]).lower()
+        for j in range(i + 1, len(values)):
+            b = str(values[j]).lower()
+            score = _ratio(a, b)
+            if score >= threshold:
+                near_dupes.append({
+                    "value_a": values[i],
+                    "value_b": values[j],
+                    "similarity": round(float(score), 1),
+                })
+
+    near_dupes.sort(key=lambda x: x["similarity"], reverse=True)
+    return near_dupes[:100]
+
+
+class NearDuplicateRequest(BaseModel):
+    column: str
+    threshold: int = 90  # 0-100; lower = more pairs returned
+
+
+@app.post("/clean/detect-near-duplicates/{session_id}")
+def detect_near_duplicates_endpoint(session_id: str, request: NearDuplicateRequest):
+    """
+    Run pairwise fuzzy similarity on a string column's unique values and return
+    pairs whose similarity score meets the threshold.
+
+    Uses rapidfuzz > thefuzz > difflib (whichever is installed).
+    Capped at 500 unique values for performance; returns top-100 pairs.
+    """
+    try:
+        filename, df = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.column not in df.columns:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Column '{request.column}' not found in dataset",
+        )
+
+    threshold = max(1, min(100, request.threshold))
+
+    try:
+        pairs = detect_near_duplicates(df, request.column, threshold)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Fuzzy match failed: {exc}")
+
+    unique_count = df[request.column].drop_nulls().n_unique()
+    capped = unique_count > 500
+
+    return {
+        "session_id": session_id,
+        "column": request.column,
+        "threshold": threshold,
+        "unique_values_scanned": min(unique_count, 500),
+        "unique_values_total": unique_count,
+        "capped_at_500": capped,
+        "pair_count": len(pairs),
+        "near_duplicate_pairs": pairs,
+        "note": (
+            "Results are capped at 100 pairs sorted by similarity (descending). "
+            "Values are compared lower-cased."
+            + (" WARNING: Only the first 500 unique values were scanned." if capped else "")
+        ),
+    }
 
 
 class EDAColumnStats(BaseModel):

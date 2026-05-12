@@ -32,7 +32,8 @@
       "Bash(curl -s http://127.0.0.1:8000/)",
       "Bash(curl -s http://localhost:8000/)",
       "Bash(taskkill /f /im python.exe)",
-      "Bash(taskkill /f /im uvicorn.exe)"
+      "Bash(taskkill /f /im uvicorn.exe)",
+      "Bash(echo \"Server starting in background, PID: $!\")"
     ]
   }
 }

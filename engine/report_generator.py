@@ -1393,10 +1393,10 @@ class PDFReportGenerator:
 
         text = el.getPlainText().strip()
 
-        # Strip lone single-digit Paragraphs — artifact from currency parse failures
-        # (\\mathbb{1} slipping through XML parser, or empty list-item numbers)
-        if re.match(r'^\s*\d\s*$', text):
-            log.warning("BLOCKED lone-digit element: '%s'", text)
+        # Block lone-digit AND short all-numeric strings (e.g. "10,", "1.", "42")
+        # These are number-formatting artifacts, never meaningful standalone content.
+        if re.match(r'^\s*[\d,\.]+\s*$', text) and len(text.strip()) <= 10:
+            log.warning("BLOCKED numeric artifact element: '%s'", text)
             return False
 
         if len(text) < 80:                     # short texts are fine
@@ -1499,12 +1499,12 @@ class PDFReportGenerator:
         import re as _re
 
         def _is_lone_digit(el) -> bool:
-            """Return True if el is a Paragraph whose plain text is a single digit."""
+            """Return True if el is a Paragraph whose plain text is a lone numeric artifact."""
             if not isinstance(el, Paragraph):
                 return False
             try:
                 txt = el.getPlainText().strip()
-                return bool(_re.match(r'^\d$', txt))
+                return bool(_re.match(r'^[\d,\.]+$', txt) and len(txt) <= 10)
             except Exception:
                 return False
 
@@ -1791,6 +1791,14 @@ class PDFReportGenerator:
         """Coerce arbitrary KPI payload shapes into a flat {label: display_string}."""
         if not isinstance(kpis, dict):
             return {}
+        _CURRENCY_SANITIZE = [
+            (r'\mathbb{1}', '₹'), ('\\mathbb{1}', '₹'), ('\mathbb{1}', '₹'),
+            ('£', '₹'), ('¥', '₹'),
+        ]
+        def _sanitize(s: str) -> str:
+            for bad, good in _CURRENCY_SANITIZE:
+                s = s.replace(bad, good)
+            return s
         out = {}
         for raw_key, raw_val in kpis.items():
             if isinstance(raw_val, dict):
@@ -1806,11 +1814,10 @@ class PDFReportGenerator:
                 label = str(raw_key).replace("_", " ").title()
             else:
                 display = str(raw_val)
-                # Always humanize snake_case keys regardless of case
                 label = str(raw_key).replace("_", " ").title()
             if display.startswith("{") and display.endswith("}"):
                 display = "—"
-            out[label] = display
+            out[label] = _sanitize(display)
         return out
 
     def _kpi_table(self, kpis: dict) -> Table:
@@ -2488,30 +2495,56 @@ class UnifiedReportGenerator(PDFReportGenerator):
             data = plotly_data.get('data', [])
             if not data:
                 data = [plotly_data] if 'type' in plotly_data else []
-            
+
             if not data:
                 log.warning("[FORCE MATPLOTLIB] No data found")
                 return None
-            
+
             trace = data[0] if isinstance(data, list) else data
-            x = trace.get('x', [])
-            y = trace.get('y', [])
+            # Pie charts store data in 'labels'/'values', not 'x'/'y'
+            x = trace.get('x', trace.get('labels', []))
+            y = trace.get('y', trace.get('values', []))
+            z = trace.get('z', [])
             chart_type = trace.get('type', 'bar')
-            
-            if not x or not y:
-                log.warning("[FORCE MATPLOTLIB] Missing x or y data")
+            orientation = trace.get('orientation', 'v')
+
+            # For histograms and heatmaps, x or y alone is valid
+            if not x and not y and not z:
+                log.warning("[FORCE MATPLOTLIB] No x/y/z data found")
                 return None
-            
+
             # Create figure
             fig, ax = plt.subplots(figsize=(10, 6))
-            
+
             # Render based on type
             if chart_type == 'pie':
-                ax.pie(y, labels=x, autopct='%1.1f%%', startangle=90)
+                ax.pie(y or x, labels=x if y else None, autopct='%1.1f%%', startangle=90)
                 ax.axis('equal')
-            elif chart_type in ['scatter', 'line']:
+            elif chart_type == 'histogram':
+                vals = x if x else y
+                ax.hist(vals, bins=min(30, max(5, len(vals) // 10)), color='#6366f1', edgecolor='white')
+            elif chart_type == 'heatmap':
+                if z:
+                    import numpy as np
+                    z_arr = np.array(z, dtype=float)
+                    im = ax.imshow(z_arr, aspect='auto', cmap='viridis')
+                    if x:
+                        ax.set_xticks(range(len(x)))
+                        ax.set_xticklabels([str(v) for v in x], rotation=45, ha='right', fontsize=7)
+                    if y:
+                        ax.set_yticks(range(len(y)))
+                        ax.set_yticklabels([str(v) for v in y], fontsize=7)
+                    fig.colorbar(im, ax=ax, fraction=0.046)
+                else:
+                    ax.text(0.5, 0.5, 'Heatmap data unavailable', ha='center', va='center',
+                            transform=ax.transAxes)
+            elif chart_type in ['scatter', 'line', 'scattergl']:
                 ax.plot(x, y, marker='o', linewidth=2, color='#6366f1')
-            else:  # Default to bar
+            elif chart_type == 'bar' and orientation == 'h':
+                # Horizontal bar: x=values, y=labels
+                ax.barh(y, x, color='#6366f1')
+                ax.set_xlabel('')
+            else:  # Default vertical bar
                 ax.bar(x, y, color='#6366f1')
             
             # Add title
@@ -2698,12 +2731,24 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
                         table_data = [[cell.strip() for cell in row] for row in table_data]
                         if table_data:
-                            t = Table(table_data, hAlign='LEFT')
+                            from xml.sax.saxutils import escape as _xe_cell
+                            _hdr_ps = ParagraphStyle('RegHdr', fontName='DejaVuSans', fontSize=9,
+                                                     textColor=colors.whitesmoke, alignment=TA_CENTER)
+                            _dat_ps = ParagraphStyle('RegDat', fontName='DejaVuSans', fontSize=9,
+                                                     textColor=colors.HexColor('#1e293b'), alignment=TA_CENTER)
+                            def _cell_para(text, is_hdr):
+                                safe = re.sub(r'(₹[^\s<]*)', r'<font name="DejaVuSans">\1</font>',
+                                              _xe_cell(str(text)))
+                                return Paragraph(safe, _hdr_ps if is_hdr else _dat_ps)
+                            para_table = [[_cell_para(c, r == 0) for c in row]
+                                          for r, row in enumerate(table_data)]
+                            t = Table(para_table, hAlign='LEFT')
                             t.setStyle(TableStyle([
                                 ('BACKGROUND', (0,0), (-1,0), colors.HexColor(self.config["brand_dark"])),
-                                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                                ('FONTNAME', (0,1), (-1,-1), 'DejaVuSans'),  # Fix: Ensure ₹ symbol renders correctly
-                                ('GRID', (0,0), (-1,-1), 1, colors.HexColor(C.RULE_GREY))
+                                ('BACKGROUND', (0,1), (-1,-1), colors.HexColor(self.config["brand_light"])),
+                                ('GRID', (0,0), (-1,-1), 1, colors.HexColor(C.RULE_GREY)),
+                                ('TOPPADDING',    (0,0), (-1,-1), 6),
+                                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
                             ]))
                             elements.append(t)
                 else:
@@ -2840,14 +2885,17 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     else:
                         _fig = None
                     if _fig is not None:
-                        self._add_chart_section(
+                        _ok = self._add_chart_section(
                             elements, _fig,
                             chart_title,
                             chart.get("insight", "Segmented data analysis."),
                         )
-                        valid_charts += 1
-                        log.info(f"[Chart {i+1}] ✓ Direct Plotly→ReportLab pipeline succeeded")
-                        continue
+                        if _ok:
+                            valid_charts += 1
+                            log.info(f"[Chart {i+1}] ✓ Direct Plotly→ReportLab pipeline succeeded")
+                            continue
+                        else:
+                            log.warning(f"[Chart {i+1}] kaleido returned None — falling through to matplotlib fallback")
                     else:
                         print(f"[PDF] Could not construct Figure for: {chart_title}")
                 except Exception as _e:
@@ -2916,16 +2964,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     log.error(f"[Chart {i+1}] ✗ ChartGenerator fallback failed: {e}")
             
             err = chart.get("error")
-            
-            if err:
-                # Suppress raw data dumps - only show error if it's not a data dump
-                if "{" not in str(err) and "[" not in str(err):
-                    elements.append(Paragraph(
-                        f"⚠ {_xe_title(str(chart_title))}: {_xe_title(str(err))}",
-                        self.S["Fallback"]))
-                    elements.append(Spacer(1, 20))
-            elif img_path:
-                # Successfully got an image (from base64, Plotly, or ChartGenerator)
+
+            if img_path:
+                # A rendered image was obtained (base64, Plotly→kaleido, or matplotlib).
+                # Always prefer this over any error string — the image is what matters.
                 self.embed_chart_safely(
                     elements,
                     img_path,
@@ -2935,7 +2977,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 valid_charts += 1
                 log.info(f"[Chart {i+1}] ✓ Successfully added to PDF")
             else:
-                # FIX 1: last-resort — render a placeholder chart from chart spec dict
+                # No rendered image yet — try last-resort spec-based matplotlib, then
+                # keyword-map to a pre-generated ChartGenerator image.
                 _spec = {
                     'chart_type': chart.get('type', 'bar'),
                     'labels':     chart.get('x', chart.get('labels', [])),
@@ -2956,7 +2999,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     )
                     valid_charts += 1
                 else:
-                    # ── Last resort: keyword-map chart title to pre-generated ChartGenerator image ──
+                    # ── Keyword-map chart title to pre-generated ChartGenerator image ──
                     _tl = chart_title.lower()
                     _cg_key = None
                     if any(k in _tl for k in ("category", "product", "segment", "pareto")):
@@ -2967,7 +3010,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         _cg_key = "distribution"
                     elif any(k in _tl for k in ("correlation", "heatmap")):
                         _cg_key = "correlation"
-                    elif any(k in _tl for k in ("order", "count", "volume", "records")):
+                    elif any(k in _tl for k in ("order", "count", "volume", "records", "payment", "method")):
                         _cg_key = "order_count"
 
                     _cg_img = _cg_chart_paths.get(_cg_key) if _cg_key else None
@@ -2979,12 +3022,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         )
                         valid_charts += 1
                     else:
+                        # All rendering paths exhausted — show error if meaningful, else skip
                         log.error(f"[Chart {i+1}] ✗ All rendering methods failed for: {chart_title}")
-                        elements.append(Paragraph(chart_title, self.S["ChartTitle"]))
-                        elements.append(Paragraph(
-                            f"📊 {chart_title} — visualization available in dashboard",
-                            self.S["Fallback"]
-                        ))
+                        if err and "{" not in str(err) and "[" not in str(err):
+                            elements.append(Paragraph(
+                                f"⚠ {_xe_title(str(chart_title))}: {_xe_title(str(err))}",
+                                self.S["Fallback"]))
+                        else:
+                            elements.append(Paragraph(chart_title, self.S["ChartTitle"]))
+                            elements.append(Paragraph(
+                                f"📊 {chart_title} — visualization available in dashboard",
+                                self.S["Fallback"]
+                            ))
                         elements.append(Spacer(1, 20))
         
         log.info(f"[Charts] Successfully rendered {valid_charts}/{total_charts} charts")

@@ -32,6 +32,13 @@ interface IssueItem {
   description: string;
   count: number;
   percentage: number;
+  missingness_type?: string;
+  missingness_reason?: string;
+  columns_used?: string[];
+  suggested_action?: string;
+  alternatives?: string[];
+  group_col?: string;
+  fill_col?: string;
 }
 interface HealthCheckData {
   session_id: string;
@@ -59,9 +66,12 @@ interface RawDataResponse {
 interface CleaningAction {
   action: string;
   column?: string;
+  group_col?: string;
+  fill_col?: string;
   enabled: boolean;
   label: string;
   recommended: boolean;
+  missingness_type?: string;
 }
 interface PreviewData {
   before_rows: number;
@@ -123,6 +133,25 @@ export default function HealthCheckPage() {
     }
   };
 
+  // ----- Helper: human-readable label for a cleaning action -----
+  const buildActionLabel = (action: string, issue: IssueItem): string => {
+    const col = issue.column;
+    const cnt = issue.count.toLocaleString();
+    const pct = issue.percentage.toFixed(1);
+    switch (action) {
+      case "drop_column":        return `Drop column "${col}" (${pct}% missing)`;
+      case "drop_nulls":         return `Remove ${cnt} rows where "${col}" is missing`;
+      case "impute_median":      return `Fill ${cnt} missing in "${col}" with median`;
+      case "impute_mean":        return `Fill ${cnt} missing in "${col}" with mean`;
+      case "impute_mode":        return `Fill ${cnt} missing in "${col}" with most common value`;
+      case "impute_group_median":
+        return `Fill ${cnt} missing in "${col}" using group median by "${issue.group_col}"`;
+      case "impute_from_col":
+        return `Fill ${cnt} missing in "${col}" from "${issue.fill_col}"`;
+      default:                   return `Fix "${col}" (${cnt} missing)`;
+    }
+  };
+
   // ----- API: open clean modal (build action list from issues) -----
   const openCleanModal = () => {
     if (!healthData) return;
@@ -137,15 +166,20 @@ export default function HealthCheckPage() {
     }
     healthData.issues.forEach(issue => {
       if (issue.issue_type === "missing") {
-        const isHighMissing = issue.percentage > 70;
+        // Use the backend's smart suggestion; fall back to the old heuristic if absent
+        const action = issue.suggested_action ?? (issue.percentage > 70 ? "drop_column" : "impute_median");
+        const isDestructive = action === "drop_column" || action === "drop_nulls";
+        const isLeakage = issue.missingness_type === "TARGET_LEAKAGE";
         actions.push({
-          action: isHighMissing ? "drop_column" : "impute_median",
+          action,
           column: issue.column,
-          enabled: !isHighMissing,
-          label: isHighMissing
-            ? `Drop column "${issue.column}" (${issue.percentage.toFixed(1)}% missing)`
-            : `Fill ${issue.count.toLocaleString()} missing values in "${issue.column}" with the median`,
-          recommended: !isHighMissing,
+          group_col: issue.group_col,
+          fill_col: issue.fill_col,
+          // Enable destructive actions for leakage (critical); disable otherwise so user opts in
+          enabled: isLeakage ? true : !isDestructive,
+          label: buildActionLabel(action, issue),
+          recommended: !isDestructive || isLeakage,
+          missingness_type: issue.missingness_type,
         });
       } else if (issue.issue_type === "outlier") {
         actions.push({
@@ -169,7 +203,7 @@ export default function HealthCheckPage() {
     try {
       const enabledActions = cleaningActions
         .filter(a => a.enabled)
-        .map(a => ({ action: a.action, column: a.column, enabled: true }));
+        .map(a => ({ action: a.action, column: a.column, group_col: a.group_col, fill_col: a.fill_col, enabled: true }));
       const response = await fetch(`${API_BASE}/preview-clean/${healthData.session_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -191,7 +225,7 @@ export default function HealthCheckPage() {
     try {
       const enabledActions = cleaningActions
         .filter(a => a.enabled)
-        .map(a => ({ action: a.action, column: a.column, enabled: true }));
+        .map(a => ({ action: a.action, column: a.column, group_col: a.group_col, fill_col: a.fill_col, enabled: true }));
       const response = await fetch(`${API_BASE}/clean/${healthData.session_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -521,11 +555,24 @@ export default function HealthCheckPage() {
                       <Checkbox checked={action.enabled} />
                       <div className="min-w-0 flex-1">
                         <p className="text-[13.5px] font-medium text-zinc-900">{action.label}</p>
-                        {action.recommended && (
-                          <span className="mt-0.5 inline-block text-[11px] font-medium text-emerald-700">
-                            Recommended
-                          </span>
-                        )}
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          {action.recommended && (
+                            <span className="text-[11px] font-medium text-emerald-700">
+                              Recommended
+                            </span>
+                          )}
+                          {action.missingness_type && action.missingness_type !== "MCAR" && (
+                            <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${
+                              action.missingness_type === "TARGET_LEAKAGE"
+                                ? "bg-red-50 text-red-700 border-red-200"
+                                : action.missingness_type === "MNAR"
+                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                : "bg-violet-50 text-violet-700 border-violet-200"
+                            }`}>
+                              {action.missingness_type === "TARGET_LEAKAGE" ? "Leakage risk" : action.missingness_type}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </button>
                   ))}
@@ -662,8 +709,17 @@ function IssueRow({ issue, divider }: { issue: IssueItem; divider: boolean }) {
     medium: { dot: "bg-amber-500", pill: "bg-amber-50 text-amber-700 border-amber-200", label: "Medium" },
     low: { dot: "bg-sky-500", pill: "bg-sky-50 text-sky-700 border-sky-200", label: "Low" },
   };
+  const missingnessBadge: Record<string, { pill: string; label: string }> = {
+    MCAR: { pill: "bg-sky-50 text-sky-700 border-sky-200", label: "MCAR" },
+    MAR: { pill: "bg-violet-50 text-violet-700 border-violet-200", label: "MAR" },
+    MNAR: { pill: "bg-amber-50 text-amber-700 border-amber-200", label: "MNAR" },
+    TARGET_LEAKAGE: { pill: "bg-red-50 text-red-700 border-red-200", label: "Leakage risk" },
+  };
   const sev = sevStyle[issue.severity] ?? sevStyle.low;
-  const columnLabel = issue.column === "_all_" ? "All columns" : issue.column;
+  const mb = issue.missingness_type ? missingnessBadge[issue.missingness_type] : null;
+  const columnLabel = issue.column === "_all_" || issue.column === "_multivariate_"
+    ? issue.column === "_all_" ? "All columns" : "Multiple columns"
+    : issue.column;
 
   return (
     <div className={`flex items-start gap-4 px-5 py-4 ${divider ? "border-t border-zinc-100" : ""}`}>
@@ -674,11 +730,19 @@ function IssueRow({ issue, divider }: { issue: IssueItem; divider: boolean }) {
           <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${sev.pill}`}>
             {sev.label}
           </span>
+          {mb && (
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${mb.pill}`}>
+              {mb.label}
+            </span>
+          )}
           <span className="text-[12px] text-zinc-500">
             {issue.issue_type.replace(/_/g, " ")}
           </span>
         </div>
         <p className="mt-1 text-[13px] leading-relaxed text-zinc-600">{issue.description}</p>
+        {issue.missingness_reason && issue.issue_type === "missing" && (
+          <p className="mt-0.5 text-[12px] italic text-zinc-400">{issue.missingness_reason}</p>
+        )}
       </div>
       <div className="shrink-0 text-right">
         <div className="text-[16px] font-semibold tabular-nums text-zinc-900">

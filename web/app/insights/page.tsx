@@ -177,6 +177,12 @@ export default function InsightsPage() {
             setExportProgress(15);
             setExportStatus("Loading chart engine…");
 
+            // Switch to charts tab so Plotly elements are mounted in the DOM.
+            // Without this, Plotly.toImage returns "Element not found" and charts
+            // fall back to the server-side renderer.
+            setActiveTab("charts");
+            await new Promise(resolve => setTimeout(resolve, 700));
+
             let Plotly = (window as any).Plotly;
             if (!Plotly) {
                 try {
