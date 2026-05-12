@@ -393,21 +393,35 @@ class SanityChecker:
     
     def _check_magnitude(self, ins: BusinessInsight, metrics: dict) -> bool:
         """Flag if any ₹ value in the insight is >10× or <0.01× the total revenue."""
-        # Skip magnitude check for descriptive/distribution insights —
-        # they describe column statistics, not revenue claims
         NON_MONETARY_RULES = {
             "descriptive_distribution", "descriptive_balance", "descriptive_volume",
             "skewed_distribution", "outlier_detection", "correlation_matrix",
         }
+        # CLV reports per-customer future value (~₹hundreds), not aggregate revenue.
+        # Root-cause reports monthly deltas, which are legitimately smaller than total.
+        MAGNITUDE_EXEMPT_TYPES = {
+            "clv_estimate",
+            "root_cause_analysis",
+        }
         rule_type = getattr(ins, "rule_type", "")
-        if rule_type in NON_MONETARY_RULES:
+        if rule_type in NON_MONETARY_RULES or rule_type in MAGNITUDE_EXEMPT_TYPES:
             return False
 
         import re
         total_rev = metrics.get("total_revenue", ComputedMetric("", 0, "", "")).value
         if total_rev == 0:
             return False
-        
+
+        # RFM: segment revenues should sum to ~total revenue.
+        # Checking individual segments against total would always flag (each segment < total).
+        if rule_type == "rfm_segmentation":
+            cd = getattr(ins, "chart_data", None)
+            if isinstance(cd, dict) and "segments" in cd:
+                segment_total = sum(s.get("revenue", 0) for s in cd["segments"])
+                if segment_total > 0 and abs(segment_total - total_rev) / total_rev > 0.05:
+                    return True
+            return False
+
         # Extract all currency values from description
         amounts = re.findall(r'₹([\d,.]+)\s*(Cr|L|K)?', ins.description)
         for amount_str, unit in amounts:
@@ -419,7 +433,7 @@ class SanityChecker:
                     val *= 1_00_000
                 elif unit == "K":
                     val *= 1_000
-                
+
                 ratio = val / total_rev
                 if ratio > 10 or (ratio < 0.001 and val > 0):
                     return True
@@ -1337,7 +1351,41 @@ class DecisionIntelligenceSynthesizer:
         already_included = any(getattr(i, 'rule_type', '') == 'temporal_peaks' for i in compressed)
         if temporal_insights and not already_included:
             compressed.insert(2, temporal_insights[0])
-        return compressed[:4]
+
+        # Priority rules: must survive the cap unconditionally.
+        # These are never in any topic bucket, so they reach here via universal passthrough
+        # or the loop below — but compressed[:N] would cut them when other rules fill slots 1-8.
+        PRIORITY_RULE_TYPES = {
+            "rfm_segmentation", "cohort_retention", "clv_estimate",
+            "seasonal_forecast", "root_cause_analysis",
+        }
+
+        # Score floor: ensure priority insights rank high if ever placed inside a topic bucket.
+        MINIMUM_SCORE_FLOOR = 0.80
+        for ins in insights:
+            if ins.rule_type in PRIORITY_RULE_TYPES:
+                ins.score = max(ins.score, MINIMUM_SCORE_FLOOR)
+
+        # Partition compressed: priority items are exempt from the non-priority cap.
+        priority_compressed = [c for c in compressed if getattr(c, "rule_type", "") in PRIORITY_RULE_TYPES]
+        non_priority_compressed = [c for c in compressed if getattr(c, "rule_type", "") not in PRIORITY_RULE_TYPES]
+
+        # Force-add any priority insight from the input list that never entered compressed.
+        seen_priority_types = {getattr(c, "rule_type", "") for c in priority_compressed}
+        for ins in insights:
+            if ins.rule_type in PRIORITY_RULE_TYPES and ins.rule_type not in seen_priority_types:
+                priority_compressed.append(ins)
+                seen_priority_types.add(ins.rule_type)
+
+        # Cap non-priority at (8 − priority count) so priority items are never squeezed out.
+        non_priority_cap = max(0, 8 - len(priority_compressed))
+        final_compressed = non_priority_compressed[:non_priority_cap] + priority_compressed
+
+        print(f"\n[SYNTHESIZER] Selected {len(final_compressed)} insights before PDF:")
+        for _ins in final_compressed:
+            print(f"  [{getattr(_ins, 'rule_type', '?')}] {getattr(_ins, 'title', '?')[:70]}")
+
+        return final_compressed
 
 # ============================================================
 
@@ -1662,6 +1710,15 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_category_satisfaction_cross, "category_satisfaction", df, profile))
         all_insights.extend(safe_rule_call(self._rule_customer_concentration, "customer_concentration", df, profile))
 
+        # ── NEW: Customer Intelligence & Forecasting Rules ───────────────
+        all_insights.extend(safe_rule_call(self._rule_rfm_segmentation, "rfm_segmentation", df, profile))
+        all_insights.extend(safe_rule_call(self._rule_cohort_retention, "cohort_retention", df, profile))
+        all_insights.extend(safe_rule_call(self._rule_clv_estimate, "clv_estimate", df, profile))
+        all_insights.extend(safe_rule_call(self._rule_seasonal_forecast, "seasonal_forecast", df, profile))
+
+        # Root-cause must run last — it reads all_insights to attach hypotheses to parent findings
+        all_insights.extend(safe_rule_call(self._rule_root_cause_analysis, "root_cause_analysis", df, profile, all_insights))
+
         # ── Post-Processing ──────────────────────────────────────────────
         all_insights = self._deduplicate(all_insights)
         all_insights = self._inject_contradictions(all_insights)
@@ -1672,8 +1729,20 @@ class BusinessRuleEngine:
         # ── ✅ P0 FIX: Ensure minimum 3 insights ─────────────────────────
         all_insights = self._ensure_minimum_insights(all_insights, df, profile)
 
-        print(f"\n[INSIGHT ENGINE] FINAL: {len(all_insights)} insights\n")
-        return all_insights[:8], warnings  # top 8, ranked
+        # Protect priority rules from the [:8] cap — they MUST reach the synthesizer.
+        # ROI ranking places cohort/CLV/seasonal lower than cross-dimensional rules,
+        # so a naive [:8] slice silently drops them before synthesize() ever sees them.
+        _PRIORITY_TYPES = {
+            "rfm_segmentation", "cohort_retention", "clv_estimate",
+            "seasonal_forecast", "root_cause_analysis",
+        }
+        _priority = [i for i in all_insights if getattr(i, "rule_type", "") in _PRIORITY_TYPES]
+        _non_priority = [i for i in all_insights if getattr(i, "rule_type", "") not in _PRIORITY_TYPES]
+        _result = _non_priority[:max(0, 8 - len(_priority))] + _priority
+        print(f"\n[INSIGHT ENGINE] FINAL: {len(all_insights)} raw insights → "
+              f"{len(_result)} sent to synthesizer "
+              f"({len(_priority)} priority rules guaranteed)\n")
+        return _result, warnings
 
     def evaluate(self, df, profile, metrics) -> tuple[list[BusinessInsight], list[str]]:
         """Backwards compatibility wrapper for run_insight_engine."""
@@ -3074,13 +3143,10 @@ class BusinessRuleEngine:
             try:
                 log.info(f"[cross_dimensional] Trying Category × PaymentMethod pattern...")
                 
-                # Create contingency table
-                ct = pd.crosstab(
-                    pdf[cat_col], 
-                    pdf[payment_col],
-                    values=pdf[rev_col],
-                    aggfunc='sum'
-                ).fillna(0)
+                # Create contingency table — MUST use transaction counts, not revenue amounts.
+                # Revenue-weighted tables produce astronomically large chi² values (e.g. 53,000)
+                # because each cell value can be millions of rupees instead of 0–200 transactions.
+                ct = pd.crosstab(pdf[cat_col], pdf[payment_col]).fillna(0)
                 
                 if len(ct) >= 2 and len(ct.columns) >= 2:
                     # Calculate variance across cells (normalized)
@@ -3088,15 +3154,42 @@ class BusinessRuleEngine:
                     overall_mean = ct.values.mean()
                     overall_std = ct.values.std()
                     variance_coef = overall_std / overall_mean if overall_mean > 0 else 0
-                    
+
                     log.info(f"[cross_dimensional] Category × PaymentMethod variance: {variance_coef:.3f}")
-                    
-                    if variance_coef > 0.10:  # Lowered from 0.20
+
+                    # Chi-square test on the contingency table
+                    from scipy.stats import chi2_contingency
+                    try:
+                        chi2, p_val, dof, expected = chi2_contingency(ct)
+                        n_total = ct.sum().sum()
+                        min_dim = min(ct.shape) - 1
+                        cramers_v = np.sqrt(chi2 / (n_total * min_dim)) if (n_total * min_dim) > 0 else 0
+                        if cramers_v < 0.1:
+                            v_interp = "negligible"
+                        elif cramers_v < 0.3:
+                            v_interp = "small"
+                        elif cramers_v < 0.5:
+                            v_interp = "moderate"
+                        else:
+                            v_interp = "large"
+                        chi2_stats = {"chi2": chi2, "p": p_val, "dof": dof, "v": cramers_v, "v_interp": v_interp}
+                    except Exception as chi_err:
+                        log.warning(f"[cross_dimensional] Chi-square failed: {chi_err}")
+                        chi2_stats = None
+
+                    if chi2_stats and chi2_stats["p"] > 0.05:
+                        log.info(f"[cross_dimensional] Cross-dimensional pattern not statistically significant (p={chi2_stats['p']:.3f}). Suppressed.")
+                    elif chi2_stats and chi2_stats["v"] < 0.1:
+                        log.info(
+                            f"[cross_dimensional] Cross-dimensional pattern statistically significant "
+                            f"but effect size negligible (V={chi2_stats['v']:.3f}). Suppressed to avoid misleading the reader."
+                        )
+                    elif variance_coef > 0.10:  # Lowered from 0.20
                         # Find the strongest category-payment combination
                         max_val = ct.max().max()
                         max_idx = ct.stack().idxmax()
                         best_cat, best_payment = max_idx
-                        
+
                         # Find weakest combination
                         min_val = ct.min().min()
                         min_idx = ct.stack().idxmin()
@@ -3111,6 +3204,13 @@ class BusinessRuleEngine:
                             "vary significantly" if variance_coef >= 0.25
                             else "show moderate variation"
                         )
+                        chi2_suffix = ""
+                        if chi2_stats:
+                            chi2_suffix = (
+                                f" Chi-square test confirms association is statistically significant "
+                                f"(χ²={chi2_stats['chi2']:.1f}, p={chi2_stats['p']:.4f}, "
+                                f"Cramér's V={chi2_stats['v']:.2f} [{chi2_stats['v_interp']} effect])."
+                            )
                         description = (
                             f"{best_cat} × {best_payment} generates {_fmt_currency(max_val)} "
                             f"({best_pct:.1f}% of total revenue) — the strongest category-payment "
@@ -3120,8 +3220,9 @@ class BusinessRuleEngine:
                             f"Payment method preferences {_var_qualifier} by category "
                             f"(variance coefficient: {variance_coef:.2f}), indicating that "
                             f"different products attract different payment behaviours."
+                            f"{chi2_suffix}"
                         )
-                        
+
                         insights.append(BusinessInsight(
                             title=f"Cross-Dimensional Pattern: {best_cat} × {best_payment}",
                             description=description,
@@ -3129,7 +3230,10 @@ class BusinessRuleEngine:
                                 "Category-payment patterns reveal customer preferences and can "
                                 "inform targeted promotions, payment incentives, and checkout optimization."
                             ),
-                            evidence=f"Variance coefficient: {variance_coef:.2f}, Top combo: {best_cat} × {best_payment}",
+                            evidence=(
+                                f"Variance coefficient: {variance_coef:.2f}, Top combo: {best_cat} × {best_payment}"
+                                + (f", χ²={chi2_stats['chi2']:.1f} p={chi2_stats['p']:.4f} V={chi2_stats['v']:.2f}" if chi2_stats else "")
+                            ),
                             impact="🟠 Important",
                             confidence_label="high",
                             recommendation=(
@@ -3143,7 +3247,8 @@ class BusinessRuleEngine:
                                 "type": "heatmap",
                                 "data": ct.to_dict(),
                                 "best_combo": f"{best_cat} × {best_payment}",
-                                "variance": variance_coef
+                                "variance": variance_coef,
+                                "chi2_stats": chi2_stats,
                             }
                         ))
                         log.info(f"[cross_dimensional] ✅ Generated Category × PaymentMethod insight")
@@ -3633,8 +3738,14 @@ class BusinessRuleEngine:
             repeat_rate = (purchase_counts > 1).mean() * 100
             avg_orders = purchase_counts.mean()
 
+            # Use category-specific benchmark, not a hardcoded 30% threshold
+            _dom_cat = _detect_dominant_category(df)
+            _bench = CATEGORY_BENCHMARKS.get(_dom_cat, CATEGORY_BENCHMARKS["default"])
+            _bench_threshold = _bench["repeat_rate_pct"]
+            _bench_range = _bench["repeat_rate_range"]
+
             is_high_conc = top10_share > 25
-            is_low_ret = repeat_rate < 30
+            is_low_ret = repeat_rate < _bench_threshold
 
             if is_high_conc:
                 impact = "🔴 Critical"
@@ -3645,11 +3756,17 @@ class BusinessRuleEngine:
                     "across the broader customer base."
                 )
             elif is_low_ret:
+                # Compute rough revenue uplift for closing half the benchmark gap
+                _gap_pp = max(0.0, _bench_threshold - repeat_rate)
+                _aov_approx = float(pdf[rev_col].mean()) if rev_col in pdf.columns else 0.0
+                _uplift_half_gap = n_customers * _aov_approx * (_gap_pp / 2 / 100)
+                _uplift_str = (f" Closing half the gap would add approx. {_fmt_currency(_uplift_half_gap)} in annual revenue."
+                               if _uplift_half_gap > 0 else "")
                 impact = "🟠 Important"
                 rec = (
-                    f"Repeat purchase rate of {repeat_rate:.0f}% is below the 30% threshold. "
-                    "Retention campaigns (loyalty programmes, personalised re-engagement) "
-                    "are the highest-ROI lever available."
+                    f"Repeat purchase rate of {repeat_rate:.1f}% is below the {_dom_cat} industry "
+                    f"benchmark of {_bench_range}. Retention uplift potential is high —"
+                    f" loyalty programmes and personalised re-engagement are the highest-ROI lever available.{_uplift_str}"
                 )
             else:
                 impact = "🟢 Minor"
@@ -3702,6 +3819,984 @@ class BusinessRuleEngine:
         except Exception as e:
             log.warning(f"[customer_concentration] Failed: {e}")
             return []
+
+    @log_rule
+    def _rule_rfm_segmentation(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """RFM Segmentation — Customer Intelligence."""
+        import plotly.graph_objects as go
+
+        # Auto-detect columns
+        all_cols = list(df.columns)
+        cust_keywords = ["customer", "cust", "client", "buyer"]
+        cust_col = next(
+            (c for c in (profile.identifiers + profile.categoricals + all_cols)
+             if any(k in c.lower() for k in cust_keywords)),
+            None,
+        )
+        date_col = profile.date_col or next(
+            (c for c in profile.temporals), None
+        )
+        rev_col = profile.revenue_col or next(
+            (c for c in all_cols
+             if any(k in c.lower() for k in ["price", "amount", "revenue", "total"])
+             and c not in profile.identifiers and c != cust_col),
+            None,
+        ) or profile.price_col
+
+        if not cust_col:
+            log.warning("[rfm_segmentation] Skipped: no customer ID column detected")
+            return []
+        if not date_col:
+            log.warning("[rfm_segmentation] Skipped: no date column detected")
+            return []
+        if not rev_col or rev_col not in df.columns:
+            log.warning("[rfm_segmentation] Skipped: no revenue column detected")
+            return []
+
+        try:
+            pdf = df.to_pandas()
+
+            # Parse dates
+            dates = pd.to_datetime(pdf[date_col], errors="coerce")
+            pdf["_date"] = dates
+            pdf = pdf.dropna(subset=["_date", cust_col, rev_col])
+            if len(pdf) < 10:
+                log.warning("[rfm_segmentation] Skipped: too few valid rows after date parsing")
+                return []
+
+            max_date = pdf["_date"].max()
+
+            # Compute RFM per customer
+            rfm = pdf.groupby(cust_col).agg(
+                recency=("_date", lambda x: (max_date - x.max()).days),
+                frequency=(cust_col, "count"),
+                monetary=(rev_col, "sum"),
+            ).reset_index()
+
+            # Detect degenerate frequency (>70% single-purchase)
+            single_pct = (rfm["frequency"] == 1).mean()
+            log.info(f"[rfm_segmentation] Single-purchase rate: {single_pct:.1%}")
+
+            # Score Recency and Monetary with quintiles (1-5, 5=best)
+            try:
+                rfm["R"] = pd.qcut(rfm["recency"], q=5, labels=[5,4,3,2,1], duplicates="drop").astype(int)
+            except Exception:
+                rfm["R"] = pd.cut(rfm["recency"], bins=5, labels=[5,4,3,2,1]).astype(int)
+
+            try:
+                rfm["M"] = pd.qcut(rfm["monetary"], q=5, labels=[1,2,3,4,5], duplicates="drop").astype(int)
+            except Exception:
+                rfm["M"] = pd.cut(rfm["monetary"], bins=5, labels=[1,2,3,4,5]).astype(int)
+
+            # Frequency scoring
+            if single_pct > 0.70:
+                log.info("[rfm_segmentation] Frequency binning: 3-tier mode (high single-purchase concentration)")
+                rfm["F_score"] = 1
+                rfm.loc[rfm["frequency"] == 2, "F_score"] = 2
+                rfm.loc[rfm["frequency"] >= 3, "F_score"] = 3
+                # Scale to 1-5 for segment assignment compatibility
+                rfm["F_score"] = rfm["F_score"].map({1: 1, 2: 3, 3: 5})
+            else:
+                try:
+                    rfm["F_score"] = pd.qcut(rfm["frequency"], q=5, labels=[1,2,3,4,5], duplicates="drop").astype(int)
+                except Exception:
+                    rfm["F_score"] = pd.cut(rfm["frequency"], bins=5, labels=[1,2,3,4,5]).astype(int)
+
+            # Segment assignment
+            def assign_segment(row):
+                r, f, m = row["R"], row["F_score"], row["M"]
+                if r >= 4 and f >= 4 and m >= 4:
+                    return "Champions"
+                elif r == 5 and f == 1:
+                    return "New Customers"
+                elif r == 1 and f == 1:
+                    return "Lost"
+                elif r <= 2 and f <= 2:
+                    return "Hibernating"
+                elif r <= 2 and f >= 3 and m >= 3:
+                    return "At Risk"
+                elif r >= 3 and f <= 2:
+                    return "Potential Loyalists"
+                elif f >= 4 and m >= 4:
+                    return "Loyal Customers"
+                else:
+                    return "Others"
+
+            rfm["segment"] = rfm.apply(assign_segment, axis=1)
+
+            total_rev = rfm["monetary"].sum()
+
+            seg_stats = rfm.groupby("segment").agg(
+                customer_count=("monetary", "count"),
+                revenue=("monetary", "sum"),
+                avg_order_value=("monetary", "mean"),
+                avg_recency=("recency", "mean"),
+            ).reset_index()
+            seg_stats["revenue_pct"] = seg_stats["revenue"] / total_rev * 100
+            seg_stats = seg_stats.sort_values("revenue", ascending=False)
+
+            # Segment-specific recommendations
+            SEG_RECS = {
+                "Champions": "Reward with exclusive loyalty perks and early-access offers.",
+                "Loyal Customers": "Upsell to premium tiers and solicit referrals.",
+                "Potential Loyalists": "Send a win-back email sequence with a time-limited 10% discount.",
+                "At Risk": "Immediate re-engagement: personalised offer within 48 hours.",
+                "Hibernating": "Low-cost reactivation: 'We miss you' email with bundle offer.",
+                "Lost": "Remove from active campaigns; add to suppression list to reduce cost.",
+                "New Customers": "Send onboarding sequence; introduce loyalty programme.",
+                "Others": "Analyse sub-cohort and assign to nearest segment.",
+            }
+
+            # Detect dominant product category for benchmark
+            dominant_cat = _detect_dominant_category(df)
+            benchmark = CATEGORY_BENCHMARKS.get(dominant_cat, CATEGORY_BENCHMARKS["default"])
+            repeat_rate = (rfm["frequency"] > 1).mean() * 100
+            benchmark_rate = benchmark["repeat_rate_pct"]
+
+            benchmark_note = (
+                f"Industry benchmark for {dominant_cat}: {benchmark['repeat_rate_range']} repeat rate. "
+                f"Your rate: {repeat_rate:.1f}% — "
+                f"{'below benchmark — retention uplift potential is high' if repeat_rate < benchmark_rate else 'meeting or exceeding benchmark'}."
+            )
+
+            # Build description
+            seg_lines = []
+            for _, row in seg_stats.iterrows():
+                seg = row["segment"]
+                rec = SEG_RECS.get(seg, "Monitor and apply appropriate engagement strategy.")
+                seg_lines.append(
+                    f"{seg}: {int(row['customer_count'])} customers | "
+                    f"{_fmt_currency(row['revenue'])} ({row['revenue_pct']:.1f}%) | "
+                    f"AOV {_fmt_currency(row['avg_order_value'])} | "
+                    f"Avg recency {row['avg_recency']:.0f} days → {rec}"
+                )
+
+            top_seg = seg_stats.iloc[0]
+            description = (
+                f"RFM analysis across {len(rfm):,} unique customers reveals "
+                f"'{top_seg['segment']}' drives {top_seg['revenue_pct']:.1f}% of revenue "
+                f"({_fmt_currency(top_seg['revenue'])}). "
+                f"{benchmark_note}\n\n" + "\n".join(seg_lines)
+            )
+
+            # Chart: horizontal bar — revenue contribution by segment
+            try:
+                fig = go.Figure(go.Bar(
+                    x=seg_stats["revenue"].tolist(),
+                    y=seg_stats["segment"].tolist(),
+                    orientation="h",
+                    marker_color="#6366f1",
+                    text=[f"{p:.1f}%" for p in seg_stats["revenue_pct"]],
+                    textposition="outside",
+                ))
+                fig.update_layout(
+                    title="",
+                    xaxis_title="Revenue (₹)",
+                    yaxis_title="",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font={"color": "#1e293b"},
+                    margin={"l": 140, "r": 60, "t": 20, "b": 40},
+                )
+            except Exception as chart_err:
+                log.warning(f"[rfm_segmentation] Chart failed: {chart_err}")
+                fig = None
+
+            # Root-cause for dominant category
+            root_cause = None
+            if total_rev > 0 and profile.category_col and profile.category_col in df.columns:
+                try:
+                    cat_repeat = pdf.groupby([profile.category_col, cust_col]).size().reset_index(name="orders")
+                    cat_repeat_rate = cat_repeat.groupby(profile.category_col).apply(
+                        lambda g: (g["orders"] > 1).mean() * 100
+                    ).reset_index(name="repeat_rate_pct")
+                    if len(cat_repeat_rate) >= 2:
+                        best_cat = cat_repeat_rate.loc[cat_repeat_rate["repeat_rate_pct"].idxmax()]
+                        worst_cat = cat_repeat_rate.loc[cat_repeat_rate["repeat_rate_pct"].idxmin()]
+                        root_cause = (
+                            f"Repeat rate varies by {profile.category_col}: "
+                            f"{best_cat[profile.category_col]}={best_cat['repeat_rate_pct']:.0f}%, "
+                            f"{worst_cat[profile.category_col]}={worst_cat['repeat_rate_pct']:.0f}%. "
+                            f"Overall {repeat_rate:.1f}% is a composite — "
+                            f"low-repeat categories drag down the average."
+                        )
+                except Exception:
+                    pass
+
+            # ── Fix 4: Priority-ordered recommendation (top-revenue segment first) ──
+            # Primary: highest-revenue segment; Secondary: At Risk; Tertiary: New Customers
+            at_risk_count = int(seg_stats.loc[seg_stats["segment"] == "At Risk", "customer_count"].sum()) if "At Risk" in seg_stats["segment"].values else 0
+            new_cust_count = int(seg_stats.loc[seg_stats["segment"] == "New Customers", "customer_count"].sum()) if "New Customers" in seg_stats["segment"].values else 0
+            primary_action = (
+                f"{top_seg['segment']} ({int(top_seg['customer_count'])} customers, "
+                f"{top_seg['revenue_pct']:.0f}% of revenue, avg recency {top_seg['avg_recency']:.0f} days): "
+                f"{SEG_RECS.get(top_seg['segment'], 'Customise engagement strategy.')}"
+            )
+            secondary_parts = []
+            if at_risk_count > 0 and top_seg["segment"] != "At Risk":
+                secondary_parts.append(f"At Risk ({at_risk_count} customers): contact within 14 days before they transition to Lost.")
+            if new_cust_count > 0 and top_seg["segment"] != "New Customers":
+                secondary_parts.append(f"New Customers ({new_cust_count}): launch onboarding sequence and introduce loyalty programme within first 30 days.")
+            recommendation_text = "PRIMARY — " + primary_action
+            if secondary_parts:
+                recommendation_text += " | SECONDARY — " + " | ".join(secondary_parts)
+
+            _at_risk_rows = seg_stats[seg_stats["segment"] == "At Risk"]
+            _at_risk_rev_pct = float(_at_risk_rows["revenue_pct"].iloc[0]) if not _at_risk_rows.empty else 0.0
+            insight = BusinessInsight(
+                title="RFM Customer Segmentation Analysis",
+                description=description,
+                why_it_matters="RFM identifies who your best customers are, which are at risk, and which have been lost — enabling targeted retention spend.",
+                evidence=f"Segments: {seg_stats['segment'].tolist()} | Total customers: {len(rfm):,}",
+                decision_implication=(
+                    f"PRIMARY: {top_seg['segment']} ({top_seg['revenue_pct']:.0f}% of revenue) "
+                    f"is the highest-priority segment. "
+                    + (f"SECONDARY: {at_risk_count} 'At Risk' customers ({_at_risk_rev_pct:.0f}% revenue) need immediate win-back before they join Lost." if at_risk_count > 0 else "")
+                ),
+                impact="🔴 Critical",
+                recommendation=recommendation_text,
+                rule_type="rfm_segmentation",
+                methodology="RFM scoring with quintile binning (3-tier frequency fallback when >70% single-purchase)",
+                score=9.0,
+            )
+            if fig is not None:
+                insight.chart_data = {
+                    "type": "plotly",
+                    "figure": fig.to_json(),
+                    "segments": seg_stats.to_dict(orient="records"),
+                }
+            if root_cause:
+                insight.chart_data = insight.chart_data or {}
+                insight.chart_data["root_cause"] = root_cause
+
+            return [insight]
+
+        except Exception as e:
+            log.warning(f"[rfm_segmentation] Failed: {e}")
+            return []
+
+    @log_rule
+    def _rule_cohort_retention(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """Cohort retention curve analysis."""
+        import plotly.graph_objects as go
+
+        all_cols = list(df.columns)
+        cust_keywords = ["customer", "cust", "client", "buyer"]
+        cust_col = next(
+            (c for c in (profile.identifiers + profile.categoricals + all_cols)
+             if any(k in c.lower() for k in cust_keywords)),
+            None,
+        )
+        date_col = profile.date_col or next((c for c in profile.temporals), None)
+
+        if not cust_col:
+            log.warning("[cohort_retention] Skipped: no customer column detected")
+            return []
+        if not date_col:
+            log.warning("[cohort_retention] Skipped: no date column detected")
+            return []
+
+        try:
+            pdf = df.to_pandas()
+            pdf["_date"] = pd.to_datetime(pdf[date_col], errors="coerce")
+            pdf = pdf.dropna(subset=["_date", cust_col])
+            if len(pdf) < 30:
+                log.warning("[cohort_retention] Skipped: too few rows")
+                return []
+
+            pdf["_month"] = pdf["_date"].dt.to_period("M")
+
+            # Cohort = first purchase month
+            first_purchase = pdf.groupby(cust_col)["_date"].min().dt.to_period("M")
+            pdf["_cohort"] = pdf[cust_col].map(first_purchase)
+
+            max_month = pdf["_month"].max()
+
+            # Build cohort x offset retention matrix
+            cohort_data = {}
+            for cohort, group in pdf.groupby("_cohort"):
+                cohort_size = group[cust_col].nunique()
+                if cohort_size < 10:
+                    continue  # Suppress small cohorts
+
+                # Only include cohorts with at least 6 months of follow-up
+                months_of_data = (max_month - cohort).n
+                if months_of_data < 6:
+                    continue
+
+                cohort_data[cohort] = {"size": cohort_size, "retention": {}}
+                for offset in range(min(months_of_data + 1, 13)):
+                    target_month = cohort + offset
+                    active = group[group["_month"] == target_month][cust_col].nunique()
+                    cohort_data[cohort]["retention"][offset] = active / cohort_size
+
+            if len(cohort_data) < 3:
+                log.warning(f"[cohort_retention] Skipped: only {len(cohort_data)} qualifying cohorts (need 3)")
+                return []
+
+            cohorts = sorted(cohort_data.keys())
+            max_offset = max(len(v["retention"]) for v in cohort_data.values())
+
+            # Anomaly detection on month-1 retention
+            m1_rates = [cohort_data[c]["retention"].get(1, None) for c in cohorts]
+            m1_rates_valid = [r for r in m1_rates if r is not None]
+            m1_mean = np.mean(m1_rates_valid) if m1_rates_valid else 0
+            m1_std = np.std(m1_rates_valid) if m1_rates_valid else 0
+
+            anomalies = []
+            for cohort, rate in zip(cohorts, m1_rates):
+                if rate is None:
+                    continue
+                if m1_std > 0:
+                    if rate > m1_mean + 1.5 * m1_std:
+                        anomalies.append(
+                            f"Cohort {cohort} retained {rate*100:.0f}% in month 1 "
+                            f"vs average {m1_mean*100:.0f}% — investigate what drove this acquisition batch."
+                        )
+                    elif rate < m1_mean - 1.5 * m1_std:
+                        anomalies.append(
+                            f"Cohort {cohort} retained only {rate*100:.0f}% in month 1 "
+                            f"vs average {m1_mean*100:.0f}% — investigate quality issues in this batch."
+                        )
+
+            # Compute average retention by offset across all cohorts
+            avg_by_offset = {}
+            for offset in range(max_offset):
+                vals = [cohort_data[c]["retention"].get(offset) for c in cohorts
+                        if offset in cohort_data[c]["retention"]]
+                if vals:
+                    avg_by_offset[offset] = np.mean(vals)
+
+            m1_avg = avg_by_offset.get(1, 0) * 100
+            m2_avg = avg_by_offset.get(2, 0) * 100
+            m3_avg = avg_by_offset.get(3, 0) * 100
+
+            # Revenue uplift estimate
+            rev_col = profile.revenue_col or profile.price_col
+            aov = 0
+            total_customers = len(pdf[cust_col].unique())
+            if rev_col and rev_col in pdf.columns:
+                aov = float(pdf[rev_col].mean())
+            avg_orders_repeater = avg_by_offset.get(1, 0.1) * 12  # rough annualised
+            uplift = 0.02 * total_customers * aov * max(avg_orders_repeater, 1)
+
+            # Best and worst cohorts
+            m1_by_cohort = {c: cohort_data[c]["retention"].get(1, 0) for c in cohorts}
+            best_cohort = max(m1_by_cohort, key=m1_by_cohort.get)
+            worst_cohort = min(m1_by_cohort, key=m1_by_cohort.get)
+
+            # Build heatmap data
+            z_matrix = []
+            y_labels = []
+            for cohort in cohorts:
+                row = []
+                for offset in range(min(max_offset, 13)):
+                    row.append(cohort_data[cohort]["retention"].get(offset, None))
+                z_matrix.append(row)
+                y_labels.append(str(cohort))
+            x_labels = [f"M+{i}" for i in range(min(max_offset, 13))]
+
+            try:
+                import plotly.graph_objects as go
+                # Convert None to NaN for heatmap
+                z_float = [[v if v is not None else float("nan") for v in row] for row in z_matrix]
+                fig = go.Figure(data=go.Heatmap(
+                    z=[[round(v * 100, 1) if not np.isnan(v) else None for v in row] for row in z_float],
+                    x=x_labels,
+                    y=y_labels,
+                    colorscale=[[0, "#ef4444"], [0.5, "#f59e0b"], [1, "#10b981"]],
+                    text=[[f"{round(v*100,1)}%" if not np.isnan(v) else "" for v in row] for row in z_float],
+                    texttemplate="%{text}",
+                    showscale=True,
+                    zmin=0,
+                    zmax=100,
+                    colorbar_title="Retention %",
+                ))
+                fig.update_layout(
+                    title="",
+                    xaxis_title="Month Offset",
+                    yaxis_title="Cohort",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font={"color": "#1e293b"},
+                    margin={"l": 80, "r": 40, "t": 20, "b": 40},
+                )
+            except Exception as chart_err:
+                log.warning(f"[cohort_retention] Chart failed: {chart_err}")
+                fig = None
+
+            anomaly_text = (" Anomalies: " + "; ".join(anomalies)) if anomalies else ""
+
+            description = (
+                f"Cohort retention analysis across {len(cohorts)} qualifying cohorts "
+                f"(each ≥10 customers, ≥6 months data). "
+                f"Best cohort: {best_cohort} ({m1_by_cohort[best_cohort]*100:.0f}% month-1 retention). "
+                f"Worst cohort: {worst_cohort} ({m1_by_cohort[worst_cohort]*100:.0f}% month-1 retention). "
+                f"Average retention: M+1={m1_avg:.1f}%, M+2={m2_avg:.1f}%, M+3={m3_avg:.1f}%. "
+                f"A 2pp improvement in average retention would yield approximately "
+                f"{_fmt_currency(uplift)} additional annual revenue."
+                f"{anomaly_text}"
+            )
+
+            insight = BusinessInsight(
+                title="Cohort Retention Analysis",
+                description=description,
+                why_it_matters="Retention curves reveal whether customers return after first purchase — the single strongest signal of product-market fit.",
+                evidence=f"Cohorts analysed: {len(cohorts)} | Avg M+1: {m1_avg:.1f}% | Avg M+2: {m2_avg:.1f}%",
+                decision_implication=f"Focus on the {worst_cohort} cohort — its low retention suggests acquisition quality or onboarding issues specific to that period.",
+                impact="🟠 Important",
+                recommendation="Implement a structured onboarding sequence for all new cohorts to lift month-1 retention by 2–3pp.",
+                rule_type="cohort_retention",
+                methodology="Monthly cohort retention: customers_active_in_month_N / cohort_size",
+                score=8.2,
+            )
+            if fig is not None:
+                insight.chart_data = {
+                    "type": "plotly",
+                    "figure": fig.to_json(),
+                    "anomalies": anomalies,
+                    "avg_m1": m1_avg,
+                    "avg_m2": m2_avg,
+                    "avg_m3": m3_avg,
+                    "uplift_2pp": uplift,
+                }
+
+            return [insight]
+
+        except Exception as e:
+            log.warning(f"[cohort_retention] Failed: {e}")
+            return []
+
+    @log_rule
+    def _rule_clv_estimate(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """Simple CLV estimate with retention-lift scenarios."""
+        all_cols = list(df.columns)
+        cust_keywords = ["customer", "cust", "client", "buyer"]
+        cust_col = next(
+            (c for c in (profile.identifiers + profile.categoricals + all_cols)
+             if any(k in c.lower() for k in cust_keywords)),
+            None,
+        )
+        rev_col = profile.revenue_col or next(
+            (c for c in all_cols
+             if any(k in c.lower() for k in ["price", "amount", "revenue", "total"])
+             and c not in profile.identifiers and c != cust_col),
+            None,
+        ) or profile.price_col
+
+        if not cust_col or not rev_col or rev_col not in df.columns:
+            log.warning("[clv_estimate] Skipped: missing customer or revenue column")
+            return []
+
+        try:
+            pdf = df.to_pandas()
+            purchase_counts = pdf.groupby(cust_col).size()
+            total_customers = len(purchase_counts)
+            if total_customers < 5:
+                log.warning("[clv_estimate] Skipped: too few customers")
+                return []
+
+            aov = float(pdf[rev_col].mean())
+            repeat_customers = purchase_counts[purchase_counts > 1]
+            repeat_rate = len(repeat_customers) / total_customers
+
+            if len(repeat_customers) == 0:
+                avg_orders_repeater = 1.0
+            else:
+                avg_orders_repeater = float(repeat_customers.mean())
+
+            clv = aov * repeat_rate * avg_orders_repeater
+
+            # Revenue per 1% repeat rate lift
+            rev_per_1pct_lift = total_customers * aov * (avg_orders_repeater / 100)
+
+            # Three tiers
+            conservative = rev_per_1pct_lift * 1  # +1%
+            base_case = rev_per_1pct_lift * 3      # +3%
+            optimistic = rev_per_1pct_lift * 5     # +5%
+
+            # Category benchmark context
+            dominant_cat = _detect_dominant_category(df)
+            benchmark = CATEGORY_BENCHMARKS.get(dominant_cat, CATEGORY_BENCHMARKS["default"])
+            benchmark_rate = benchmark["repeat_rate_pct"]
+            rate_pct = repeat_rate * 100
+            benchmark_gap = benchmark_rate - rate_pct
+
+            benchmark_context = (
+                f"Industry benchmark ({dominant_cat}): {benchmark['repeat_rate_range']}. "
+                f"Current rate: {rate_pct:.1f}%. "
+                f"{'Gap of ' + f'{benchmark_gap:.1f}pp suggests significant recovery potential.' if benchmark_gap > 2 else 'Rate is within or above benchmark range.'}"
+            )
+
+            # Root-cause for low repeat rate
+            root_cause = None
+            if profile.category_col and profile.category_col in df.columns:
+                try:
+                    cat_repeat = pdf.groupby([profile.category_col, cust_col]).size().reset_index(name="orders")
+                    cat_rr = cat_repeat.groupby(profile.category_col).apply(
+                        lambda g: (g["orders"] > 1).mean() * 100
+                    ).reset_index(name="repeat_rate")
+                    if len(cat_rr) >= 2:
+                        best = cat_rr.loc[cat_rr["repeat_rate"].idxmax()]
+                        worst = cat_rr.loc[cat_rr["repeat_rate"].idxmin()]
+                        root_cause = (
+                            f"Repeat rate by {profile.category_col}: "
+                            f"{best[profile.category_col]}={best['repeat_rate']:.0f}%, "
+                            f"{worst[profile.category_col]}={worst['repeat_rate']:.0f}%. "
+                            f"Overall {rate_pct:.1f}% is pulled down by low-repeat categories."
+                        )
+                except Exception:
+                    pass
+
+            description = (
+                f"CLV Estimate: AOV={_fmt_currency(aov)} × repeat rate={rate_pct:.1f}% × "
+                f"avg orders per repeater={avg_orders_repeater:.1f} = "
+                f"{_fmt_currency(clv)} per customer lifetime value.\n\n"
+                f"Retention Lift Scenarios ({total_customers:,} customers, AOV {_fmt_currency(aov)}):\n"
+                f"• Conservative (+1% repeat rate): {_fmt_currency(conservative)} additional annual revenue\n"
+                f"• Base case (+3% repeat rate): {_fmt_currency(base_case)} additional annual revenue\n"
+                f"• Optimistic (+5% repeat rate): {_fmt_currency(optimistic)} additional annual revenue\n\n"
+                f"{benchmark_context}"
+            )
+            if root_cause:
+                description += f"\n\nRoot Cause: {root_cause}"
+
+            insight = BusinessInsight(
+                title="Customer Lifetime Value Estimate & Retention Uplift Scenarios",
+                description=description,
+                why_it_matters="CLV quantifies the long-term value of retention investment versus customer acquisition cost.",
+                evidence=f"Total customers: {total_customers:,} | Repeat rate: {rate_pct:.1f}% | AOV: {_fmt_currency(aov)} | Avg orders (repeaters): {avg_orders_repeater:.1f}",
+                decision_implication=f"A 3% lift in repeat rate is worth {_fmt_currency(base_case)} — compare this against the cost of your retention programme to determine ROI.",
+                impact="🟠 Important",
+                recommendation=(
+                    f"Invest in retention campaigns targeting the {rate_pct:.1f}% → {min(rate_pct+3, 100):.1f}% repeat-rate goal. "
+                    f"At {_fmt_currency(rev_per_1pct_lift)} per 1pp, each percentage point pays for targeted loyalty spend."
+                ),
+                rule_type="clv_estimate",
+                methodology="CLV = AOV × repeat_rate × avg_orders_per_repeater; uplift = total_customers × AOV × (lift_pct / 100) × avg_orders",
+                score=8.0,
+            )
+            if root_cause:
+                insight.chart_data = {"root_cause": root_cause}
+
+            return [insight]
+
+        except Exception as e:
+            log.warning(f"[clv_estimate] Failed: {e}")
+            return []
+
+    @log_rule
+    def _rule_seasonal_forecast(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
+        """12-month seasonal forecast with confidence band."""
+        import plotly.graph_objects as go
+
+        date_col = profile.date_col or next((c for c in profile.temporals), None)
+        rev_col = profile.revenue_col or profile.price_col
+
+        if not date_col or not rev_col or rev_col not in df.columns:
+            log.warning("[seasonal_forecast] Skipped: missing date or revenue column")
+            return []
+
+        try:
+            pdf = df.to_pandas()
+            pdf["_date"] = pd.to_datetime(pdf[date_col], errors="coerce")
+            pdf = pdf.dropna(subset=["_date", rev_col])
+
+            # Aggregate by month
+            pdf["_yearmonth"] = pdf["_date"].dt.to_period("M")
+            monthly = pdf.groupby("_yearmonth")[rev_col].sum().reset_index()
+            monthly = monthly.sort_values("_yearmonth")
+            monthly["_yearmonth_dt"] = monthly["_yearmonth"].dt.to_timestamp()
+
+            n_months = len(monthly)
+            if n_months < 18:
+                log.warning(f"[seasonal_forecast] Skipped: only {n_months} months of data (need 18)")
+                return []
+
+            monthly_vals = monthly[rev_col].values.astype(float)
+
+            # Seasonal component: average per calendar month
+            monthly["_cal_month"] = monthly["_yearmonth_dt"].dt.month
+            month_avgs = monthly.groupby("_cal_month")[rev_col].agg(["mean", "std"]).reset_index()
+            month_avgs.columns = ["cal_month", "mean", "std"]
+            month_avgs["std"] = month_avgs["std"].fillna(0)
+
+            # Trend: linear fit on monthly index
+            x_idx = np.arange(len(monthly_vals))
+            slope, intercept = np.polyfit(x_idx, monthly_vals, 1)
+
+            # Forecast next 12 months
+            last_period = monthly["_yearmonth"].max()
+            forecast_periods = [last_period + i for i in range(1, 13)]
+            forecast_dts = [p.to_timestamp() for p in forecast_periods]
+            forecast_cal_months = [dt.month for dt in forecast_dts]
+
+            trend_vals = [slope * (len(monthly_vals) + i - 1) + intercept for i in range(1, 13)]
+            grand_mean = float(month_avgs["mean"].mean())
+            seasonal_components = []
+            for cm in forecast_cal_months:
+                row = month_avgs[month_avgs["cal_month"] == cm]
+                if not row.empty:
+                    seasonal_components.append(float(row["mean"].iloc[0]) - grand_mean)
+                else:
+                    seasonal_components.append(0.0)
+
+            forecast_vals = [t + s for t, s in zip(trend_vals, seasonal_components)]
+
+            # Confidence intervals: +-1 std of historical month values
+            conf_upper = []
+            conf_lower = []
+            for cm, fv in zip(forecast_cal_months, forecast_vals):
+                row = month_avgs[month_avgs["cal_month"] == cm]
+                std = float(row["std"].iloc[0]) if not row.empty else abs(fv * 0.1)
+                conf_upper.append(fv + std)
+                conf_lower.append(max(0, fv - std))
+
+            # Peak and trough
+            peak_idx = int(np.argmax(forecast_vals))
+            trough_idx = int(np.argmin(forecast_vals))
+            MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+            peak_month_name = forecast_dts[peak_idx].strftime("%b %Y")
+            trough_month_name = forecast_dts[trough_idx].strftime("%b %Y")
+
+            # YoY trend
+            annual_slope_pct = (slope * 12 / grand_mean * 100) if grand_mean > 0 else 0
+            if abs(annual_slope_pct) < 2:
+                trend_desc = "flat growth"
+            elif annual_slope_pct > 0:
+                trend_desc = f"+{annual_slope_pct:.1f}% annual growth"
+            else:
+                trend_desc = f"{annual_slope_pct:.1f}% annual decline"
+
+            # Chart: actuals + forecast + confidence band
+            try:
+                actual_dates = monthly["_yearmonth_dt"].tolist()
+                actual_dates_str = [d.strftime("%Y-%m") for d in actual_dates]
+                forecast_dates_str = [d.strftime("%Y-%m") for d in forecast_dts]
+
+                conf_x = forecast_dates_str + forecast_dates_str[::-1]
+                conf_y = conf_upper + conf_lower[::-1]
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=actual_dates_str, y=monthly_vals.tolist(),
+                    mode="lines", name="Actual",
+                    line={"color": "#3b82f6", "width": 2},
+                ))
+                fig.add_trace(go.Scatter(
+                    x=conf_x, y=conf_y,
+                    fill="toself", fillcolor="rgba(99,102,241,0.15)",
+                    line={"color": "rgba(0,0,0,0)"}, name="Confidence Band",
+                    hoverinfo="skip",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=forecast_dates_str, y=forecast_vals,
+                    mode="lines", name="Forecast",
+                    line={"color": "#6366f1", "width": 2, "dash": "dash"},
+                ))
+                fig.update_layout(
+                    title="",
+                    xaxis_title="Month",
+                    yaxis_title="Revenue (₹)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font={"color": "#1e293b"},
+                    legend={"bgcolor": "rgba(0,0,0,0)"},
+                    margin={"l": 60, "r": 30, "t": 20, "b": 40},
+                )
+            except Exception as chart_err:
+                log.warning(f"[seasonal_forecast] Chart failed: {chart_err}")
+                fig = None
+
+            # Root-cause for seasonal peak
+            root_cause = None
+            if profile.category_col and profile.category_col in df.columns:
+                try:
+                    pdf["_cal_month"] = pdf["_date"].dt.month
+                    peak_cal_month = forecast_dts[peak_idx].month
+                    cat_month = pdf[pdf["_cal_month"] == peak_cal_month].groupby(profile.category_col)[rev_col].sum()
+                    cat_overall = pdf.groupby(profile.category_col)[rev_col].mean() * (pdf.groupby("_cal_month").size().mean())
+                    if len(cat_month) >= 2:
+                        lift_map = {}
+                        for cat_val in cat_month.index:
+                            avg = cat_overall.get(cat_val, 0)
+                            if avg > 0:
+                                lift_map[cat_val] = (cat_month[cat_val] / avg - 1) * 100
+                        over_index_sf = {k: v for k, v in lift_map.items() if v > 5}
+                        if over_index_sf:
+                            top_cat = max(over_index_sf, key=over_index_sf.get)
+                            top_lift = over_index_sf[top_cat]
+                            root_cause = (
+                                f"{MONTH_NAMES[peak_cal_month-1]} peak is primarily driven by "
+                                f"{top_cat} (+{top_lift:.0f}% vs average month) — "
+                                f"not evenly distributed across categories."
+                            )
+                        else:
+                            root_cause = (
+                                f"{MONTH_NAMES[peak_cal_month-1]} peak is broadly distributed — "
+                                f"no single category over-indexes significantly."
+                            )
+                except Exception:
+                    pass
+
+            description = (
+                f"Seasonal forecast based on {n_months} months of data with trend + seasonal decomposition.\n"
+                f"• Next peak: {peak_month_name}: {_fmt_currency(forecast_vals[peak_idx])} "
+                f"(range {_fmt_currency(conf_lower[peak_idx])}–{_fmt_currency(conf_upper[peak_idx])})\n"
+                f"• Next trough: {trough_month_name}: {_fmt_currency(forecast_vals[trough_idx])} "
+                f"(range {_fmt_currency(conf_lower[trough_idx])}–{_fmt_currency(conf_upper[trough_idx])})\n"
+                f"• Trend: {trend_desc}\n"
+                f"• Inventory planning: Stock up 3–4 weeks before {peak_month_name}."
+            )
+            if root_cause:
+                description += f"\n• {root_cause}"
+
+            insight = BusinessInsight(
+                title=f"12-Month Seasonal Revenue Forecast (Peak: {peak_month_name})",
+                description=description,
+                why_it_matters="Seasonal forecasting enables proactive inventory, staffing, and marketing decisions before demand peaks.",
+                evidence=f"Historical months: {n_months} | Trend: {trend_desc} | Peak forecast: {_fmt_currency(forecast_vals[peak_idx])}",
+                decision_implication=f"Begin inventory procurement for {peak_month_name} by {forecast_dts[peak_idx - 1].strftime('%b %Y') if peak_idx > 0 else 'immediately'}.",
+                impact="🟠 Important",
+                recommendation=f"Set procurement trigger: stock up 3–4 weeks before {peak_month_name}. Budget {_fmt_currency(forecast_vals[peak_idx] * 1.1)} for that month's fulfillment.",
+                rule_type="seasonal_forecast",
+                methodology="Linear trend (numpy.polyfit) + calendar-month seasonal component + +-1 std confidence band",
+                score=8.5,
+            )
+            if fig is not None:
+                insight.chart_data = {
+                    "type": "plotly",
+                    "figure": fig.to_json(),
+                    "peak_month": peak_month_name,
+                    "trough_month": trough_month_name,
+                    "trend_pct": annual_slope_pct,
+                }
+                if root_cause:
+                    insight.chart_data["root_cause"] = root_cause
+
+            return [insight]
+
+        except Exception as e:
+            log.warning(f"[seasonal_forecast] Failed: {e}")
+            return []
+
+    @log_rule
+    def _rule_root_cause_analysis(self, df: pl.DataFrame, profile: DataProfile, all_insights: list) -> list[BusinessInsight]:
+        """
+        Three scoped root-cause hypotheses attached to parent findings.
+        No generic correlation sweeps — only specific, pre-defined questions.
+        """
+        findings = []
+        try:
+            pdf = df.to_pandas()
+            rev_col = profile.revenue_col or profile.price_col
+            cat_col = profile.category_col
+            date_col = profile.date_col
+
+            # ── Hypothesis A: Is flat/declining revenue masking category divergence? ──
+            if rev_col and cat_col and date_col:
+                try:
+                    _dates = pd.to_datetime(pdf[date_col], errors="coerce")
+                    if _dates.notna().sum() > 0:
+                        pdf_a = pdf.copy()
+                        pdf_a["_date"] = _dates
+                        pdf_a["_month_idx"] = (
+                            (_dates.dt.year - _dates.dt.year.min()) * 12 + _dates.dt.month
+                        )
+                        cat_months = pdf_a.groupby([cat_col, "_month_idx"])[rev_col].sum().reset_index()
+                        cat_slopes = {}
+                        for cat_val, grp in cat_months.groupby(cat_col):
+                            if len(grp) < 6:
+                                continue
+                            x = grp["_month_idx"].values.astype(float)
+                            y = grp[rev_col].values.astype(float)
+                            if len(x) >= 2 and np.std(y) > 0:
+                                slope, _ = np.polyfit(x, y, 1)
+                                cat_slopes[cat_val] = slope
+                        if len(cat_slopes) >= 2:
+                            fastest_up = max(cat_slopes, key=cat_slopes.get)
+                            fastest_dn = min(cat_slopes, key=cat_slopes.get)
+                            up_slope = cat_slopes[fastest_up]
+                            dn_slope = cat_slopes[fastest_dn]
+                            if up_slope > 0 or dn_slope < 0:
+                                rc_text = (
+                                    f"While overall revenue may appear flat, category-level trends diverge: "
+                                    f"{fastest_up} is trending up at +{_fmt_currency(up_slope)}/month "
+                                    f"and {fastest_dn} is trending down at {_fmt_currency(dn_slope)}/month."
+                                )
+                                # Attach to any revenue-trend parent finding
+                                for parent in all_insights:
+                                    if getattr(parent, "rule_type", "") in (
+                                        "temporal_peaks", "growth_rates", "seasonality_pattern"
+                                    ) and "root_cause" not in str(getattr(parent, "chart_data", "") or ""):
+                                        parent.chart_data = parent.chart_data or {}
+                                        parent.chart_data["root_cause"] = rc_text
+                                        break
+                                findings.append(BusinessInsight(
+                                    title="Root Cause: Category Revenue Divergence Under Flat Overall Trend",
+                                    description=rc_text,
+                                    why_it_matters="Overall trend can mask opposing category movements — acting on blended data leads to wrong investment decisions.",
+                                    evidence=f"Category slopes: {fastest_up}=+{up_slope:+.0f}/mo, {fastest_dn}={dn_slope:+.0f}/mo",
+                                    impact="🟠 Important",
+                                    recommendation=(
+                                        f"Increase investment in {fastest_up} (growing category). "
+                                        f"Investigate root cause of {fastest_dn} decline — pricing, competition, or supply issue?"
+                                    ),
+                                    rule_type="root_cause_analysis",
+                                    methodology="Per-category linear slope (numpy.polyfit on monthly revenue)",
+                                    score=7.8,
+                                ))
+                except Exception as e_a:
+                    log.info(f"[root_cause] Hypothesis A skipped: {e_a}")
+
+            # ── Hypothesis B: Is low repeat rate uniform or driven by one category? ──
+            if rev_col and cat_col:
+                try:
+                    all_cols_list = list(df.columns)
+                    cust_col = next(
+                        (c for c in (profile.identifiers + profile.categoricals + all_cols_list)
+                         if any(k in c.lower() for k in ["customer", "cust", "client", "buyer"])),
+                        None,
+                    )
+                    if cust_col:
+                        purchase_counts = pdf.groupby(cust_col).size()
+                        overall_repeat = (purchase_counts > 1).mean() * 100
+                        _dom_cat = _detect_dominant_category(df)
+                        _bench = CATEGORY_BENCHMARKS.get(_dom_cat, CATEGORY_BENCHMARKS["default"])
+                        _bench_threshold = _bench["repeat_rate_pct"]
+                        if overall_repeat < _bench_threshold:
+                            cat_repeat = pdf.groupby([cat_col, cust_col]).size().reset_index(name="orders")
+                            cat_rr = cat_repeat.groupby(cat_col).apply(
+                                lambda g: (g["orders"] > 1).mean() * 100
+                            ).reset_index(name="repeat_rate")
+                            if len(cat_rr) >= 2:
+                                best_cat_rr = cat_rr.loc[cat_rr["repeat_rate"].idxmax()]
+                                worst_cat_rr = cat_rr.loc[cat_rr["repeat_rate"].idxmin()]
+                                rc_text = (
+                                    f"Repeat rate varies significantly by {cat_col}: "
+                                    f"{best_cat_rr[cat_col]}={best_cat_rr['repeat_rate']:.0f}%, "
+                                    f"{worst_cat_rr[cat_col]}={worst_cat_rr['repeat_rate']:.0f}%. "
+                                    f"The blended {overall_repeat:.1f}% is dragged down by low-repeat categories — "
+                                    f"targeted retention for {worst_cat_rr[cat_col]} buyers offers the highest uplift."
+                                )
+                                # Attach to CLV or customer_concentration parent
+                                for parent in all_insights:
+                                    if getattr(parent, "rule_type", "") in ("clv_estimate", "customer_concentration", "rfm_segmentation"):
+                                        parent.chart_data = parent.chart_data or {}
+                                        if "root_cause" not in parent.chart_data:
+                                            parent.chart_data["root_cause"] = rc_text
+                                        break
+                                findings.append(BusinessInsight(
+                                    title=f"Root Cause: Repeat Rate Variance Across {cat_col} Categories",
+                                    description=rc_text,
+                                    why_it_matters="Blended repeat rates conceal which categories need targeted retention investment.",
+                                    evidence=f"Best: {best_cat_rr[cat_col]}={best_cat_rr['repeat_rate']:.0f}% | Worst: {worst_cat_rr[cat_col]}={worst_cat_rr['repeat_rate']:.0f}%",
+                                    impact="🟠 Important",
+                                    recommendation=(
+                                        f"Deploy category-specific retention campaigns starting with {worst_cat_rr[cat_col]} buyers. "
+                                        f"A 2pp improvement in that category alone could yield measurable portfolio-level uplift."
+                                    ),
+                                    rule_type="root_cause_analysis",
+                                    methodology="Per-category repeat purchase rate = customers_with_F>1 / total_customers_in_category",
+                                    score=7.8,
+                                ))
+                except Exception as e_b:
+                    log.info(f"[root_cause] Hypothesis B skipped: {e_b}")
+
+            # ── Hypothesis C: Is seasonal peak driven by one category or spread evenly? ──
+            if rev_col and cat_col and date_col:
+                try:
+                    pdf_c = pdf.copy()
+                    pdf_c["_date"] = pd.to_datetime(pdf[date_col], errors="coerce")
+                    pdf_c = pdf_c.dropna(subset=["_date"])
+                    pdf_c["_month"] = pdf_c["_date"].dt.to_period("M")
+                    monthly_total = pdf_c.groupby("_month")[rev_col].sum()
+                    if len(monthly_total) >= 12:
+                        peak_month_period = monthly_total.idxmax()
+                        peak_month_num = peak_month_period.month
+                        MONTH_NAMES_RC = ["Jan","Feb","Mar","Apr","May","Jun",
+                                          "Jul","Aug","Sep","Oct","Nov","Dec"]
+                        peak_name = MONTH_NAMES_RC[peak_month_num - 1]
+
+                        # Revenue in peak month vs average month, by category
+                        cat_monthly = pdf_c.groupby([cat_col, "_month"])[rev_col].sum().reset_index()
+                        cat_avg = cat_monthly.groupby(cat_col)[rev_col].mean()
+                        cat_peak = cat_monthly[cat_monthly["_month"].apply(lambda p: p.month) == peak_month_num].groupby(cat_col)[rev_col].sum()
+
+                        if len(cat_peak) >= 2:
+                            cat_lift = {}
+                            for cat_val in cat_peak.index:
+                                avg = cat_avg.get(cat_val, 0)
+                                if avg > 0:
+                                    cat_lift[cat_val] = (cat_peak[cat_val] / avg - 1) * 100
+
+                            over_index = {k: v for k, v in cat_lift.items() if v > 5}
+                            under_index = {k: v for k, v in cat_lift.items() if v < -5}
+
+                            if over_index:
+                                top_driver = max(over_index, key=over_index.get)
+                                top_lift_pct = over_index[top_driver]
+                                rc_text = (
+                                    f"{peak_name} peak is primarily driven by {top_driver} "
+                                    f"(+{top_lift_pct:.0f}% vs its monthly average) — "
+                                    f"not evenly distributed across the portfolio."
+                                )
+                                if under_index:
+                                    weakest = min(under_index, key=under_index.get)
+                                    wpct = abs(under_index[weakest])
+                                    rc_text += (
+                                        f" Notably, {weakest} underperforms in {peak_name} "
+                                        f"({wpct:.0f}% below its own monthly average)."
+                                    )
+                            else:
+                                top_driver = max(cat_lift, key=cat_lift.get) if cat_lift else "N/A"
+                                top_lift_pct = 0.0
+                                rc_text = (
+                                    f"{peak_name} peak is broadly distributed — "
+                                    f"no single category over-indexes significantly."
+                                )
+
+                            if cat_lift:
+                                # Attach to seasonal_forecast parent
+                                for parent in all_insights:
+                                    if getattr(parent, "rule_type", "") == "seasonal_forecast":
+                                        parent.chart_data = parent.chart_data or {}
+                                        if "root_cause" not in parent.chart_data:
+                                            parent.chart_data["root_cause"] = rc_text
+                                        break
+                                findings.append(BusinessInsight(
+                                    title=(
+                                        f"Root Cause: {peak_name} Peak Concentrated in {top_driver}"
+                                        if over_index else
+                                        f"Root Cause: {peak_name} Peak Broadly Distributed"
+                                    ),
+                                    description=rc_text,
+                                    why_it_matters="Category-concentrated seasonality means generic 'peak season' stocking will over-invest in low-lift categories.",
+                                    evidence=(
+                                        f"Peak {peak_name}: {top_driver} lift=+{top_lift_pct:.0f}% vs avg month"
+                                        if over_index else
+                                        f"Peak {peak_name}: no single category over-indexes >5% vs its average"
+                                    ),
+                                    impact="🟠 Important",
+                                    recommendation=(
+                                        f"Pre-stock {top_driver} specifically before {peak_name}. "
+                                        f"Other categories need only moderate seasonal uplift preparation."
+                                        if over_index else
+                                        f"Seasonal peak is evenly distributed — broad inventory preparation for {peak_name} is appropriate."
+                                    ),
+                                    rule_type="root_cause_analysis",
+                                    methodology="Per-category peak-month revenue vs category's own average monthly revenue",
+                                    score=7.8,
+                                ))
+                except Exception as e_c:
+                    log.info(f"[root_cause] Hypothesis C skipped: {e_c}")
+
+        except Exception as e:
+            log.warning(f"[root_cause_analysis] Failed: {e}")
+
+        return findings
 
     def _deduplicate(self, insights: list[BusinessInsight]) -> list[BusinessInsight]:
         """Remove duplicates by title AND by (column, rule_family) pair."""
@@ -4882,17 +5977,19 @@ class SmartChartRecommender:
                         (c for c in profile.numericals if c not in profile.identifiers),
                         None,
                     )
-                rev_col = "Revenue (₹)"
-                pdf_tmp = pdf.copy()
-                if _is_revenue_col(price_col):
-                    # "Sales Amount" is already revenue — use directly
-                    pdf_tmp[rev_col] = pdf[price_col].fillna(0)
+                if revenue_col_direct:
+                    rev_col = revenue_col_direct
+                    pdf_tmp = pdf
                 else:
-                    # True unit price — multiply by qty to get revenue
-                    pdf_tmp[rev_col] = (
-                        pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
-                        if qty_col else pdf[price_col].fillna(0)
-                    )
+                    rev_col = "Revenue (₹)"
+                    pdf_tmp = pdf.copy()
+                    if _is_revenue_col(price_col):
+                        pdf_tmp[rev_col] = pdf[price_col].fillna(0)
+                    else:
+                        pdf_tmp[rev_col] = (
+                            pdf[price_col].fillna(0) * pdf[qty_col].fillna(0)
+                            if qty_col else pdf[price_col].fillna(0)
+                        )
                 grp = (
                     pdf_tmp.groupby(cat)[rev_col].sum()
                     .reset_index()
@@ -4958,17 +6055,17 @@ class SmartChartRecommender:
                         best_top1_pct = 0
                         
                         for col in [cat, geo_col]:
-                            if col and col in pdf.columns:
-                                shares = pdf.groupby(col)[rev_col].sum()
+                            if col and col in pdf_tmp.columns:
+                                shares = pdf_tmp.groupby(col)[rev_col].sum()
                                 top1_pct = shares.max() / shares.sum()
                                 if top1_pct > best_top1_pct:
                                     best_top1_pct = top1_pct
                                     best_cat_col = col
-                        
+
                         print(f"[PARETO] Selected column: {best_cat_col} (top-1 share: {best_top1_pct:.1%})")
-                        
+
                         # Use the best categorical column for Pareto
-                        grp_pareto = pdf.groupby(best_cat_col)[rev_col].sum().reset_index()
+                        grp_pareto = pdf_tmp.groupby(best_cat_col)[rev_col].sum().reset_index()
                         grp_sorted = grp_pareto.sort_values(rev_col, ascending=False)
                         grp_sorted["cumulative_pct"] = (
                             grp_sorted[rev_col].cumsum() / grp_sorted[rev_col].sum() * 100
@@ -5861,7 +6958,18 @@ def run_insight_engine(
         # Step 4: Insight Synthesis & Compression (V2 Pipeline)
         synthesizer = DecisionIntelligenceSynthesizer()
         compressed_insights = synthesizer.synthesize(insights, driver_info, domain_id=domain_id)
-        
+
+        # Verification print — confirms which insights reach the PDF renderer
+        print(f"\n[PRE-PDF INSIGHTS] {len(compressed_insights)} insights selected for report:")
+        print([getattr(i, 'title', '?') for i in compressed_insights])
+        _priority_check = {"cohort_retention", "clv_estimate", "seasonal_forecast", "rfm_segmentation"}
+        _present = {getattr(i, 'rule_type', '') for i in compressed_insights}
+        _missing = _priority_check - _present
+        if _missing:
+            print(f"[WARNING] Priority rules missing from PDF: {_missing}")
+        else:
+            print("[OK] All four priority rules present in synthesizer output.")
+
         # SAFETY NET: Never return empty insights
         if not compressed_insights:
             print("[WARNING] No insights generated - adding fallback insight")
@@ -6117,6 +7225,77 @@ def _fmt_currency(val: float) -> str:
     if abs_val >= 1_000:
         return f"{sign}₹{abs_val/1_000:.1f}K"
     return f"{sign}₹{abs_val:,.0f}"
+
+
+CATEGORY_BENCHMARKS = {
+    "electronics": {
+        "repeat_rate_pct": 18,
+        "repeat_rate_range": "15–25%",
+        "aov_note": "High AOV, long repurchase cycles typical",
+        "seasonality_note": "Peak: Nov–Dec (holiday), secondary: back-to-school Aug–Sep",
+    },
+    "furniture": {
+        "repeat_rate_pct": 12,
+        "repeat_rate_range": "8–15%",
+        "aov_note": "Very high AOV, repurchase cycles 3–5 years",
+        "seasonality_note": "Peak: spring (home refresh) and pre-holiday Nov",
+    },
+    "office_equipment": {
+        "repeat_rate_pct": 22,
+        "repeat_rate_range": "18–30%",
+        "aov_note": "Consumable replacement drives repeats",
+        "seasonality_note": "Steady demand; minor Q1 budget-cycle peak",
+    },
+    "default": {
+        "repeat_rate_pct": 25,
+        "repeat_rate_range": "20–35%",
+        "aov_note": "No category-specific benchmark available",
+        "seasonality_note": "No category-specific seasonality data",
+    },
+}
+
+PRODUCT_TO_CATEGORY = {
+    "tablet": "electronics", "laptop": "electronics", "monitor": "electronics",
+    "phone": "electronics", "headphone": "electronics", "camera": "electronics",
+    "desk": "furniture", "chair": "furniture", "sofa": "furniture",
+    "printer": "office_equipment", "scanner": "office_equipment",
+}
+
+
+def _detect_dominant_category(df) -> str:
+    """Auto-detect dominant product category from dataset for benchmark lookup."""
+    try:
+        # Find a product/item column
+        product_col = None
+        for col in df.columns:
+            cl = col.lower()
+            if any(k in cl for k in ["product", "item", "sku", "name"]):
+                product_col = col
+                break
+        if product_col is None:
+            return "default"
+
+        # Get product names (handle both polars and pandas)
+        if hasattr(df, 'to_pandas'):
+            pdf = df.to_pandas()
+        else:
+            pdf = df
+
+        products = pdf[product_col].dropna().astype(str).str.lower().tolist()
+
+        # Count category matches
+        cat_counts = {}
+        for prod in products:
+            for keyword, category in PRODUCT_TO_CATEGORY.items():
+                if keyword in prod:
+                    cat_counts[category] = cat_counts.get(category, 0) + 1
+
+        if not cat_counts:
+            return "default"
+
+        return max(cat_counts, key=cat_counts.get)
+    except Exception:
+        return "default"
 
 
 def _build_exec_summary(df: pl.DataFrame, profile: DataProfile, metrics: dict, high_impact_count: int, domain_info: dict, driver_info: dict, insights: list = None, raw_insights: list = None) -> str:

@@ -2022,6 +2022,20 @@ class PDFReportGenerator:
                 card_elements.append(
                     Paragraph(f"🔬 Method: {methodology}", meth_style)
                 )
+            # Root-cause callout: render chart_data["root_cause"] if present
+            _cd = insight.get('chart_data') if not isinstance(insight, str) else None
+            _rc_text = (_cd.get('root_cause', '') if isinstance(_cd, dict) else '')
+            if _rc_text:
+                rc_style = ParagraphStyle(
+                    f'RootCause_{i}', fontSize=9, fontName=PDF_FONT_OBLIQUE,
+                    textColor=colors.HexColor('#374151'),
+                    backColor=colors.HexColor('#f3f4f6'),
+                    leftIndent=20, rightIndent=8, borderPad=5,
+                    leading=13, spaceAfter=4,
+                )
+                card_elements.append(
+                    Paragraph(f"Root cause analysis: {self._md_to_rl(_rc_text)}", rc_style)
+                )
             card_elements.append(Spacer(1, 0.12 * inch))
 
             elements.append(KeepTogether(card_elements))
