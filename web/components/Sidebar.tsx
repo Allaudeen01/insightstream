@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
     Plus,
     LayoutDashboard,
@@ -15,9 +16,7 @@ type NavItem = {
     href: string;
     label: string;
     icon: LucideIcon;
-    /** True for entry-point actions like "New analysis" — rendered slightly stronger. */
     primary?: boolean;
-    /** Match nested routes (e.g. /dashboard/123). Defaults to exact match. */
     matchPrefix?: boolean;
 };
 
@@ -28,23 +27,58 @@ const NAV: NavItem[] = [
     { href: "/chat", label: "Chat", icon: MessageSquare, matchPrefix: true },
 ];
 
-interface SidebarProps {
-    /** Recent analyses to render under the primary nav. Pass [] to hide the section. */
-    recents?: string[];
-    /** Current user — shown in the footer. Optional. */
-    user?: { name: string; initials?: string };
+interface RecentSession {
+    id: number;
+    original_filename: string;
 }
 
-export default function Sidebar({
-    recents = ["Q3 sales analysis", "Customer churn 2025", "Marketing spend ROI"],
-    user = { name: "Alex Singh", initials: "AS" },
-}: SidebarProps) {
+interface UserInfo {
+    full_name: string;
+    email: string;
+}
+
+export default function Sidebar() {
     const pathname = usePathname() ?? "";
+    const router = useRouter();
+    const [user, setUser] = useState<UserInfo | null>(null);
+    const [recents, setRecents] = useState<RecentSession[]>([]);
+
+    useEffect(() => {
+        const token = sessionStorage.getItem("access_token");
+        if (!token) return;
+
+        const headers = { Authorization: `Bearer ${token}` };
+
+        fetch("/api/auth/me", { headers, credentials: "include" })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data) setUser(data); })
+            .catch(() => {});
+
+        fetch("/api/sessions?page=1&page_size=5", { headers, credentials: "include" })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data?.items) setRecents(data.items); })
+            .catch(() => {});
+    }, []);
 
     const isActive = (item: NavItem) =>
         item.matchPrefix
             ? pathname === item.href || pathname.startsWith(item.href + "/")
             : pathname === item.href;
+
+    const initials = user?.full_name
+        ? user.full_name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase()
+        : "?";
+
+    const handleLogout = async () => {
+        const token = sessionStorage.getItem("access_token");
+        await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/auth/logout`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            credentials: "include",
+        }).catch(() => {});
+        sessionStorage.removeItem("access_token");
+        window.location.href = "/login";
+    };
 
     return (
         <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
@@ -90,13 +124,14 @@ export default function Sidebar({
                         Recent
                     </div>
                     <nav className="flex flex-1 flex-col gap-px overflow-auto px-2">
-                        {recents.map((r) => (
+                        {recents.map((s) => (
                             <button
-                                key={r}
+                                key={s.id}
+                                onClick={() => router.push(`/insights?session=${s.id}`)}
                                 className="flex items-center gap-2.5 truncate rounded-md px-3 py-1.5 text-left text-[13px] text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
                             >
                                 <FileText className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
-                                <span className="truncate">{r}</span>
+                                <span className="truncate">{s.original_filename}</span>
                             </button>
                         ))}
                     </nav>
@@ -107,12 +142,19 @@ export default function Sidebar({
             {recents.length === 0 && <div className="flex-1" />}
 
             {/* User footer */}
-            <div className="border-t border-zinc-200 p-3">
-                <button className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-zinc-600 hover:bg-zinc-100">
-                    <div className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-700">
-                        {user.initials ?? user.name.slice(0, 2).toUpperCase()}
+            <div className="flex items-center justify-between border-t border-zinc-200 p-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-700">
+                        {initials}
                     </div>
-                    {user.name}
+                    <span className="truncate text-[13px] text-zinc-600">{user?.full_name ?? "..."}</span>
+                </div>
+                <button
+                    onClick={handleLogout}
+                    className="ml-2 shrink-0 text-[12px] text-zinc-400 hover:text-red-500 transition-colors"
+                    title="Sign out"
+                >
+                    Sign out
                 </button>
             </div>
         </aside>

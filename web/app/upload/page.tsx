@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import { DataQualityPanel } from "@/components/DataQualityPanel";
+import { apiFetch } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -27,12 +28,6 @@ const NAV = [
     { id: "dashboard", href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "insights", href: "/insights", label: "Insights", icon: Sparkles },
     { id: "chat", href: "/chat", label: "Chat", icon: MessageSquare },
-];
-
-const RECENTS = [
-    "Q3 sales analysis",
-    "Customer churn 2025",
-    "Marketing spend ROI",
 ];
 
 const SAMPLES = [
@@ -79,7 +74,7 @@ export default function UploadPage() {
         if (sheetName) formData.append("sheet_name", sheetName);
 
         try {
-            const response = await fetch(`${API_BASE}/upload`, {
+            const response = await apiFetch(`/analyze`, {
                 method: "POST",
                 body: formData,
             });
@@ -104,7 +99,7 @@ export default function UploadPage() {
             if (qr?.summary?.can_analyze === false) return;
 
             localStorage.setItem("analysis_session", JSON.stringify(data));
-            router.push("/health-check");
+            router.push(`/health-check?session=${data.session_id}`);
         } catch (err) {
             setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
         } finally {

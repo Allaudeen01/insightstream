@@ -14,6 +14,7 @@ import {
     AlertTriangle
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
+import { apiFetch } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -45,21 +46,23 @@ interface EDAData {
 
 export default function EDAPage() {
     const router = useRouter();
+    const [sessionId, setSessionId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [edaData, setEdaData] = useState<EDAData | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<"overview" | "correlation" | "insights">("overview");
 
     useEffect(() => {
-        const stored = localStorage.getItem("analysis_session");
-        if (!stored) { router.push("/upload"); return; }
-        const session = JSON.parse(stored);
-        fetchEDA(session.session_id);
+        const urlParams = new URLSearchParams(window.location.search);
+        const sid = urlParams.get("session");
+        if (!sid) { router.push("/upload"); return; }
+        setSessionId(sid);
+        fetchEDA(sid);
     }, [router]);
 
-    const fetchEDA = async (sessionId: string) => {
+    const fetchEDA = async (sid: string) => {
         try {
-            const response = await fetch(`${API_BASE}/eda/${sessionId}`);
+            const response = await apiFetch(`/eda/${sid}`);
             if (!response.ok) throw new Error("Failed to fetch dimensions");
             const data = await response.json();
             setEdaData(data);
@@ -340,13 +343,13 @@ export default function EDAPage() {
                             {/* Footer actions */}
                             <div className="flex items-center justify-between mt-12 pt-6 border-t border-slate-200">
                                 <button
-                                    onClick={() => router.push("/health-check")}
+                                    onClick={() => router.push(`/health-check?session=${sessionId}`)}
                                     className="px-5 py-2.5 rounded-md bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium border border-slate-200 transition-colors"
                                 >
                                     Back to health check
                                 </button>
                                 <button
-                                    onClick={() => router.push("/insights")}
+                                    onClick={() => router.push(`/insights?session=${sessionId}`)}
                                     className="flex items-center gap-2 px-5 py-2.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium transition-colors"
                                 >
                                     See insights

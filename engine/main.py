@@ -25,6 +25,10 @@ import os
 import socket
 import sys
 import database as db
+from sqlalchemy.ext.asyncio import AsyncSession
+from db_async import get_db
+from auth import get_current_user
+from models import User
 from insight_engine import (
     ColumnClassifier, MetricComputer, BusinessRuleEngine,
     InsightNarrator, SmartChartRecommender, AnomalyDetector,
@@ -32,7 +36,7 @@ from insight_engine import (
     validate_dataframe, auto_clean_dataframe,
 )
 from session_cache import SessionCache, JobTracker
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks, Depends
 from report_generator import ChartGenerator, PDFReportGenerator, ColumnMap, cleanup_temp_files, UnifiedReportGenerator
 import report_generator
 print(f"[IMPORT] report_generator loaded from: {report_generator.__file__}")
@@ -115,6 +119,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Virtual Data Scientist Engine", lifespan=lifespan)
 
+from routers.auth import router as auth_router
+from routers.analyze import router as analyze_router
+from routers.sessions import router as sessions_router
+app.include_router(auth_router)
+app.include_router(analyze_router)
+app.include_router(sessions_router)
+
 # Allow CORS for Next.js frontend (localhost + production)
 app.add_middleware(
     CORSMiddleware,
@@ -159,39 +170,245 @@ def save_session(session_id: str, filename: str, df: pl.DataFrame) -> None:
     df.write_parquet(session_path / "data.parquet")
 
 def load_session(session_id: str) -> tuple[str, pl.DataFrame]:
-    """Load session from disk. Raises FileNotFoundError if not found."""
+    """Load session from disk. Checks legacy parquet store first, then uploads dir."""
+    # ── Legacy path (old file-based sessions) ─────────────────────────
     session_path = SESSION_DIR / session_id
-    
-    if not session_path.exists():
-        raise FileNotFoundError(f"Session {session_id} not found")
-    
-    # Check if data file exists
-    data_file = session_path / "data.parquet"
-    if not data_file.exists():
-        raise FileNotFoundError(f"Session data file not found for {session_id}")
-    
-    # Load metadata
-    metadata_file = session_path / "metadata.json"
-    if not metadata_file.exists():
-        raise FileNotFoundError(f"Session metadata not found for {session_id}")
-    
-    try:
-        with open(metadata_file, "r") as f:
-            metadata = json.load(f)
-    except Exception as e:
-        raise ValueError(f"Failed to load session metadata: {str(e)}")
-    
-    # Load DataFrame
-    try:
-        df = pl.read_parquet(data_file)
-    except Exception as e:
-        raise ValueError(f"Failed to load session data: {str(e)}")
-    
-    return metadata["filename"], df
+    if session_path.exists():
+        data_file = session_path / "data.parquet"
+        metadata_file = session_path / "metadata.json"
+        if not data_file.exists():
+            raise FileNotFoundError(f"Session data file not found for {session_id}")
+        if not metadata_file.exists():
+            raise FileNotFoundError(f"Session metadata not found for {session_id}")
+        try:
+            with open(metadata_file, "r") as f:
+                metadata = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Failed to load session metadata: {str(e)}")
+        try:
+            df = pl.read_parquet(data_file)
+        except Exception as e:
+            raise ValueError(f"Failed to load session data: {str(e)}")
+        return metadata["filename"], df
+
+    # ── New path (DB-backed sessions with uploaded file on disk) ──────
+    import glob as _glob
+    upload_dir = Path(__file__).parent / "data" / "uploads"
+    matches = _glob.glob(str(upload_dir / f"session_{session_id}_*"))
+    if matches:
+        filepath = Path(matches[0])
+        lower = filepath.name.lower()
+        try:
+            if lower.endswith(".xlsx") or lower.endswith(".xls"):
+                df_pd = pd.read_excel(filepath)
+            else:
+                try:
+                    df_pd = pd.read_csv(filepath, encoding="utf-8")
+                except UnicodeDecodeError:
+                    df_pd = pd.read_csv(filepath, encoding="latin-1")
+        except Exception as e:
+            raise ValueError(f"Failed to load uploaded file for session {session_id}: {e}")
+        return filepath.name, pl.from_pandas(df_pd)
+
+    raise FileNotFoundError(f"Session {session_id} not found")
 
 def session_exists(session_id: str) -> bool:
-    """Check if a session exists."""
-    return (SESSION_DIR / session_id / "data.parquet").exists()
+    """Check if a session exists in either the legacy parquet store or the uploads dir."""
+    if (SESSION_DIR / session_id / "data.parquet").exists():
+        return True
+    import glob as _glob
+    upload_dir = Path(__file__).parent / "data" / "uploads"
+    return bool(_glob.glob(str(upload_dir / f"session_{session_id}_*")))
+
+
+# ── DB-backed health-check endpoint ───────────────────────────────────────────
+@app.get("/health-check/{session_id}")
+async def health_check_endpoint(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_db),
+):
+    from services.session_service import get_session_detail
+    session = await get_session_detail(db_session, session_id, current_user.id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    try:
+        _, df_raw = load_session(str(session_id))
+        df = df_raw.to_pandas() if hasattr(df_raw, "to_pandas") else df_raw
+    except FileNotFoundError:
+        raise HTTPException(404, "Session file not found on disk")
+
+    total_rows = len(df)
+    total_cols = len(df.columns)
+    duplicates = int(df.duplicated().sum())
+    issues = []
+
+    for col in df.columns:
+        missing = int(df[col].isna().sum())
+        if missing > 0:
+            pct = round(missing / total_rows * 100, 2)
+            issues.append({
+                "column": col,
+                "issue_type": "missing",
+                "severity": "high" if pct > 10 else "low",
+                "description": f"{missing} missing values ({pct}%)",
+                "count": missing,
+                "percentage": pct,
+                "suggested_action": "drop_column" if pct > 70 else "impute_median",
+            })
+
+    for col in df.select_dtypes(include="number").columns:
+        q1 = df[col].quantile(0.25)
+        q3 = df[col].quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        outlier_count = int(((df[col] < q1 - 1.5 * iqr) | (df[col] > q3 + 1.5 * iqr)).sum())
+        if outlier_count > 0:
+            pct = round(outlier_count / total_rows * 100, 2)
+            issues.append({
+                "column": col,
+                "issue_type": "outlier",
+                "severity": "high" if pct > 5 else "low",
+                "description": f"{outlier_count} outliers detected ({pct}%)",
+                "count": outlier_count,
+                "percentage": pct,
+            })
+
+    if len(issues) == 0 and duplicates == 0:
+        score = "A"
+    elif len(issues) <= 2 and duplicates < total_rows * 0.01:
+        score = "B"
+    else:
+        score = "C"
+
+    return {
+        "session_id": str(session_id),
+        "quality_score": score,
+        "row_count": total_rows,
+        "column_count": total_cols,
+        "duplicate_rows": duplicates,
+        "issues": issues,
+    }
+
+
+# ── DB-backed EDA endpoint ─────────────────────────────────────────────────────
+@app.get("/eda/{session_id}")
+async def eda_endpoint(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_db),
+):
+    from services.session_service import get_session_detail
+    session = await get_session_detail(db_session, session_id, current_user.id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    try:
+        _, df_raw = load_session(str(session_id))
+        df = df_raw.to_pandas() if hasattr(df_raw, "to_pandas") else df_raw
+    except FileNotFoundError:
+        raise HTTPException(404, "Session file not found on disk")
+
+    numeric_cols, categorical_cols, date_cols, identifier_cols, binary_cols = [], [], [], [], []
+    column_stats = []
+    warnings = []
+
+    for col in df.columns:
+        dtype_str = str(df[col].dtype)
+        n_unique = int(df[col].nunique())
+        n_missing = int(df[col].isna().sum())
+
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            role = "temporal"
+            date_cols.append(col)
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            if n_unique == 2:
+                role = "binary"
+                binary_cols.append(col)
+            elif n_unique / max(len(df), 1) > 0.95 and n_unique > 50:
+                role = "identifier"
+                identifier_cols.append(col)
+            else:
+                role = "numerical"
+                numeric_cols.append(col)
+        elif df[col].dtype == object:
+            if n_unique / max(len(df), 1) > 0.9 and n_unique > 50:
+                role = "identifier"
+                identifier_cols.append(col)
+            elif n_unique == 2:
+                role = "binary"
+                binary_cols.append(col)
+            elif n_unique <= 20:
+                role = "categorical"
+                categorical_cols.append(col)
+            else:
+                role = "identifier"
+                identifier_cols.append(col)
+        else:
+            role = "categorical"
+            categorical_cols.append(col)
+
+        stat: dict = {
+            "column": col,
+            "dtype": dtype_str,
+            "role": role,
+            "unique_count": n_unique,
+            "mean": None,
+            "median": None,
+            "std": None,
+            "min_val": None,
+            "max_val": None,
+            "top_values": [],
+        }
+        if pd.api.types.is_numeric_dtype(df[col]):
+            stat["mean"] = round(float(df[col].mean()), 2) if not df[col].isna().all() else None
+            stat["median"] = round(float(df[col].median()), 2) if not df[col].isna().all() else None
+            stat["std"] = round(float(df[col].std()), 2) if not df[col].isna().all() else None
+            stat["min_val"] = round(float(df[col].min()), 2) if not df[col].isna().all() else None
+            stat["max_val"] = round(float(df[col].max()), 2) if not df[col].isna().all() else None
+        else:
+            top = df[col].value_counts().head(5)
+            stat["top_values"] = [{"value": str(v), "count": int(c)} for v, c in top.items()]
+
+        if n_missing > 0:
+            warnings.append(f"{col}: {n_missing} missing values ({round(n_missing/len(df)*100,1)}%)")
+
+        column_stats.append(stat)
+
+    correlation_matrix: dict = {}
+    num_df = df[numeric_cols] if numeric_cols else pd.DataFrame()
+    if len(numeric_cols) >= 2:
+        try:
+            corr = num_df.corr().round(3)
+            correlation_matrix = corr.to_dict()
+        except Exception:
+            pass
+
+    insights: list[str] = []
+    if numeric_cols:
+        insights.append(f"Dataset has {len(numeric_cols)} numeric columns available for analysis.")
+    if categorical_cols:
+        insights.append(f"{len(categorical_cols)} categorical columns can be used for segmentation.")
+    if date_cols:
+        insights.append(f"Time-series analysis is possible using {', '.join(date_cols)}.")
+    if identifier_cols:
+        insights.append(f"Columns {', '.join(identifier_cols)} appear to be identifiers and are excluded from model training.")
+
+    return {
+        "session_id": str(session_id),
+        "numeric_columns": numeric_cols,
+        "categorical_columns": categorical_cols,
+        "date_columns": date_cols,
+        "identifier_columns": identifier_cols,
+        "binary_columns": binary_cols,
+        "column_stats": column_stats,
+        "correlation_matrix": correlation_matrix,
+        "insights": insights,
+        "warnings": warnings,
+    }
+
 
 class ColumnInfo(BaseModel):
     name: str
@@ -273,6 +490,7 @@ class DashboardExportRequest(BaseModel):
     charts: list[dict] # {id, title, image_base64, error, insight}
     ai_summary: Optional[str] = ""
     insights: Optional[list] = []
+    recommendations: Optional[list] = []
     text_blocks: Optional[list[dict]] = []
 
 @app.post("/export-dashboard-pdf/{session_id}")
@@ -309,7 +527,11 @@ async def export_dashboard_pdf(
         
         # SANITIZATION LAYER: Prevent raw data dumps from reaching PDF
         clean_ai_summary = sanitize_insight(body.ai_summary, max_length=1000)
-        clean_insights = [sanitize_insight(ins, max_length=500) for ins in body.insights]
+        # Preserve dict insights — sanitize_insight would str() them and lose rule_type/chart_data
+        clean_insights = [
+            ins if isinstance(ins, dict) else sanitize_insight(ins, max_length=500)
+            for ins in body.insights
+        ]
         
         clean_charts = []
         for ch in body.charts:
@@ -340,14 +562,42 @@ async def export_dashboard_pdf(
             except Exception as _ve:
                 print(f"[PDF Export] Viz fallback failed: {_ve}")
 
-        # Prefer structured insight dicts from the engine cache (have real titles/descriptions)
-        # over the plain action strings sent by the frontend.
+        # Prefer structured dicts from the engine cache; fall back to the payload the
+        # frontend sent. Normalize emoji-prefixed impact values regardless of source.
+        def _norm_impact(raw: str) -> str:
+            s = raw.lower()
+            if "critical" in s: return "critical"
+            if "important" in s or "high" in s: return "important"
+            return "minor"
+
         insight_result = _cache.get(session_id, "insight_result")
         structured_insights = []
         structured_recs = []
         if insight_result and isinstance(insight_result, dict):
             structured_insights = insight_result.get("strategic_brief", [])
-            structured_recs = insight_result.get("recommendations", [])
+            raw_recs = insight_result.get("recommendations", [])
+            # Guard: skip strings that snuck in — only pass dicts to the generator
+            structured_recs = [
+                {**r, "impact": _norm_impact(r.get("impact", "minor"))}
+                for r in raw_recs if isinstance(r, dict)
+            ]
+
+        # Fall back to full rec objects sent by the frontend when cache is empty
+        if not structured_recs and body.recommendations:
+            structured_recs = [
+                r if isinstance(r, dict) else {"action": str(r)}
+                for r in body.recommendations
+            ]
+
+        _insights_to_use = structured_insights if structured_insights else clean_insights
+        print(f"[EXPORT DEBUG] Session {session_id} — insights count: {len(_insights_to_use)}")
+        if _insights_to_use:
+            _first = _insights_to_use[0]
+            print(f"[EXPORT DEBUG] First insight type: {type(_first)}")
+            print(f"[EXPORT DEBUG] First insight keys: {list(_first.keys()) if isinstance(_first, dict) else 'NOT A DICT'}")
+            if isinstance(_first, dict):
+                print(f"[EXPORT DEBUG] rule_type: {_first.get('rule_type')}")
+                print(f"[EXPORT DEBUG] has chart_data: {'chart_data' in _first}")
 
         gen = UnifiedReportGenerator()
         gen.build_from_assets(
@@ -355,7 +605,7 @@ async def export_dashboard_pdf(
             charts=clean_charts,
             kpis=body.kpis,
             ai_summary=clean_ai_summary,
-            insights=structured_insights if structured_insights else clean_insights,
+            insights=_insights_to_use,
             recommendations=structured_recs,
             text_blocks=body.text_blocks,
             title=body.title,
@@ -576,20 +826,21 @@ async def upload_dataset(
         _cache.delete(session_id, "insight_result")
         _cache.delete(session_id, "insight_response")
 
-        # Persist as a project in the database
+        # Persist as a project in the database (legacy system — skip for new integer IDs)
         data_path = str(SESSION_DIR / session_id)
-        try:
-            db.create_project(
-                project_id=session_id,
-                name=file.filename.rsplit('.', 1)[0],
-                filename=file.filename,
-                data_path=data_path,
-                row_count=len(df),
-                column_count=len(df.columns),
-            )
-            db.add_history(session_id, "upload", {"filename": file.filename, "rows": len(df), "cols": len(df.columns)}, f"Uploaded {file.filename}")
-        except Exception as e:
-            print(f"Warning: Could not persist project: {e}")
+        if not session_id.isdigit():
+            try:
+                db.create_project(
+                    project_id=session_id,
+                    name=file.filename.rsplit('.', 1)[0],
+                    filename=file.filename,
+                    data_path=data_path,
+                    row_count=len(df),
+                    column_count=len(df.columns),
+                )
+                db.add_history(session_id, "upload", {"filename": file.filename, "rows": len(df), "cols": len(df.columns)}, f"Uploaded {file.filename}")
+            except Exception as e:
+                print(f"Warning: Could not persist project: {e}")
         
         # Build schema response
         columns_info = []
@@ -1811,15 +2062,16 @@ def apply_cleaning(session_id: str, actions: list[CleanAction]):
     save_session(session_id, filename, cleaned_df)
     
     # Track cleaning history
-    try:
-        db.add_history(
-            session_id, "clean",
-            {"actions": [a.dict() for a in actions]},
-            f"Applied {len(actions)} cleaning actions: {', '.join(changelog[:3])}"
-        )
-        db.update_project(session_id, row_count=len(cleaned_df), column_count=len(cleaned_df.columns))
-    except Exception:
-        pass
+    if not session_id.isdigit():
+        try:
+            db.add_history(
+                session_id, "clean",
+                {"actions": [a.dict() for a in actions]},
+                f"Applied {len(actions)} cleaning actions: {', '.join(changelog[:3])}"
+            )
+            db.update_project(session_id, row_count=len(cleaned_df), column_count=len(cleaned_df.columns))
+        except Exception:
+            pass
     
     return {
         "status": "ok", 
@@ -1943,15 +2195,16 @@ def apply_cleaning_recipe(session_id: str, request: ApplyRecipeRequest):
     cleaned_df, changelog = CleaningRecipe.apply(df, recipe)
     save_session(session_id, filename, cleaned_df)
 
-    try:
-        db.add_history(
-            session_id, "clean",
-            {"recipe_version": recipe.get("version"), "steps": len(recipe["steps"])},
-            f"Applied pre-fitted recipe ({len(recipe['steps'])} steps): {', '.join(changelog[:3])}"
-        )
-        db.update_project(session_id, row_count=len(cleaned_df), column_count=len(cleaned_df.columns))
-    except Exception:
-        pass
+    if not session_id.isdigit():
+        try:
+            db.add_history(
+                session_id, "clean",
+                {"recipe_version": recipe.get("version"), "steps": len(recipe["steps"])},
+                f"Applied pre-fitted recipe ({len(recipe['steps'])} steps): {', '.join(changelog[:3])}"
+            )
+            db.update_project(session_id, row_count=len(cleaned_df), column_count=len(cleaned_df.columns))
+        except Exception:
+            pass
 
     return {
         "status": "ok",
@@ -2567,15 +2820,16 @@ def get_insights(session_id: str):
                 print(f"[WARNING] Failed to process recommendation {idx}: {e}")
                 continue
 
-        # Persist to project DB
-        try:
-            db.update_project(session_id, executive_summary=exec_summary,
-                              recommendations=json.dumps(recommendations[:5]))
-            db.add_history(session_id, "insight", None,
-                           f"Generated {len(insight_cards)} smart insights")
-        except Exception as e:
-            print(f"[WARNING] Failed to persist to DB: {e}")
-            pass
+        # Persist to project DB (legacy system — skip for new integer IDs)
+        if not session_id.isdigit():
+            try:
+                db.update_project(session_id, executive_summary=exec_summary,
+                                  recommendations=json.dumps(recommendations[:5]))
+                db.add_history(session_id, "insight", None,
+                               f"Generated {len(insight_cards)} smart insights")
+            except Exception as e:
+                print(f"[WARNING] Failed to persist to DB: {e}")
+                pass
 
         # Safe Return Layer (Step 1 - safe return layer)
         resp = InsightsResponse(
@@ -3161,15 +3415,16 @@ def generate_visualizations(
             focus=focus,
             exclude_types=_normalize_query_list(exclude_types)
         )
-        try:
-            db.add_history(
-                session_id, 
-                "generate_viz", 
-                {"groupby": groupby, "chart_types": chart_types}, 
-                f"Generated {resp.total_generated} visualizations"
-            )
-        except Exception as e:
-            print(f"Warning: Could not log history: {e}")
+        if not session_id.isdigit():
+            try:
+                db.add_history(
+                    session_id,
+                    "generate_viz",
+                    {"groupby": groupby, "chart_types": chart_types},
+                    f"Generated {resp.total_generated} visualizations"
+                )
+            except Exception as e:
+                print(f"Warning: Could not log history: {e}")
         return resp
     except Exception as e:
         import traceback
@@ -4254,10 +4509,11 @@ def chat_with_data(session_id: str, request: ChatRequest):
                 chart_response_data = viz_response.dict()
                 answer = reply
                 # Track refinement history
-                try:
-                    db.add_history(session_id, "refine", params, f"Chat refinement: {question[:80]}")
-                except Exception:
-                    pass
+                if not session_id.isdigit():
+                    try:
+                        db.add_history(session_id, "refine", params, f"Chat refinement: {question[:80]}")
+                    except Exception:
+                        pass
             else:
                 answer = reply
 

@@ -19,6 +19,7 @@ import {
   Zap,
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
+import { apiFetch } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -90,6 +91,7 @@ interface PreviewData {
    ============================================================ */
 export default function HealthCheckPage() {
   const router = useRouter();
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [healthData, setHealthData] = useState<HealthCheckData | null>(null);
@@ -112,20 +114,33 @@ export default function HealthCheckPage() {
 
   // ----- Init -----
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const sid = urlParams.get("session");
+    if (!sid) { router.push("/upload"); return; }
+    setSessionId(sid);
+
+    // Populate filename from localStorage if available
     const stored = localStorage.getItem("analysis_session");
-    if (!stored) { router.push("/upload"); return; }
-    const session = JSON.parse(stored);
-    setSessionData(session);
-    fetchHealthCheck(session.session_id);
+    if (stored) {
+      const cached = JSON.parse(stored);
+      if (String(cached.session_id) === sid) {
+        setSessionData({ session_id: sid, filename: cached.filename || cached.original_filename || sid, row_count: 0, column_count: 0 });
+      }
+    }
+    fetchHealthCheck(sid);
   }, [router]);
 
   // ----- API: health check -----
-  const fetchHealthCheck = async (sessionId: string) => {
+  const fetchHealthCheck = async (sid: string) => {
     try {
-      const response = await fetch(`${API_BASE}/health-check/${sessionId}`);
+      const response = await apiFetch(`/health-check/${sid}`);
       if (!response.ok) throw new Error("Couldn't load the quality check. Please try again.");
       const data = await response.json();
       setHealthData(data);
+      // Update filename from response if not already set
+      if (data.filename) {
+        setSessionData(prev => prev ? { ...prev, filename: data.filename } : { session_id: sid, filename: data.filename, row_count: data.row_count, column_count: data.column_count });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -262,11 +277,11 @@ export default function HealthCheckPage() {
 
   // ----- API: raw data -----
   const handleViewRawData = async () => {
-    if (!sessionData) return;
+    if (!sessionId) return;
     setShowRawData(true);
     setLoadingRawData(true);
     try {
-      const response = await fetch(`${API_BASE}/data/${sessionData.session_id}?page_size=100`);
+      const response = await fetch(`${API_BASE}/data/${sessionId}?page_size=100`);
       if (!response.ok) throw new Error("Couldn't load preview data.");
       setRawData(await response.json());
     } catch (err) {
@@ -427,7 +442,7 @@ export default function HealthCheckPage() {
                       Upload another file
                     </button>
                     <button
-                      onClick={() => router.push("/eda")}
+                      onClick={() => router.push(`/eda?session=${sessionId}`)}
                       className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#6d5ef5] px-4 text-[13px] font-medium text-white hover:bg-[#5b4be0]"
                     >
                       Continue to EDA

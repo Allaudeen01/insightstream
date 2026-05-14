@@ -1874,6 +1874,9 @@ class PDFReportGenerator:
         """Section 6: Deep Insights with WHAT / WHY / DECISION format."""
         print(f"[SECTION6 ENTRY] insights={len(insights) if insights else 0}, df type={type(df)}, df is None={df is None}")
         elements = []
+        if not insights:
+            return elements
+
         header_style = ParagraphStyle(
             'Section6Header',
             fontSize=18, textColor=colors.HexColor('#6366f1'),
@@ -1949,9 +1952,20 @@ class PDFReportGenerator:
                 dim      = ""
                 methodology = ""
             else:
-                title    = insight.get('title', '') or insight.get('rule_type', 'Strategic Finding')
-                desc     = insight.get('description', '')
-                impact   = insight.get('impact', 'Medium')
+                title = (
+                    insight.get("title") or
+                    insight.get("heading") or
+                    insight.get("name") or
+                    insight.get("rule_type") or
+                    "Strategic Finding"
+                )
+                desc  = insight.get('description', '') or insight.get('body', '')
+                impact = (
+                    insight.get("impact") or
+                    insight.get("severity") or
+                    insight.get("priority") or
+                    "MINOR"
+                )
                 rec      = insight.get('recommendation', '')
                 dim      = insight.get('decision_implication', '')
                 methodology = insight.get('methodology', '')
@@ -2045,14 +2059,6 @@ class PDFReportGenerator:
                                           insights: list = None,
                                           domain_id: str = "general") -> list:
         elements = []
-        elements.append(PageBreak())
-
-        header_style = ParagraphStyle(
-            'Section7Header', fontSize=18, textColor=colors.HexColor('#6366f1'),
-            spaceAfter=14, fontName=PDF_FONT_BOLD,
-        )
-        elements.append(Paragraph("Strategic Recommendations", header_style))
-        elements.append(Spacer(1, 0.15 * inch))
 
         # ── P2 FIX: Use RecommendationEngine when no pre-built recs provided ──
         if not recommendations and insights:
@@ -2084,12 +2090,25 @@ class PDFReportGenerator:
         # cache or fallback paths never produce repeated entries in the PDF.
         _seen_actions: set = set()
         _unique_recs = []
-        for _r in recommendations:
+        for _r in (recommendations or []):
             _key = ((_r.get("action", "") if isinstance(_r, dict) else str(_r)) or "").strip()[:80]
             if _key and _key not in _seen_actions:
                 _seen_actions.add(_key)
                 _unique_recs.append(_r)
         recommendations = _unique_recs[:6]   # hard cap at 6 items
+
+        # Nothing to show after all fallbacks — skip the page entirely
+        if not recommendations:
+            return elements
+
+        elements.append(PageBreak())
+
+        header_style = ParagraphStyle(
+            'Section7Header', fontSize=18, textColor=colors.HexColor('#6366f1'),
+            spaceAfter=14, fontName=PDF_FONT_BOLD,
+        )
+        elements.append(Paragraph("Strategic Recommendations", header_style))
+        elements.append(Spacer(1, 0.15 * inch))
 
         num_style = ParagraphStyle(
             'RecNum', fontSize=22, fontName=PDF_FONT_BOLD,
@@ -2768,9 +2787,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 else:
                     log.info("Regional page suppressed — variance %.1f%% < 10%%", _reg_variance_pct)
 
-        # 4. PAGE 4: STRATEGIC FINDINGS & NOTES
-        elements.append(PageBreak())
+        # 4. PAGE 4: STRATEGIC FINDINGS & NOTES (skipped entirely if nothing to show)
         if insights or text_blocks:
+            elements.append(PageBreak())
             elements.append(Paragraph("Strategic Findings &amp; Key Results", self.S["Section"]))
             elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
             elements.append(Spacer(1, 20))
@@ -2793,12 +2812,27 @@ class UnifiedReportGenerator(PDFReportGenerator):
             if insights:
                 for idx, ins in enumerate(insights, 1):
                     if isinstance(ins, dict):
-                        title = ins.get("title") or ins.get("rule_type", "Strategic Finding")
-                        description = ins.get("description", "")
-                        impact = ins.get("impact", "")
+                        title = (
+                            ins.get("title") or
+                            ins.get("heading") or
+                            ins.get("name") or
+                            ins.get("rule_type") or
+                            "Strategic Finding"
+                        )
+                        description = ins.get("description", "") or ins.get("body", "")
+                        impact = (
+                            ins.get("impact") or
+                            ins.get("severity") or
+                            ins.get("priority") or
+                            ""
+                        )
                         recommendation = ins.get("recommendation", "")
                     else:
-                        title = str(ins).split('[')[0].strip()
+                        raw = str(ins).strip()
+                        if raw.startswith('[') and ']' in raw:
+                            title = raw[raw.index(']') + 1:].strip()
+                        else:
+                            title = raw.split('[')[0].strip()
                         description = ""
                         impact = ""
                         recommendation = ""
@@ -3057,12 +3091,13 @@ class UnifiedReportGenerator(PDFReportGenerator):
         _last_chart_completed_pair = (valid_charts > 0 and valid_charts % 2 == 0)
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
+        _TEMPORAL_RULES = {"temporal_peaks", "time_series", "temporal", "revenue_trend", "seasonality_pattern"}
         temporal_insight = next(
-            (i for i in insights
+            (i for i in (insights or [])
              if isinstance(i, dict) and (
-                 i.get("rule_type") == "temporal_peaks"
-                 or isinstance(i.get("chart_data"), dict)
-                 and "monthly_data" in (i.get("chart_data") or {})
+                 i.get("rule_type") in _TEMPORAL_RULES
+                 or (isinstance(i.get("chart_data"), dict)
+                     and "monthly_data" in (i.get("chart_data") or {}))
              )),
             None,
         )
@@ -3100,10 +3135,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 pct_gap=_cd.get("pct_gap", 0),
             )
             if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
-                # Always add PageBreak to prevent orphaned heading
-                elements.append(PageBreak())
-                
-                # Use KeepTogether to prevent heading from being orphaned
                 chart_elements = []
                 chart_elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
                 chart_elements.append(HRFlowable(width="100%", thickness=1,
@@ -3117,8 +3148,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     trough = (temporal_insight.get("chart_data") or {}).get("trough_month", "")
                     caption = f"Revenue trajectory across all months — peak: {peak}, trough: {trough}."
                     chart_elements.append(Paragraph(caption, self.S["Insight"]))
-                    
-                    # Wrap in KeepTogether
+                    # PageBreak only fires when the image loaded successfully
+                    elements.append(PageBreak())
                     elements.append(KeepTogether(chart_elements))
                     elements.append(Spacer(1, 16))
                 except Exception as _e:
@@ -3208,10 +3239,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         )
                         
                         if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
-                            # Always add PageBreak to prevent orphaned heading
-                            elements.append(PageBreak())
-                            
-                            # Use KeepTogether to prevent heading from being orphaned
                             chart_elements = []
                             chart_elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
                             chart_elements.append(HRFlowable(width="100%", thickness=1,
@@ -3223,8 +3250,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                                 chart_elements.append(Spacer(1, 6))
                                 caption = f"Revenue trajectory across all months — peak: {peak_month}, trough: {trough_month}."
                                 chart_elements.append(Paragraph(caption, self.S["Insight"]))
-                                
-                                # Wrap in KeepTogether
+                                # PageBreak only fires when the image loaded successfully
+                                elements.append(PageBreak())
                                 elements.append(KeepTogether(chart_elements))
                                 elements.append(Spacer(1, 16))
                                 _last_chart_completed_pair = False

@@ -3707,7 +3707,8 @@ class BusinessRuleEngine:
         cust_keywords = ["customer", "cust", "client", "buyer"]
         cust_col = next(
             (c for c in (profile.identifiers + profile.categoricals + all_cols)
-             if any(k in c.lower() for k in cust_keywords)),
+             if any(k in c.lower() for k in cust_keywords)
+             and df[c].n_unique() > 10),
             None,
         )
         if not cust_col:
@@ -3820,6 +3821,152 @@ class BusinessRuleEngine:
             log.warning(f"[customer_concentration] Failed: {e}")
             return []
 
+    def _rfm_simple_tiers(
+        self, df: pl.DataFrame, cust_col: str, rev_col: str, date_col: str, profile: DataProfile
+    ) -> list[BusinessInsight]:
+        """3-tier value segmentation for small customer bases (below MIN_CUSTOMERS_FOR_RFM)."""
+        import plotly.graph_objects as go
+
+        try:
+            pdf = df.to_pandas().dropna(subset=[cust_col, rev_col])
+            cust_rev = pdf.groupby(cust_col)[rev_col].sum().reset_index()
+            cust_rev.columns = [cust_col, "total_revenue"]
+
+            n_customers = len(cust_rev)
+            total_rev = float(cust_rev["total_revenue"].sum())
+            if n_customers < 2 or total_rev == 0:
+                return []
+
+            cust_rev = cust_rev.sort_values("total_revenue", ascending=False).reset_index(drop=True)
+            high_cutoff = max(1, int(n_customers * 0.20))
+            low_cutoff  = max(high_cutoff + 1, int(n_customers * 0.80))
+
+            cust_rev["tier"] = "Mid Value"
+            cust_rev.loc[:high_cutoff - 1, "tier"] = "High Value"
+            cust_rev.loc[low_cutoff:, "tier"]       = "Low Value"
+
+            tier_stats = cust_rev.groupby("tier").agg(
+                count=(cust_col, "count"),
+                revenue=("total_revenue", "sum"),
+                aov=("total_revenue", "mean"),
+            ).reset_index()
+            tier_stats["revenue_pct"] = tier_stats["revenue"] / total_rev * 100
+
+            TIER_ORDER = ["High Value", "Mid Value", "Low Value"]
+            TIER_ACTIONS = {
+                "High Value": "Protect with loyalty rewards and VIP service — churn risk must be monitored closely.",
+                "Mid Value":  "Upsell to increase purchase frequency and basket size; highest absolute revenue impact.",
+                "Low Value":  "Low-cost reactivation: automated 'We miss you' emails and bundle offers.",
+            }
+
+            seg_lines = []
+            for tier in TIER_ORDER:
+                row = tier_stats[tier_stats["tier"] == tier]
+                if row.empty:
+                    continue
+                r = row.iloc[0]
+                seg_lines.append(
+                    f"{tier}: {int(r['count'])} customers | "
+                    f"{_fmt_currency(r['revenue'])} ({r['revenue_pct']:.1f}%) | "
+                    f"AOV {_fmt_currency(r['aov'])} → {TIER_ACTIONS[tier]}"
+                )
+
+            note = (
+                f"Note: Simplified 3-tier segmentation used (n={n_customers} unique customers "
+                f"— below threshold for full RFM quintile analysis)."
+            )
+
+            def _tier(name: str):
+                row = tier_stats[tier_stats["tier"] == name]
+                return row.iloc[0] if not row.empty else None
+
+            high_row = _tier("High Value")
+            mid_row  = _tier("Mid Value")
+            low_row  = _tier("Low Value")
+
+            description = (
+                f"3-Tier Customer Value Segmentation across {n_customers} unique customers.\n\n"
+                + "\n".join(seg_lines)
+                + f"\n\n{note}"
+            )
+
+            # PRIMARY is always High Value — unit churn impact is highest there
+            # regardless of which tier has the largest total revenue pool.
+            if high_row is not None:
+                recommendation_text = (
+                    f"PRIMARY — High Value ({int(high_row['count'])} customers, "
+                    f"{high_row['revenue_pct']:.0f}% of revenue, "
+                    f"AOV {_fmt_currency(high_row['aov'])}): "
+                    f"Protect with loyalty rewards and VIP service — churn risk must be monitored closely."
+                )
+                if mid_row is not None:
+                    recommendation_text += (
+                        f" | SECONDARY — Mid Value ({int(mid_row['count'])} customers, "
+                        f"{mid_row['revenue_pct']:.0f}% of revenue): "
+                        f"Upsell to increase basket size — highest absolute revenue opportunity."
+                    )
+                if low_row is not None:
+                    recommendation_text += (
+                        f" | Low Value ({int(low_row['count'])} customers): "
+                        f"Low-cost reactivation via automated outreach."
+                    )
+            else:
+                fallback = tier_stats.sort_values("revenue", ascending=False).iloc[0]
+                recommendation_text = (
+                    f"PRIMARY — {fallback['tier']} ({int(fallback['count'])} customers, "
+                    f"{fallback['revenue_pct']:.0f}% of revenue): {TIER_ACTIONS[fallback['tier']]}"
+                )
+
+            try:
+                fig = go.Figure(go.Bar(
+                    x=tier_stats["revenue"].tolist(),
+                    y=tier_stats["tier"].tolist(),
+                    orientation="h",
+                    marker_color="#6366f1",
+                    text=[f"{p:.1f}%" for p in tier_stats["revenue_pct"]],
+                    textposition="outside",
+                ))
+                fig.update_layout(
+                    title="",
+                    xaxis_title="Revenue (₹)",
+                    yaxis_title="",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font={"color": "#1e293b"},
+                    margin={"l": 140, "r": 60, "t": 20, "b": 40},
+                )
+            except Exception:
+                fig = None
+
+            insight = BusinessInsight(
+                title="Customer Value Segmentation (3-Tier)",
+                description=description,
+                why_it_matters="Even with a small customer base, identifying high-value customers enables targeted retention and upsell strategies.",
+                evidence=f"Total customers: {n_customers} | Below RFM quintile threshold | Total revenue: {_fmt_currency(total_rev)}",
+                decision_implication=(
+                    f"High Value tier ({int(high_row['count'])} customers) generates "
+                    f"{high_row['revenue_pct']:.0f}% of revenue — protect first."
+                    if high_row is not None else
+                    f"Top tier generates the majority of revenue — prioritise retention."
+                ),
+                impact="\U0001f7e0 Important",
+                recommendation=recommendation_text,
+                rule_type="rfm_segmentation",
+                methodology="3-tier value segmentation: top 20% revenue = High Value, bottom 20% = Low Value, rest = Mid Value",
+                score=8.0,
+            )
+            if fig is not None:
+                insight.chart_data = {
+                    "type": "plotly",
+                    "figure": fig.to_json(),
+                    "segments": tier_stats.to_dict(orient="records"),
+                }
+            return [insight]
+
+        except Exception as e:
+            log.warning(f"[rfm_simple_tiers] Failed: {e}")
+            return []
+
     @log_rule
     def _rule_rfm_segmentation(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
         """RFM Segmentation — Customer Intelligence."""
@@ -3854,6 +4001,13 @@ class BusinessRuleEngine:
             return []
 
         try:
+            # Fix 2a: minimum customer threshold — small datasets use 3-tier helper
+            MIN_CUSTOMERS_FOR_RFM = 50
+            n_unique = df[cust_col].n_unique()
+            if n_unique < MIN_CUSTOMERS_FOR_RFM:
+                log.info(f"[rfm_segmentation] {n_unique} unique customers < {MIN_CUSTOMERS_FOR_RFM} — using 3-tier segmentation")
+                return self._rfm_simple_tiers(df, cust_col, rev_col, date_col, profile)
+
             pdf = df.to_pandas()
 
             # Parse dates
@@ -3935,6 +4089,21 @@ class BusinessRuleEngine:
             seg_stats["revenue_pct"] = seg_stats["revenue"] / total_rev * 100
             seg_stats = seg_stats.sort_values("revenue", ascending=False)
 
+            # Fix 2b: Others dominance — primary recommendation must target a NAMED segment
+            _others_rows = seg_stats[seg_stats["segment"] == "Others"]
+            _others_count = int(_others_rows["customer_count"].sum()) if not _others_rows.empty else 0
+            _others_pct = _others_count / len(rfm) if len(rfm) > 0 else 0.0
+            _others_warning = None
+            if _others_pct > 0.25:
+                _others_warning = (
+                    f"⚠ {_others_pct*100:.0f}% of customers could not be assigned "
+                    f"to a named segment. RFM thresholds may need recalibration for "
+                    f"this dataset's frequency distribution. The 3-tier fallback "
+                    f"would produce more reliable segmentation."
+                )
+            _named_seg_stats = seg_stats[seg_stats["segment"] != "Others"]
+            top_seg = _named_seg_stats.iloc[0] if not _named_seg_stats.empty else seg_stats.iloc[0]
+
             # Segment-specific recommendations
             SEG_RECS = {
                 "Champions": "Reward with exclusive loyalty perks and early-access offers.",
@@ -3971,13 +4140,14 @@ class BusinessRuleEngine:
                     f"Avg recency {row['avg_recency']:.0f} days → {rec}"
                 )
 
-            top_seg = seg_stats.iloc[0]
             description = (
                 f"RFM analysis across {len(rfm):,} unique customers reveals "
                 f"'{top_seg['segment']}' drives {top_seg['revenue_pct']:.1f}% of revenue "
                 f"({_fmt_currency(top_seg['revenue'])}). "
                 f"{benchmark_note}\n\n" + "\n".join(seg_lines)
             )
+            if _others_warning:
+                description += f"\n\n{_others_warning}"
 
             # Chart: horizontal bar — revenue contribution by segment
             try:
@@ -4011,15 +4181,33 @@ class BusinessRuleEngine:
                         lambda g: (g["orders"] > 1).mean() * 100
                     ).reset_index(name="repeat_rate_pct")
                     if len(cat_repeat_rate) >= 2:
-                        best_cat = cat_repeat_rate.loc[cat_repeat_rate["repeat_rate_pct"].idxmax()]
-                        worst_cat = cat_repeat_rate.loc[cat_repeat_rate["repeat_rate_pct"].idxmin()]
-                        root_cause = (
-                            f"Repeat rate varies by {profile.category_col}: "
-                            f"{best_cat[profile.category_col]}={best_cat['repeat_rate_pct']:.0f}%, "
-                            f"{worst_cat[profile.category_col]}={worst_cat['repeat_rate_pct']:.0f}%. "
-                            f"Overall {repeat_rate:.1f}% is a composite — "
-                            f"low-repeat categories drag down the average."
+                        # Fix 3: conditional root-cause — never say "drag down" when all categories are high
+                        _cat_rates_rfm = {row[profile.category_col]: row["repeat_rate_pct"] for _, row in cat_repeat_rate.iterrows()}
+                        _min_rr = min(_cat_rates_rfm.values())
+                        _max_rr = max(_cat_rates_rfm.values())
+                        _spread_rr = _max_rr - _min_rr
+                        _rate_detail_rfm = ", ".join(
+                            f"{cat}={rate:.0f}%"
+                            for cat, rate in sorted(_cat_rates_rfm.items(), key=lambda x: x[1])
                         )
+                        if _spread_rr >= 15 and _min_rr < 70:
+                            _lowest_cat_rfm = min(_cat_rates_rfm, key=_cat_rates_rfm.get)
+                            root_cause = (
+                                f"Repeat rate varies significantly by {profile.category_col}: {_rate_detail_rfm}. "
+                                f"{_lowest_cat_rfm} ({_min_rr:.0f}%) is dragging down the blended rate. "
+                                f"Category-level retention programmes will be more effective than a blended approach."
+                            )
+                        elif _spread_rr >= 10:
+                            root_cause = (
+                                f"Repeat rate shows moderate variation across {profile.category_col}: "
+                                f"{_rate_detail_rfm}. No single category is a significant outlier."
+                            )
+                        else:
+                            root_cause = (
+                                f"Repeat rate is consistently high across all {profile.category_col} categories "
+                                f"({_min_rr:.0f}%–{_max_rr:.0f}%). "
+                                f"Category mix is not the constraint — focus on AOV and basket size."
+                            )
                 except Exception:
                     pass
 
@@ -4306,20 +4494,13 @@ class BusinessRuleEngine:
                 avg_orders_repeater = float(repeat_customers.mean())
 
             clv = aov * repeat_rate * avg_orders_repeater
-
-            # Revenue per 1% repeat rate lift
-            rev_per_1pct_lift = total_customers * aov * (avg_orders_repeater / 100)
-
-            # Three tiers
-            conservative = rev_per_1pct_lift * 1  # +1%
-            base_case = rev_per_1pct_lift * 3      # +3%
-            optimistic = rev_per_1pct_lift * 5     # +5%
+            avg_orders_per_customer = float(purchase_counts.mean())
+            rate_pct = repeat_rate * 100
 
             # Category benchmark context
             dominant_cat = _detect_dominant_category(df)
             benchmark = CATEGORY_BENCHMARKS.get(dominant_cat, CATEGORY_BENCHMARKS["default"])
             benchmark_rate = benchmark["repeat_rate_pct"]
-            rate_pct = repeat_rate * 100
             benchmark_gap = benchmark_rate - rate_pct
 
             benchmark_context = (
@@ -4328,7 +4509,7 @@ class BusinessRuleEngine:
                 f"{'Gap of ' + f'{benchmark_gap:.1f}pp suggests significant recovery potential.' if benchmark_gap > 2 else 'Rate is within or above benchmark range.'}"
             )
 
-            # Root-cause for low repeat rate
+            # Root-cause: conditional text — never say "pulled down" when all categories are high (Fix 3)
             root_cause = None
             if profile.category_col and profile.category_col in df.columns:
                 try:
@@ -4337,16 +4518,89 @@ class BusinessRuleEngine:
                         lambda g: (g["orders"] > 1).mean() * 100
                     ).reset_index(name="repeat_rate")
                     if len(cat_rr) >= 2:
-                        best = cat_rr.loc[cat_rr["repeat_rate"].idxmax()]
-                        worst = cat_rr.loc[cat_rr["repeat_rate"].idxmin()]
-                        root_cause = (
-                            f"Repeat rate by {profile.category_col}: "
-                            f"{best[profile.category_col]}={best['repeat_rate']:.0f}%, "
-                            f"{worst[profile.category_col]}={worst['repeat_rate']:.0f}%. "
-                            f"Overall {rate_pct:.1f}% is pulled down by low-repeat categories."
+                        cat_rates = {row[profile.category_col]: row["repeat_rate"] for _, row in cat_rr.iterrows()}
+                        min_rate_pct = min(cat_rates.values())
+                        max_rate_pct = max(cat_rates.values())
+                        spread_pct = max_rate_pct - min_rate_pct
+                        rate_detail = ", ".join(
+                            f"{cat}={rate:.0f}%"
+                            for cat, rate in sorted(cat_rates.items(), key=lambda x: x[1])
                         )
+                        if spread_pct >= 15 and min_rate_pct < 70:
+                            lowest_cat = min(cat_rates, key=cat_rates.get)
+                            root_cause = (
+                                f"Repeat rate varies significantly by {profile.category_col}: {rate_detail}. "
+                                f"{lowest_cat} ({min_rate_pct:.0f}%) is dragging down the blended rate. "
+                                f"Category-level retention programmes will be more effective than a blended approach."
+                            )
+                        elif spread_pct >= 10:
+                            root_cause = (
+                                f"Repeat rate shows moderate variation across {profile.category_col}: "
+                                f"{rate_detail}. No single category is a significant outlier."
+                            )
+                        else:
+                            root_cause = (
+                                f"Repeat rate is consistently high across all {profile.category_col} categories "
+                                f"({min_rate_pct:.0f}%–{max_rate_pct:.0f}%). "
+                                f"Category mix is not the constraint — focus on AOV and basket size."
+                            )
                 except Exception:
                     pass
+
+            # Fix 1: high retention gate — pivot to AOV growth scenarios when repeat_rate >= 95%
+            HIGH_RETENTION_THRESHOLD = 0.95
+
+            if repeat_rate >= HIGH_RETENTION_THRESHOLD:
+                aov_scenarios = {
+                    "Conservative (+5% AOV)":  total_customers * avg_orders_per_customer * aov * 0.05,
+                    "Base case (+10% AOV)":    total_customers * avg_orders_per_customer * aov * 0.10,
+                    "Optimistic (+15% AOV)":   total_customers * avg_orders_per_customer * aov * 0.15,
+                }
+                base_aov_gain = aov_scenarios["Base case (+10% AOV)"]
+                description = (
+                    f"CLV Estimate: AOV={_fmt_currency(aov)} × repeat rate={rate_pct:.0f}% × "
+                    f"avg orders per repeater={avg_orders_repeater:.1f} = "
+                    f"{_fmt_currency(clv)} per customer lifetime value.\n\n"
+                    f"Retention is already maximised ({rate_pct:.0f}% repeat rate) — "
+                    f"further repeat-rate improvement is not the primary growth lever. "
+                    f"AOV expansion through cross-sell and upsell is the correct focus. "
+                    f"AOV Growth Scenarios ({total_customers} customers, current AOV {_fmt_currency(aov)}):\n"
+                    f"• Conservative (+5% AOV): {_fmt_currency(aov_scenarios['Conservative (+5% AOV)'])} additional annual revenue\n"
+                    f"• Base case (+10% AOV): {_fmt_currency(aov_scenarios['Base case (+10% AOV)'])} additional annual revenue\n"
+                    f"• Optimistic (+15% AOV): {_fmt_currency(aov_scenarios['Optimistic (+15% AOV)'])} additional annual revenue\n\n"
+                    f"{benchmark_context}"
+                )
+                if root_cause:
+                    description += f"\n\nCategory Analysis: {root_cause}"
+                insight = BusinessInsight(
+                    title="Customer Lifetime Value Estimate & AOV Growth Scenarios",
+                    description=description,
+                    why_it_matters="With retention already maximised, AOV is the primary lever for revenue growth.",
+                    evidence=f"Total customers: {total_customers:,} | Repeat rate: {rate_pct:.0f}% | AOV: {_fmt_currency(aov)} | Avg orders (repeaters): {avg_orders_repeater:.1f}",
+                    decision_implication=(
+                        f"A 10% AOV lift adds {_fmt_currency(base_aov_gain)} annually — "
+                        f"compare against cost of cross-sell and bundle initiatives to determine ROI."
+                    ),
+                    impact="\U0001f7e0 Important",
+                    recommendation=(
+                        f"AOV is the growth lever, not repeat rate. "
+                        f"A 10% AOV lift adds {_fmt_currency(base_aov_gain)} annually. "
+                        f"Introduce bundle pricing, cross-category recommendations, and "
+                        f"premium tier upsells to move average basket size."
+                    ),
+                    rule_type="clv_estimate",
+                    methodology="CLV = AOV × repeat_rate × avg_orders_per_repeater; AOV uplift = total_customers × avg_orders × AOV × lift_pct",
+                    score=8.0,
+                )
+                if root_cause:
+                    insight.chart_data = {"root_cause": root_cause}
+                return [insight]
+
+            # Normal path — retention lift scenarios
+            rev_per_1pct_lift = total_customers * aov * (avg_orders_repeater / 100)
+            conservative = rev_per_1pct_lift * 1  # +1%
+            base_case = rev_per_1pct_lift * 3      # +3%
+            optimistic = rev_per_1pct_lift * 5     # +5%
 
             description = (
                 f"CLV Estimate: AOV={_fmt_currency(aov)} × repeat rate={rate_pct:.1f}% × "
@@ -4366,8 +4620,11 @@ class BusinessRuleEngine:
                 description=description,
                 why_it_matters="CLV quantifies the long-term value of retention investment versus customer acquisition cost.",
                 evidence=f"Total customers: {total_customers:,} | Repeat rate: {rate_pct:.1f}% | AOV: {_fmt_currency(aov)} | Avg orders (repeaters): {avg_orders_repeater:.1f}",
-                decision_implication=f"A 3% lift in repeat rate is worth {_fmt_currency(base_case)} — compare this against the cost of your retention programme to determine ROI.",
-                impact="🟠 Important",
+                decision_implication=(
+                    f"A 3% lift in repeat rate is worth {_fmt_currency(base_case)} — "
+                    f"compare this against the cost of your retention programme to determine ROI."
+                ),
+                impact="\U0001f7e0 Important",
                 recommendation=(
                     f"Invest in retention campaigns targeting the {rate_pct:.1f}% → {min(rate_pct+3, 100):.1f}% repeat-rate goal. "
                     f"At {_fmt_currency(rev_per_1pct_lift)} per 1pp, each percentage point pays for targeted loyalty spend."
@@ -5356,6 +5613,9 @@ class StrategicBriefBuilder:
             if len(pdf) < 30:
                 return ""
 
+            if not pd.api.types.is_numeric_dtype(pdf[rev_col]):
+                return ""
+
             pdf["_month"] = pdf[date_col].dt.to_period("M")
             monthly = pdf.groupby("_month")[rev_col].sum()
             if len(monthly) < 2:
@@ -5400,12 +5660,15 @@ class StrategicBriefBuilder:
 
             import pandas as pd
             pdf = self.df.to_pandas()
-            
+
+            if not pd.api.types.is_numeric_dtype(pdf[rev_col]):
+                return ""
+
             # Group by category
             cat_revenue = pdf.groupby(cat_col)[rev_col].sum().sort_values(ascending=False)
             if len(cat_revenue) < 2:
                 return ""
-            
+
             total_rev = cat_revenue.sum()
             if total_rev == 0:
                 return ""
@@ -6898,7 +7161,10 @@ def run_insight_engine(
         print("✅ V2 ENGINE ACTIVE — 2026-05-09 BUILD")
         print("✅ Enhanced error handling, lowered thresholds, safety nets active")
         print("="*70 + "\n")
-        
+
+        if isinstance(df, pd.DataFrame):
+            df = pl.from_pandas(df)
+
         # ── Sampling for large datasets (FIX 4: Tiered Logic) ──────────
         original_row_count = len(df)
         sampled = False

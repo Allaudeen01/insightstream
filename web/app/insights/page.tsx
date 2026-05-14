@@ -16,6 +16,7 @@ import {
     AlertCircle,
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
+import { apiFetch } from "@/lib/api";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
@@ -97,48 +98,76 @@ export default function InsightsPage() {
 
     // ----- Load session + data -----
     useEffect(() => {
+        // Prefer ?session= URL param, fall back to localStorage
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlSid = urlParams.get("session");
+
         const stored = localStorage.getItem("analysis_session");
-        if (!stored) { router.push("/upload"); return; }
-        const session = JSON.parse(stored);
-        setProjectName(session.filename?.split(".")[0] || "Project");
-        fetchData(session.session_id);
+        const cached = stored ? JSON.parse(stored) : null;
+
+        const sid = urlSid || cached?.session_id;
+        if (!sid) { router.push("/upload"); return; }
+
+        const name = (cached?.filename || cached?.original_filename || String(sid)).split(".")[0];
+        setProjectName(name);
+        fetchData(String(sid), cached && String(cached.session_id) === String(sid) ? cached : null);
     }, [router]);
 
-    const fetchData = async (sid: string) => {
+    const fetchData = async (sid: string, cachedSession: any) => {
         try {
             setLoading(true);
             setError(null);
-            const [insightsRes, vizRes] = await Promise.all([
-                fetch(`${API_BASE}/insights/${sid}`),
-                fetch(`${API_BASE}/generate-viz/${sid}?max_charts=12`),
-            ]);
-            if (!insightsRes.ok) {
-                if (insightsRes.status === 404) {
-                    // Session expired (server restarted). Clear stale state.
-                    localStorage.removeItem("analysis_session");
-                    setError("session_expired");
-                    return;
+
+            // ── Insight data ─────────────────────────────────────────────────
+            if (cachedSession) {
+                // Full engine output is already in localStorage — use it directly.
+                setData(cachedSession);
+                localStorage.setItem(`insights_${sid}`, JSON.stringify(cachedSession));
+            } else {
+                // Direct URL navigation — fetch from DB and map to display shape.
+                const res = await apiFetch(`/sessions/${sid}`);
+                if (!res.ok) {
+                    if (res.status === 401) { router.push("/login"); return; }
+                    if (res.status === 404) {
+                        localStorage.removeItem("analysis_session");
+                        setError("session_expired");
+                        return;
+                    }
+                    throw new Error(`Session fetch failed: ${res.status}`);
                 }
-                if (insightsRes.status === 504) {
-                    // Timeout - insight generation taking too long
-                    const errorData = await insightsRes.json().catch(() => ({}));
-                    setError("timeout");
-                    console.error("Insight generation timed out:", errorData);
-                    return;
-                }
-                throw new Error(`Insights fetch failed: ${insightsRes.status}`);
+                const sessionData = await res.json();
+                const mapped: InsightsData = {
+                    session_id: String(sessionData.id),
+                    executive_summary: "",
+                    strategic_brief: (sessionData.insights ?? []).map((i: any) => ({
+                        title: i.title,
+                        description: i.body,
+                        chart_type: i.chart_type || "bar",
+                        impact: i.impact as "High" | "Medium" | "Low",
+                        decision_implication: "",
+                        rule_type: i.rule_type || "",
+                        chart_data: (() => { try { return JSON.parse(i.evidence_json || "{}"); } catch { return {}; } })(),
+                    })),
+                    recommendations: (sessionData.recommendations ?? []).map((r: any) => ({
+                        priority: (r.display_order ?? 0) + 1,
+                        action: r.action,
+                        timeframe: r.timeframe,
+                        owner: r.owner,
+                        impact: r.impact,
+                    })),
+                    computed_metrics: sessionData.kpis_json ? JSON.parse(sessionData.kpis_json) : {},
+                };
+                setData(mapped);
             }
-            if (!vizRes.ok) throw new Error(`Viz fetch failed: ${vizRes.status}`);
 
-            const insightsJson = await insightsRes.json();
-            setData(insightsJson);
-            setVizData(await vizRes.json());
-
-            // Persist for the dashboard PDF export
-            localStorage.setItem(`insights_${sid}`, JSON.stringify(insightsJson));
+            // ── Charts (generated from the uploaded file on disk) ────────────
+            const vizRes = await apiFetch(`/generate-viz/${sid}?max_charts=12`);
+            if (vizRes.ok) {
+                setVizData(await vizRes.json());
+            }
+            // Charts failing is non-fatal — insights still display
         } catch (err: any) {
             console.error("Insights fetch error:", err);
-            // Network-level failure (backend down or CORS)
             if (err instanceof TypeError && err.message === "Failed to fetch") {
                 setError("backend_unreachable");
             } else {
@@ -244,9 +273,16 @@ export default function InsightsPage() {
                     kpis: data.computed_metrics || {},
                     charts: chartAssets,
                     ai_summary: data.executive_summary || "",
-                    insights: (data.recommendations || [])
-                        .map((r: any) => typeof r === "string" ? r : r.action || r.linked_insight || "")
-                        .filter(Boolean),
+                    insights: (data.strategic_brief || []).map((i: any) =>
+                        typeof i === "string" ? { title: i, body: i, rule_type: "", chart_data: {} } : {
+                            rule_type: i.rule_type || "",
+                            title: i.title || "",
+                            body: i.description || i.body || "",
+                            impact: i.impact || "minor",
+                            chart_data: i.chart_data || {},
+                        }
+                    ).filter((i: any) => i.title || i.body),
+                    recommendations: data.recommendations || [],
                     text_blocks: [],
                 }),
             });
