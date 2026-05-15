@@ -1,6 +1,18 @@
 import sys
+import math
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+
+def make_json_safe(obj):
+    """Recursively replace NaN/Inf floats with None for JSON compliance."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [make_json_safe(v) for v in obj]
+    return obj
 
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -333,14 +345,36 @@ async def eda_endpoint(
             else:
                 role = "numerical"
                 numeric_cols.append(col)
-        elif df[col].dtype == object:
-            if n_unique / max(len(df), 1) > 0.9 and n_unique > 50:
-                role = "identifier"
-                identifier_cols.append(col)
-            elif n_unique == 2:
+        elif df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            if n_unique == 2:
                 role = "binary"
                 binary_cols.append(col)
-            elif n_unique <= 20:
+            elif n_unique > 5:
+                # Try date parsing before falling back to categorical/identifier
+                try:
+                    sample = df[col].dropna().head(200)
+                    # Try dayfirst=True first (handles DD/MM/YYYY like "1/8/2023 11:13")
+                    parsed = pd.to_datetime(sample, dayfirst=True, errors="coerce")
+                    if parsed.notna().mean() <= 0.7:
+                        # Fall back to MM/DD/YYYY
+                        parsed = pd.to_datetime(sample, errors="coerce")
+                    if parsed.notna().mean() > 0.7:
+                        role = "temporal"
+                        date_cols.append(col)
+                    elif n_unique <= 100:
+                        role = "categorical"
+                        categorical_cols.append(col)
+                    else:
+                        role = "identifier"
+                        identifier_cols.append(col)
+                except Exception:
+                    if n_unique <= 100:
+                        role = "categorical"
+                        categorical_cols.append(col)
+                    else:
+                        role = "identifier"
+                        identifier_cols.append(col)
+            elif n_unique <= 100:
                 role = "categorical"
                 categorical_cols.append(col)
             else:
@@ -396,7 +430,7 @@ async def eda_endpoint(
     if identifier_cols:
         insights.append(f"Columns {', '.join(identifier_cols)} appear to be identifiers and are excluded from model training.")
 
-    return {
+    return make_json_safe({
         "session_id": str(session_id),
         "numeric_columns": numeric_cols,
         "categorical_columns": categorical_cols,
@@ -407,7 +441,7 @@ async def eda_endpoint(
         "correlation_matrix": correlation_matrix,
         "insights": insights,
         "warnings": warnings,
-    }
+    })
 
 
 class ColumnInfo(BaseModel):
@@ -616,14 +650,25 @@ async def export_dashboard_pdf(
             domain_id=domain_id
         )
         logger.info(f"✅ [SUCCESS] PDF generated at: {out_path}")
-        
+
         img_dir = Path(tempfile.gettempdir()) / f"insightstream_export_{session_id}"
-        background_tasks.add_task(cleanup_temp_files, str(out_path), str(img_dir))
-        
+
+        def _cleanup():
+            try:
+                os.remove(str(out_path))
+            except Exception:
+                pass
+            try:
+                cleanup_temp_files("", str(img_dir))
+            except Exception:
+                pass
+
+        background_tasks.add_task(_cleanup)
+
         return FileResponse(
-            path=out_path,
+            path=str(out_path),
             filename=f"{body.title.replace(' ', '_')}.pdf",
-            media_type="application/pdf"
+            media_type="application/pdf",
         )
     except Exception as e:
         logger.error(f"❌ [FAILURE] PDF Export failed: {e}")
@@ -2659,6 +2704,7 @@ def get_eda(session_id: str):
         "insights": insights[:10],
         "warnings": warnings[:5]
     }
+    resp_data = make_json_safe(resp_data)
     _cache.put(session_id, "eda_response", resp_data)
 
     return EDAResponse(**resp_data)

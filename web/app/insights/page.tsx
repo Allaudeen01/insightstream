@@ -14,6 +14,7 @@ import {
     TrendingUp,
     Lightbulb,
     AlertCircle,
+    LayoutDashboard,
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import { apiFetch } from "@/lib/api";
@@ -91,6 +92,7 @@ export default function InsightsPage() {
     const [reportTitle, setReportTitle] = useState("InsightStream analysis report");
 
     // Export state
+    const [pinnedCharts, setPinnedCharts] = useState<string[]>([]);
     const [showExportModal, setShowExportModal] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
     const [exportProgress, setExportProgress] = useState(0);
@@ -166,6 +168,13 @@ export default function InsightsPage() {
                 setVizData(await vizRes.json());
             }
             // Charts failing is non-fatal — insights still display
+
+            // ── Seed pinned state from dashboard backend ─────────────────────
+            const dashRes = await apiFetch(`/dashboard/${sid}`);
+            if (dashRes.ok) {
+                const dashData = await dashRes.json();
+                setPinnedCharts(dashData.pinned_chart_ids || []);
+            }
         } catch (err: any) {
             console.error("Insights fetch error:", err);
             if (err instanceof TypeError && err.message === "Failed to fetch") {
@@ -175,6 +184,26 @@ export default function InsightsPage() {
             }
         } finally {
             setLoading(false);
+        }
+    };
+
+    // ----- Pin chart to dashboard -----
+    const togglePin = async (chartId: string) => {
+        const sid = data?.session_id;
+        if (!sid) return;
+        const alreadyPinned = pinnedCharts.includes(chartId);
+        const next = alreadyPinned
+            ? pinnedCharts.filter(id => id !== chartId)
+            : [...pinnedCharts, chartId];
+        setPinnedCharts(next);
+        try {
+            await fetch(`${API_BASE}/dashboard/${sid}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pinned_chart_ids: next, layout: [], text_blocks: [] }),
+            });
+        } catch {
+            setPinnedCharts(pinnedCharts);
         }
     };
 
@@ -479,6 +508,18 @@ export default function InsightsPage() {
                                                         <h3 className="truncate text-[14px] font-medium text-zinc-900">
                                                             {chart.title}
                                                         </h3>
+                                                        <button
+                                                            onClick={() => togglePin(chart.chart_id)}
+                                                            title={pinnedCharts.includes(chart.chart_id) ? "Unpin from dashboard" : "Pin to dashboard"}
+                                                            className={[
+                                                                "ml-3 shrink-0 rounded-md p-1.5 transition-colors",
+                                                                pinnedCharts.includes(chart.chart_id)
+                                                                    ? "bg-indigo-100 text-indigo-600"
+                                                                    : "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700",
+                                                            ].join(" ")}
+                                                        >
+                                                            <LayoutDashboard className="h-3.5 w-3.5" strokeWidth={1.75} />
+                                                        </button>
                                                     </div>
                                                     <div className="p-3">
                                                         <div className="h-[340px]">

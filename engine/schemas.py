@@ -30,6 +30,7 @@ class InsightOut(BaseModel):
     body: str
     impact: str
     display_order: int
+    evidence_json: Optional[str] = None
 
     class Config:
         from_attributes = True

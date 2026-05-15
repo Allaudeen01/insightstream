@@ -1,74 +1,73 @@
-import React from "react";
-import Link from "next/link";
-import { Upload, CheckCircle2, ArrowRight } from "lucide-react";
-import Sidebar from "@/components/Sidebar";
+"use client";
+import { useRouter } from "next/navigation";
 
 export default function LandingPage() {
+  const router = useRouter();
+
   return (
-    <div className="min-h-screen bg-slate-50 flex">
-      <Sidebar />
+    <div className="min-h-screen bg-white flex flex-col">
+      {/* Navbar */}
+      <nav className="flex items-center justify-between px-8 py-4 border-b">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center">
+            <span className="text-white text-xs font-bold">I</span>
+          </div>
+          <span className="font-semibold text-gray-900 text-lg">InsightStream</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push("/login")}
+            className="text-sm text-gray-600 hover:text-gray-900 px-4 py-2 rounded-lg hover:bg-gray-100 transition-colors"
+          >
+            Log In
+          </button>
+          <button
+            onClick={() => router.push("/register")}
+            className="text-sm bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors font-medium"
+          >
+            Sign Up
+          </button>
+        </div>
+      </nav>
 
-      <main className="flex-1 px-8 py-10">
-        <div className="max-w-3xl mx-auto">
-          {/* Hero */}
-          <header className="mb-10">
-            <p className="text-xs font-medium text-indigo-700 uppercase tracking-wide mb-3">
-              Get started
-            </p>
-            <h1 className="text-3xl md:text-4xl font-semibold text-slate-900 tracking-tight mb-3">
-              Upload a file to begin
-            </h1>
-            <p className="text-base text-slate-500 leading-relaxed max-w-xl">
-              Drop in a CSV or Excel file and we&apos;ll summarize the columns,
-              check the data for issues, and surface insights worth your time.
-            </p>
-          </header>
+      {/* Hero */}
+      <main className="flex-1 flex flex-col items-center justify-center px-6 text-center max-w-3xl mx-auto w-full">
+        <div className="mb-6">
+          <span className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-700 text-xs font-medium px-3 py-1.5 rounded-full border border-indigo-100">
+            ✨ AI-powered analytics — no code needed
+          </span>
+        </div>
 
-          {/* Upload card */}
-          <Link href="/upload" className="block group">
-            <div className="rounded-lg border-2 border-dashed border-slate-300 bg-white p-10 text-center transition-colors group-hover:border-indigo-400 group-hover:bg-indigo-50/40">
-              <div className="w-12 h-12 rounded-md bg-slate-50 border border-slate-200 flex items-center justify-center mx-auto mb-5 group-hover:bg-white group-hover:border-indigo-200 transition-colors">
-                <Upload className="w-5 h-5 text-slate-600 group-hover:text-indigo-600" strokeWidth={1.75} />
-              </div>
-              <h2 className="text-lg font-semibold text-slate-900 mb-1.5">
-                Drop your file here
-              </h2>
-              <p className="text-sm text-slate-500 mb-6">
-                Supports CSV and Excel (.xlsx) files
-              </p>
-              <span className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-indigo-600 group-hover:bg-indigo-700 text-white text-sm font-medium transition-colors">
-                Browse files
-                <ArrowRight className="w-4 h-4" />
-              </span>
-            </div>
-          </Link>
+        <h1 className="text-5xl font-bold text-gray-900 mb-4 leading-tight">
+          What can I do<br />for you today?
+        </h1>
 
-          {/* Feature list */}
-          <section className="mt-12">
-            <h3 className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-4">
-              What you&apos;ll get
-            </h3>
-            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
-              {[
-                "A summary of every column",
-                "Data quality checks",
-                "Plain-language insights",
-                "Downloadable reports",
-                "Ask questions in chat",
-                "No code required",
-              ].map(feature => (
-                <li
-                  key={feature}
-                  className="flex items-center gap-2.5 text-sm text-slate-700"
-                >
-                  <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
-                  {feature}
-                </li>
-              ))}
-            </ul>
-          </section>
+        <p className="text-gray-500 text-lg mb-10 max-w-xl">
+          Upload any CSV or Excel file. Get instant insights, charts, and a branded PDF report — powered by AI.
+        </p>
+
+        {/* Fake input CTA — clicking opens signup */}
+        <div
+          onClick={() => router.push("/register")}
+          className="w-full max-w-xl border border-gray-200 rounded-xl px-5 py-4 text-left text-gray-400 cursor-pointer hover:border-indigo-300 hover:shadow-sm transition-all bg-white"
+        >
+          Upload a CSV or Excel file to get started...
+        </div>
+
+        {/* Feature chips */}
+        <div className="flex flex-wrap items-center justify-center gap-2 mt-6">
+          {["Revenue Analysis", "Customer Segmentation", "Cohort Retention", "CLV Forecast", "PDF Export"].map(f => (
+            <span key={f} className="text-xs text-gray-500 bg-gray-100 px-3 py-1.5 rounded-full">
+              {f}
+            </span>
+          ))}
         </div>
       </main>
+
+      {/* Footer */}
+      <footer className="text-center text-xs text-gray-400 py-6">
+        © 2026 InsightStream · AI Data Analyst
+      </footer>
     </div>
   );
 }

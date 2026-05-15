@@ -10,9 +10,9 @@ from models import AnalysisSession, SessionInsight, SessionRecommendation
 
 def _normalize_impact(raw: str) -> str:
     s = raw.lower()
-    if "critical" in s: return "critical"
-    if "important" in s or "high" in s: return "important"
-    return "minor"
+    if "critical" in s: return "Critical"
+    if "important" in s or "high" in s: return "Important"
+    return "Minor"
 
 
 async def create_session(
@@ -64,11 +64,16 @@ async def save_results(
 
     # Save insights
     for i, insight in enumerate(insights):
+        if i < 2:
+            print(f"[SAVE DEBUG] insight[{i}] keys:", list(insight.keys()) if hasattr(insight, "keys") else type(insight))
+            print(f"[SAVE DEBUG] insight[{i}] body:", insight.get("body", "MISSING"))
+            print(f"[SAVE DEBUG] insight[{i}] description:", insight.get("description", "MISSING"))
+            print(f"[SAVE DEBUG] insight[{i}] text:", insight.get("text", "MISSING"))
         record = SessionInsight(
             session_id=session_id,
             rule_type=insight.get("rule_type", "unknown"),
             title=insight.get("title", ""),
-            body=insight.get("body", ""),
+            body=insight.get("description") or insight.get("body", ""),
             impact=_normalize_impact(insight.get("impact", "minor")),
             display_order=i,
         )

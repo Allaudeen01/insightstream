@@ -63,30 +63,16 @@ async def analyze(
         # Mock PDF generation for now, wire it properly later
         report_path = f"/tmp/Report_{session_record.id}.pdf"
 
-        # DEBUG — remove after inspection
-        if results.get("insights"):
-            first = results["insights"][0]
-            print("=== INSIGHT DEBUG ===")
-            print("TYPE:", type(first))
-            print("KEYS:", first.keys() if hasattr(first, 'keys') else dir(first))
-            print("FULL FIRST INSIGHT:", first)
-            print("=== END DEBUG ===")
-
-        if results.get("recommendations"):
-            first_rec = results["recommendations"][0]
-            print("=== REC DEBUG ===")
-            print("TYPE:", type(first_rec))
-            print("KEYS:", first_rec.keys() if hasattr(first_rec, 'keys') else dir(first_rec))
-            print("FULL FIRST REC:", first_rec)
-            print("=== END REC DEBUG ===")
+        domain_raw = results.get("domain", {})
+        domain_name = domain_raw.get("name", "general") if isinstance(domain_raw, dict) else str(domain_raw)
 
         await save_results(
             db=db,
             session_id=session_record.id,
-            kpis=results.get("kpis", {}),
-            insights=results.get("insights", []),
+            kpis=results.get("computed_metrics", {}),
+            insights=results.get("strategic_brief", []),
             recommendations=results.get("recommendations", []),
-            detected_domain=results.get("domain", "general"),
+            detected_domain=domain_name,
             report_path=report_path,
         )
 

@@ -2936,7 +2936,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         _ok = self._add_chart_section(
                             elements, _fig,
                             chart_title,
-                            chart.get("insight", "Segmented data analysis."),
+                            chart.get("caption") or chart.get("insight") or chart.get("description") or "",
                         )
                         if _ok:
                             valid_charts += 1
@@ -3020,7 +3020,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     elements,
                     img_path,
                     chart_title,
-                    chart.get("insight", "Segmented data analysis.")
+                    chart.get("caption") or chart.get("insight") or chart.get("description") or "",
                 )
                 valid_charts += 1
                 log.info(f"[Chart {i+1}] ✓ Successfully added to PDF")
