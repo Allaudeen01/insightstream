@@ -1,13 +1,15 @@
-import React from 'react';
+"use client";
+
+import React, { useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 interface QualityIssue {
-  type: string;
-  severity: 'critical' | 'medium';
+  issue_type: string;
+  severity: string;
   column: string;
   count: number;
-  message: string;
-  rows?: number[];
-  values?: string[];
+  description: string;
+  percentage?: number;
 }
 
 interface QualitySummary {
@@ -24,16 +26,208 @@ interface QualityReport {
   issues: QualityIssue[];
 }
 
+interface OutlierData {
+  column: string;
+  total_outliers: number;
+  pct: number;
+  lower_bound: number;
+  upper_bound: number;
+  Q1: number;
+  Q3: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  rows: Record<string, unknown>[];
+  columns: string[];
+}
+
 interface Props {
   report: QualityReport | null | undefined;
+  sessionId?: number;
 }
 
 const severityStyle: Record<string, string> = {
-  critical: 'bg-red-50 border-red-300 text-red-800',
-  medium:   'bg-yellow-50 border-yellow-300 text-yellow-800',
+  high:   "bg-red-50 border-red-300 text-red-800",
+  medium: "bg-yellow-50 border-yellow-300 text-yellow-800",
+  low:    "bg-blue-50 border-blue-300 text-blue-800",
 };
 
-export function DataQualityPanel({ report }: Props) {
+function IssueRow({
+  issue,
+  sessionId,
+}: {
+  issue: QualityIssue;
+  sessionId?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<OutlierData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+
+  const isOutlier = issue.issue_type === "outlier";
+  const style = severityStyle[issue.severity] ?? "bg-gray-50 border-gray-200";
+
+  async function fetchOutliers(p: number) {
+    if (!sessionId) return;
+    setLoading(true);
+    try {
+      const res = await apiFetch(
+        `/eda/${sessionId}/outliers/${encodeURIComponent(issue.column)}?page=${p}&page_size=50`
+      );
+      if (res.ok) {
+        const json = await res.json();
+        setData(json);
+        setPage(p);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleToggle() {
+    if (!isOutlier || !sessionId) return;
+    if (!open && !data) fetchOutliers(1);
+    setOpen((v) => !v);
+  }
+
+  const displayColumns = data
+    ? data.columns.filter((c) => !c.startsWith("_"))
+    : [];
+
+  return (
+    <div className={`border rounded-lg text-sm ${style}`}>
+      <button
+        type="button"
+        className="w-full text-left p-3 flex items-start justify-between gap-2 hover:opacity-80"
+        style={isOutlier && sessionId ? { cursor: "pointer" } : { cursor: "default" }}
+        onClick={(e) => {
+          e.stopPropagation();
+          handleToggle();
+        }}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="font-semibold">
+            {issue.issue_type.replace(/_/g, " ")} — {issue.column}
+          </div>
+          <div className="mt-0.5 opacity-90">{issue.description}</div>
+          {issue.percentage != null && (
+            <div className="text-xs opacity-70 mt-0.5">
+              {issue.count.toLocaleString()} rows ({issue.percentage.toFixed(1)}%)
+            </div>
+          )}
+        </div>
+        {isOutlier && sessionId && (
+          <span className="text-xs font-medium shrink-0 mt-0.5 opacity-70">
+            {open ? "▲ hide" : "▼ view rows"}
+          </span>
+        )}
+      </button>
+
+      {open && isOutlier && (
+        <div className="border-t border-current border-opacity-20 px-3 pb-3 pt-2">
+          {loading && !data && (
+            <div className="text-xs opacity-60 py-2">Loading…</div>
+          )}
+
+          {data && (
+            <>
+              <div className="flex flex-wrap gap-4 text-xs font-medium mb-2 opacity-80">
+                <span>{data.total_outliers} outlier rows ({data.pct}%)</span>
+                <span>
+                  Normal range: {data.lower_bound.toLocaleString()} –{" "}
+                  {data.upper_bound.toLocaleString()}
+                </span>
+                <span>Q1: {data.Q1.toLocaleString()}</span>
+                <span>Q3: {data.Q3.toLocaleString()}</span>
+              </div>
+
+              {data.rows.length > 0 ? (
+                <div className="overflow-x-auto rounded border border-current border-opacity-20">
+                  <table className="text-xs w-full min-w-max">
+                    <thead>
+                      <tr className="bg-black bg-opacity-5">
+                        <th className="px-2 py-1 text-left font-semibold">Direction</th>
+                        <th className="px-2 py-1 text-right font-semibold">
+                          {issue.column}
+                        </th>
+                        {displayColumns
+                          .filter((c) => c !== issue.column)
+                          .slice(0, 6)
+                          .map((c) => (
+                            <th key={c} className="px-2 py-1 text-left font-semibold">
+                              {c}
+                            </th>
+                          ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.rows.map((row, i) => (
+                        <tr
+                          key={i}
+                          className={i % 2 === 0 ? "bg-white bg-opacity-40" : ""}
+                        >
+                          <td className="px-2 py-1">
+                            <span
+                              className={`font-semibold ${
+                                row._outlier_direction === "high"
+                                  ? "text-red-600"
+                                  : "text-blue-600"
+                              }`}
+                            >
+                              {String(row._outlier_direction).toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono">
+                            {Number(row._outlier_value).toLocaleString()}
+                          </td>
+                          {displayColumns
+                            .filter((c) => c !== issue.column)
+                            .slice(0, 6)
+                            .map((c) => (
+                              <td key={c} className="px-2 py-1 truncate max-w-[120px]">
+                                {row[c] == null ? "—" : String(row[c])}
+                              </td>
+                            ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-xs opacity-60 py-2">No rows on this page.</div>
+              )}
+
+              {data.total_pages > 1 && (
+                <div className="flex items-center gap-3 mt-2 text-xs">
+                  <button
+                    disabled={page <= 1 || loading}
+                    onClick={() => fetchOutliers(page - 1)}
+                    className="px-2 py-0.5 rounded border border-current border-opacity-30 disabled:opacity-40 hover:bg-black hover:bg-opacity-5"
+                  >
+                    Prev
+                  </button>
+                  <span className="opacity-70">
+                    Page {page} / {data.total_pages}
+                  </span>
+                  <button
+                    disabled={page >= data.total_pages || loading}
+                    onClick={() => fetchOutliers(page + 1)}
+                    className="px-2 py-0.5 rounded border border-current border-opacity-30 disabled:opacity-40 hover:bg-black hover:bg-opacity-5"
+                  >
+                    Next
+                  </button>
+                  {loading && <span className="opacity-50">Loading…</span>}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DataQualityPanel({ report, sessionId }: Props) {
   if (!report) return null;
 
   if (report.summary.issue_count === 0) {
@@ -71,35 +265,10 @@ export function DataQualityPanel({ report }: Props) {
 
       <div className="space-y-2">
         {report.issues.map((issue, i) => (
-          <div
-            key={i}
-            className={`border rounded-lg p-3 text-sm ${severityStyle[issue.severity] ?? 'bg-gray-50 border-gray-200'}`}
-          >
-            <div className="font-semibold">
-              {issue.type.replace(/_/g, ' ')} — {issue.column}
-            </div>
-            <div className="mt-0.5">{issue.message}</div>
-            {issue.values && issue.values.length > 0 && (
-              <div className="mt-1 text-xs opacity-75">
-                Bad values: {issue.values.slice(0, 8).join(', ')}
-                {issue.values.length > 8 ? ` +${issue.values.length - 8} more` : ''}
-              </div>
-            )}
-            {issue.rows && issue.rows.length > 0 && (
-              <div className="text-xs opacity-75">
-                Affected rows: {issue.rows.slice(0, 5).join(', ')}
-                {issue.rows.length > 5 ? ` +${issue.rows.length - 5} more` : ''}
-              </div>
-            )}
-          </div>
+          <IssueRow key={i} issue={issue} sessionId={sessionId} />
         ))}
       </div>
 
-      {!report.summary.can_analyze && (
-        <div className="bg-red-50 border border-red-300 rounded-lg p-3 text-red-700 font-semibold text-sm">
-          Analysis blocked. Fix critical issues in your file and re-upload.
-        </div>
-      )}
     </div>
   );
 }

@@ -45,6 +45,7 @@ export default function UploadPage() {
     const [availableSheets, setAvailableSheets] = useState<string[]>([]);
     const [pendingFile, setPendingFile] = useState<File | null>(null);
     const [qualityReport, setQualityReport] = useState<any>(null);
+    const [qualitySessionId, setQualitySessionId] = useState<number | undefined>(undefined);
     const qualityPanelRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
 
@@ -63,6 +64,7 @@ export default function UploadPage() {
         setIsUploading(true);
         setError(null);
         setQualityReport(null);
+        setQualitySessionId(undefined);
 
         if (!sheetName) {
             setPendingFile(null);
@@ -81,7 +83,33 @@ export default function UploadPage() {
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || "Upload failed");
 
-            const qr = data.quality_report ?? null;
+            const sessionId = Number(data.session_id);
+            if (sessionId) setQualitySessionId(sessionId);
+
+            let qr = null;
+            if (sessionId) {
+                try {
+                    const hcRes = await apiFetch(`/health-check/${sessionId}`);
+                    if (hcRes.ok) {
+                        const hcData = await hcRes.json();
+                        const highCount = hcData.issues.filter((i: any) => i.severity === "high").length;
+                        const medCount  = hcData.issues.filter((i: any) => i.severity === "medium").length;
+                        qr = {
+                            summary: {
+                                total_rows:  hcData.row_count,
+                                clean_rows:  hcData.row_count - hcData.duplicate_rows,
+                                issue_count: hcData.issues.length,
+                                critical:    highCount,
+                                medium:      medCount,
+                                can_analyze: hcData.quality_score !== "D",
+                            },
+                            issues: hcData.issues,
+                        };
+                    }
+                } catch (e) {
+                    console.error("Failed to fetch health check:", e);
+                }
+            }
             setQualityReport(qr);
             if (qr) {
                 setTimeout(() => {
@@ -95,8 +123,6 @@ export default function UploadPage() {
                 setShowSheetModal(true);
                 return;
             }
-
-            if (qr?.summary?.can_analyze === false) return;
 
             localStorage.setItem("analysis_session", JSON.stringify(data));
             router.push(`/health-check?session=${data.session_id}`);
@@ -208,7 +234,7 @@ export default function UploadPage() {
 
                         {/* Quality report */}
                         <div ref={qualityPanelRef} className="mt-8">
-                            <DataQualityPanel report={qualityReport} />
+                            <DataQualityPanel report={qualityReport} sessionId={qualitySessionId} />
                         </div>
                     </div>
                 </main>

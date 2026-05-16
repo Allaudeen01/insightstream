@@ -93,7 +93,7 @@ async def refresh_access_token(
     )
     record = result.scalar_one_or_none()
 
-    if not record or record.expires_at < datetime.now(timezone.utc):
+    if not record or record.expires_at < datetime.utcnow():
         raise HTTPException(401, "Invalid or expired refresh token")
 
     new_access_token = create_access_token(record.user_id)

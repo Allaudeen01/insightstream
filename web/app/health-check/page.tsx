@@ -420,7 +420,7 @@ export default function HealthCheckPage() {
                   ) : (
                     <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white">
                       {healthData.issues.map((issue, i) => (
-                        <IssueRow key={i} issue={issue} divider={i > 0} />
+                        <IssueRow key={i} issue={issue} divider={i > 0} sessionId={sessionId ? Number(sessionId) : undefined} />
                       ))}
                     </div>
                   )}
@@ -718,17 +718,27 @@ function Stat({
   );
 }
 
-function IssueRow({ issue, divider }: { issue: IssueItem; divider: boolean }) {
+function IssueRow({ issue, divider, sessionId }: { issue: IssueItem; divider: boolean; sessionId?: number }) {
+  const [open, setOpen] = useState(false);
+  const [rowData, setRowData] = useState<any>(null);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  const isOutlier   = issue.issue_type === "outlier";
+  const isMissing   = issue.issue_type === "missing";
+  const isDuplicate = issue.issue_type === "duplicate";
+  const isExpandable = (isOutlier || isMissing || isDuplicate) && !!sessionId;
+
   const sevStyle: Record<string, { dot: string; pill: string; label: string }> = {
-    high: { dot: "bg-red-500", pill: "bg-red-50 text-red-700 border-red-200", label: "High" },
+    high:   { dot: "bg-red-500",   pill: "bg-red-50 text-red-700 border-red-200",     label: "High"   },
     medium: { dot: "bg-amber-500", pill: "bg-amber-50 text-amber-700 border-amber-200", label: "Medium" },
-    low: { dot: "bg-sky-500", pill: "bg-sky-50 text-sky-700 border-sky-200", label: "Low" },
+    low:    { dot: "bg-sky-500",   pill: "bg-sky-50 text-sky-700 border-sky-200",      label: "Low"    },
   };
   const missingnessBadge: Record<string, { pill: string; label: string }> = {
-    MCAR: { pill: "bg-sky-50 text-sky-700 border-sky-200", label: "MCAR" },
-    MAR: { pill: "bg-violet-50 text-violet-700 border-violet-200", label: "MAR" },
-    MNAR: { pill: "bg-amber-50 text-amber-700 border-amber-200", label: "MNAR" },
-    TARGET_LEAKAGE: { pill: "bg-red-50 text-red-700 border-red-200", label: "Leakage risk" },
+    MCAR:           { pill: "bg-sky-50 text-sky-700 border-sky-200",       label: "MCAR"         },
+    MAR:            { pill: "bg-violet-50 text-violet-700 border-violet-200", label: "MAR"        },
+    MNAR:           { pill: "bg-amber-50 text-amber-700 border-amber-200", label: "MNAR"          },
+    TARGET_LEAKAGE: { pill: "bg-red-50 text-red-700 border-red-200",       label: "Leakage risk" },
   };
   const sev = sevStyle[issue.severity] ?? sevStyle.low;
   const mb = issue.missingness_type ? missingnessBadge[issue.missingness_type] : null;
@@ -736,37 +746,195 @@ function IssueRow({ issue, divider }: { issue: IssueItem; divider: boolean }) {
     ? issue.column === "_all_" ? "All columns" : "Multiple columns"
     : issue.column;
 
+  async function fetchRows(p: number) {
+    if (!sessionId) return;
+    setLoadingRows(true);
+    try {
+      let url = "";
+      if (isOutlier)   url = `/eda/${sessionId}/outliers/${encodeURIComponent(issue.column)}?page=${p}&page_size=50`;
+      else if (isMissing)   url = `/eda/${sessionId}/missing/${encodeURIComponent(issue.column)}?page=${p}&page_size=50`;
+      else if (isDuplicate) url = `/eda/${sessionId}/duplicates?page=${p}&page_size=50`;
+      const res = await apiFetch(url);
+      if (res.ok) {
+        setRowData(await res.json());
+        setCurrentPage(p);
+      }
+    } finally {
+      setLoadingRows(false);
+    }
+  }
+
+  function handleToggle() {
+    if (!isExpandable) return;
+    if (!open && !rowData) fetchRows(1);
+    setOpen(v => !v);
+  }
+
+  const displayCols: string[] = rowData
+    ? rowData.columns.filter((c: string) => !c.startsWith("_"))
+    : [];
+
   return (
-    <div className={`flex items-start gap-4 px-5 py-4 ${divider ? "border-t border-zinc-100" : ""}`}>
-      <div className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${sev.dot}`} />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[14px] font-semibold text-zinc-900">{columnLabel}</span>
-          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${sev.pill}`}>
-            {sev.label}
-          </span>
-          {mb && (
-            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${mb.pill}`}>
-              {mb.label}
+    <div className={divider ? "border-t border-zinc-100" : ""}>
+      <button
+        type="button"
+        className={`flex w-full items-start gap-4 px-5 py-4 text-left ${isExpandable ? "cursor-pointer hover:bg-zinc-50" : "cursor-default"}`}
+        onClick={handleToggle}
+      >
+        <div className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${sev.dot}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[14px] font-semibold text-zinc-900">{columnLabel}</span>
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${sev.pill}`}>
+              {sev.label}
             </span>
+            {mb && (
+              <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${mb.pill}`}>
+                {mb.label}
+              </span>
+            )}
+            <span className="text-[12px] text-zinc-400">·</span>
+            <span className="text-[12px] text-zinc-500">
+              {issue.issue_type.replace(/_/g, " ")}
+            </span>
+          </div>
+          <p className="mt-1 text-[13px] leading-relaxed text-zinc-600">{issue.description}</p>
+          {issue.missingness_reason && isMissing && (
+            <p className="mt-0.5 text-[12px] italic text-zinc-400">{issue.missingness_reason}</p>
           )}
-          <span className="text-[12px] text-zinc-500">
-            {issue.issue_type.replace(/_/g, " ")}
-          </span>
         </div>
-        <p className="mt-1 text-[13px] leading-relaxed text-zinc-600">{issue.description}</p>
-        {issue.missingness_reason && issue.issue_type === "missing" && (
-          <p className="mt-0.5 text-[12px] italic text-zinc-400">{issue.missingness_reason}</p>
-        )}
-      </div>
-      <div className="shrink-0 text-right">
-        <div className="text-[16px] font-semibold tabular-nums text-zinc-900">
-          {issue.count.toLocaleString()}
+        <div className="shrink-0 text-right">
+          <div className="text-[16px] font-semibold tabular-nums text-zinc-900">
+            {issue.count.toLocaleString()}
+          </div>
+          <div className="text-[11px] text-zinc-500">
+            {issue.percentage.toFixed(1)}% of rows
+          </div>
+          {isExpandable && (
+            <div className="mt-1 text-[11px] font-medium text-[#6d5ef5]">
+              {open ? "▲ hide rows" : "▼ view rows"}
+            </div>
+          )}
         </div>
-        <div className="text-[11px] text-zinc-500">
-          {issue.percentage.toFixed(1)}% of rows
+      </button>
+
+      {open && isExpandable && (
+        <div className="border-t border-zinc-100 bg-zinc-50 px-5 py-3">
+          {loadingRows && !rowData && (
+            <div className="flex items-center gap-2 text-[13px] text-zinc-500 py-2">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
+              Loading rows…
+            </div>
+          )}
+
+          {rowData && (
+            <>
+              {/* Stats bar */}
+              <div className="flex flex-wrap gap-4 text-[12px] font-medium text-zinc-600 mb-3">
+                {isOutlier && (
+                  <>
+                    <span>{rowData.total_outliers} outlier rows ({rowData.pct}%)</span>
+                    <span>Normal range: {rowData.lower_bound?.toLocaleString()} – {rowData.upper_bound?.toLocaleString()}</span>
+                    <span>Q1: {rowData.Q1?.toLocaleString()}</span>
+                    <span>Q3: {rowData.Q3?.toLocaleString()}</span>
+                  </>
+                )}
+                {isMissing && (
+                  <span>{rowData.total_missing} rows missing "{issue.column}" ({rowData.pct}%)</span>
+                )}
+                {isDuplicate && (
+                  <span>{rowData.total_duplicates} duplicate rows ({rowData.pct}%)</span>
+                )}
+              </div>
+
+              {rowData.rows.length > 0 ? (
+                <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
+                  <table className="w-full min-w-max text-[12px]">
+                    <thead className="bg-zinc-50">
+                      <tr>
+                        {isDuplicate && (
+                          <th className="px-3 py-2 text-left font-semibold text-zinc-700">Group</th>
+                        )}
+                        {isOutlier && (
+                          <>
+                            <th className="px-3 py-2 text-left font-semibold text-zinc-700">Direction</th>
+                            <th className="px-3 py-2 text-right font-semibold text-zinc-700">{issue.column}</th>
+                          </>
+                        )}
+                        {displayCols
+                          .filter(c => isOutlier ? c !== issue.column : true)
+                                                    .map(c => (
+                            <th key={c} className="px-3 py-2 text-left font-semibold text-zinc-700">{c}</th>
+                          ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rowData.rows.map((row: any, i: number) => (
+                        <tr key={i} className="border-t border-zinc-100 hover:bg-zinc-50">
+                          {isDuplicate && (
+                            <td className="px-3 py-2">
+                              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-800">
+                                #{row._dup_group + 1}
+                              </span>
+                            </td>
+                          )}
+                          {isOutlier && (
+                            <>
+                              <td className="px-3 py-2">
+                                <span className={`font-semibold ${row._outlier_direction === "high" ? "text-red-600" : "text-sky-600"}`}>
+                                  {String(row._outlier_direction).toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono font-semibold text-zinc-900">
+                                {Number(row._outlier_value).toLocaleString()}
+                              </td>
+                            </>
+                          )}
+                          {displayCols
+                            .filter(c => isOutlier ? c !== issue.column : true)
+                                                        .map(c => (
+                              <td
+                                key={c}
+                                className={`max-w-[140px] truncate px-3 py-2 ${isMissing && c === issue.column ? "bg-amber-50 text-amber-700 italic" : "text-zinc-700"}`}
+                              >
+                                {row[c] == null
+                                  ? <span className="italic text-zinc-400">null</span>
+                                  : String(row[c])}
+                              </td>
+                            ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-[13px] text-zinc-500 py-2">No rows on this page.</p>
+              )}
+
+              {rowData.total_pages > 1 && (
+                <div className="mt-3 flex items-center gap-3 text-[12px]">
+                  <button
+                    disabled={currentPage <= 1 || loadingRows}
+                    onClick={() => fetchRows(currentPage - 1)}
+                    className="rounded border border-zinc-200 bg-white px-2.5 py-1 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
+                  >
+                    Prev
+                  </button>
+                  <span className="text-zinc-500">Page {currentPage} / {rowData.total_pages}</span>
+                  <button
+                    disabled={currentPage >= rowData.total_pages || loadingRows}
+                    onClick={() => fetchRows(currentPage + 1)}
+                    className="rounded border border-zinc-200 bg-white px-2.5 py-1 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                  {loadingRows && <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" strokeWidth={1.75} />}
+                </div>
+              )}
+            </>
+          )}
         </div>
-      </div>
+      )}
     </div>
   );
 }

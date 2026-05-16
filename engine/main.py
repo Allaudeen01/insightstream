@@ -292,10 +292,54 @@ async def health_check_endpoint(
                 "percentage": pct,
             })
 
+    if duplicates > 0:
+        pct = round(duplicates / total_rows * 100, 2)
+        issues.append({
+            "column": "_all_",
+            "issue_type": "duplicate",
+            "severity": "high" if pct > 5 else "medium",
+            "description": f"{duplicates} duplicate rows ({pct}%)",
+            "count": duplicates,
+            "percentage": pct,
+            "suggested_action": "drop_duplicates",
+        })
+
+    for col in df.columns:
+        if df[col].nunique() <= 1:
+            issues.append({
+                "column": col,
+                "issue_type": "constant",
+                "severity": "medium",
+                "description": f"Column has only {df[col].nunique()} unique value — no variance",
+                "count": total_rows,
+                "percentage": 100.0,
+                "suggested_action": "drop_column",
+            })
+
+    for col in df.select_dtypes(include="object").columns:
+        n_unique = df[col].nunique()
+        pct_unique = n_unique / total_rows if total_rows > 0 else 0
+        if pct_unique > 0.95 and total_rows > 100:
+            issues.append({
+                "column": col,
+                "issue_type": "high_cardinality",
+                "severity": "low",
+                "description": f"{n_unique} unique values ({round(pct_unique * 100, 1)}%) — likely an ID column",
+                "count": n_unique,
+                "percentage": round(pct_unique * 100, 2),
+                "suggested_action": "review_column",
+            })
+
+    high_issues = [i for i in issues if i.get("severity") == "high"]
+    missing_issues = [i for i in issues if i.get("issue_type") == "missing"]
+    total_missing_pct = sum(i.get("percentage", 0) for i in missing_issues)
+
     if len(issues) == 0 and duplicates == 0:
         score = "A"
-    elif len(issues) <= 2 and duplicates < total_rows * 0.01:
+    elif len(high_issues) == 0:
         score = "B"
+    elif total_missing_pct > 50 or duplicates > total_rows * 0.5:
+        score = "D"
     else:
         score = "C"
 
@@ -445,6 +489,153 @@ async def eda_endpoint(
         "correlation_matrix": correlation_matrix,
         "insights": insights,
         "warnings": warnings,
+    })
+
+
+# ── Outlier rows endpoint ──────────────────────────────────────────────────────
+@app.get("/eda/{session_id}/outliers/{column}")
+async def get_outlier_rows(
+    session_id: int,
+    column: str,
+    page: int = 1,
+    page_size: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from services.session_service import get_session_detail
+    session = await get_session_detail(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    try:
+        _, df_raw = load_session(str(session_id))
+        df = df_raw.to_pandas() if hasattr(df_raw, "to_pandas") else df_raw
+    except FileNotFoundError:
+        raise HTTPException(404, "Session file not found on disk")
+
+    if column not in df.columns:
+        raise HTTPException(404, f"Column '{column}' not found")
+
+    if not pd.api.types.is_numeric_dtype(df[column]):
+        raise HTTPException(400, f"Column '{column}' is not numeric")
+
+    col_data = df[column].dropna()
+    Q1 = float(col_data.quantile(0.25))
+    Q3 = float(col_data.quantile(0.75))
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    mask = (df[column] < lower_bound) | (df[column] > upper_bound)
+    outlier_df = df[mask].copy()
+    outlier_df["_outlier_value"] = outlier_df[column]
+    outlier_df["_outlier_direction"] = outlier_df[column].apply(
+        lambda v: "high" if v > upper_bound else "low"
+    )
+
+    total_outliers = len(outlier_df)
+    pct = round(total_outliers / max(len(df), 1) * 100, 2)
+    total_pages = max(1, (total_outliers + page_size - 1) // page_size)
+
+    start = (page - 1) * page_size
+    page_df = outlier_df.iloc[start : start + page_size]
+
+    return make_json_safe({
+        "column": column,
+        "total_outliers": total_outliers,
+        "pct": pct,
+        "lower_bound": round(lower_bound, 4),
+        "upper_bound": round(upper_bound, 4),
+        "Q1": round(Q1, 4),
+        "Q3": round(Q3, 4),
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "rows": page_df.to_dict(orient="records"),
+        "columns": list(page_df.columns),
+    })
+
+
+# ── Missing value rows endpoint ────────────────────────────────────────────────
+@app.get("/eda/{session_id}/missing/{column}")
+async def get_missing_rows(
+    session_id: int,
+    column: str,
+    page: int = 1,
+    page_size: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from services.session_service import get_session_detail
+    session = await get_session_detail(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    try:
+        _, df_raw = load_session(str(session_id))
+        df = df_raw.to_pandas() if hasattr(df_raw, "to_pandas") else df_raw
+    except FileNotFoundError:
+        raise HTTPException(404, "Session file not found on disk")
+
+    if column not in df.columns:
+        raise HTTPException(404, f"Column '{column}' not found")
+
+    missing_df = df[df[column].isna()].copy()
+    missing_df["_row_index"] = missing_df.index
+
+    total = len(missing_df)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    start = (page - 1) * page_size
+    page_df = missing_df.iloc[start : start + page_size]
+
+    return make_json_safe({
+        "column": column,
+        "total_missing": total,
+        "pct": round(total / max(len(df), 1) * 100, 2),
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "rows": page_df.to_dict(orient="records"),
+        "columns": list(df.columns),
+    })
+
+
+# ── Duplicate rows endpoint ────────────────────────────────────────────────────
+@app.get("/eda/{session_id}/duplicates")
+async def get_duplicate_rows(
+    session_id: int,
+    page: int = 1,
+    page_size: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from services.session_service import get_session_detail
+    session = await get_session_detail(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    try:
+        _, df_raw = load_session(str(session_id))
+        df = df_raw.to_pandas() if hasattr(df_raw, "to_pandas") else df_raw
+    except FileNotFoundError:
+        raise HTTPException(404, "Session file not found on disk")
+
+    dup_mask = df.duplicated(keep=False)
+    dup_df = df[dup_mask].copy()
+    dup_df["_row_index"] = dup_df.index
+    dup_df["_dup_group"] = df[dup_mask].groupby(list(df.columns)).ngroup().values
+
+    total = len(dup_df)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    start = (page - 1) * page_size
+    page_df = dup_df.iloc[start : start + page_size]
+
+    return make_json_safe({
+        "total_duplicates": total,
+        "pct": round(total / max(len(df), 1) * 100, 2),
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "rows": page_df.to_dict(orient="records"),
+        "columns": list(df.columns),
     })
 
 
