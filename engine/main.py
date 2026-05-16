@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import sys
 import math
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -51,7 +54,6 @@ from session_cache import SessionCache, JobTracker
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query, BackgroundTasks, Depends
 from report_generator import ChartGenerator, PDFReportGenerator, ColumnMap, cleanup_temp_files, UnifiedReportGenerator
 import report_generator
-print(f"[IMPORT] report_generator loaded from: {report_generator.__file__}")
 
 import tempfile
 from pathlib import Path
@@ -134,9 +136,11 @@ app = FastAPI(title="Virtual Data Scientist Engine", lifespan=lifespan)
 from routers.auth import router as auth_router
 from routers.analyze import router as analyze_router
 from routers.sessions import router as sessions_router
+from routers.chat import router as chat_router
 app.include_router(auth_router)
 app.include_router(analyze_router)
 app.include_router(sessions_router)
+app.include_router(chat_router)
 
 # Allow CORS for Next.js frontend (localhost + production)
 app.add_middleware(
@@ -354,10 +358,10 @@ async def eda_endpoint(
                 try:
                     sample = df[col].dropna().head(200)
                     # Try dayfirst=True first (handles DD/MM/YYYY like "1/8/2023 11:13")
-                    parsed = pd.to_datetime(sample, dayfirst=True, errors="coerce")
+                    parsed = pd.to_datetime(sample, format="mixed", dayfirst=True, errors="coerce")
                     if parsed.notna().mean() <= 0.7:
                         # Fall back to MM/DD/YYYY
-                        parsed = pd.to_datetime(sample, errors="coerce")
+                        parsed = pd.to_datetime(sample, format="mixed", errors="coerce")
                     if parsed.notna().mean() > 0.7:
                         role = "temporal"
                         date_cols.append(col)
@@ -624,14 +628,6 @@ async def export_dashboard_pdf(
             ]
 
         _insights_to_use = structured_insights if structured_insights else clean_insights
-        print(f"[EXPORT DEBUG] Session {session_id} — insights count: {len(_insights_to_use)}")
-        if _insights_to_use:
-            _first = _insights_to_use[0]
-            print(f"[EXPORT DEBUG] First insight type: {type(_first)}")
-            print(f"[EXPORT DEBUG] First insight keys: {list(_first.keys()) if isinstance(_first, dict) else 'NOT A DICT'}")
-            if isinstance(_first, dict):
-                print(f"[EXPORT DEBUG] rule_type: {_first.get('rule_type')}")
-                print(f"[EXPORT DEBUG] has chart_data: {'chart_data' in _first}")
 
         gen = UnifiedReportGenerator()
         gen.build_from_assets(

@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,16 +65,13 @@ async def save_results(
 
     # Save insights
     for i, insight in enumerate(insights):
-        if i < 2:
-            print(f"[SAVE DEBUG] insight[{i}] keys:", list(insight.keys()) if hasattr(insight, "keys") else type(insight))
-            print(f"[SAVE DEBUG] insight[{i}] body:", insight.get("body", "MISSING"))
-            print(f"[SAVE DEBUG] insight[{i}] description:", insight.get("description", "MISSING"))
-            print(f"[SAVE DEBUG] insight[{i}] text:", insight.get("text", "MISSING"))
+        body_text = insight.get("description") or insight.get("body", "")
+        body_text = re.sub(r'\.{2,}', '.', body_text)
         record = SessionInsight(
             session_id=session_id,
             rule_type=insight.get("rule_type", "unknown"),
             title=insight.get("title", ""),
-            body=insight.get("description") or insight.get("body", ""),
+            body=body_text,
             impact=_normalize_impact(insight.get("impact", "minor")),
             display_order=i,
         )

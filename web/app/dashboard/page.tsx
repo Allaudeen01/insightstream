@@ -208,9 +208,6 @@ export default function DashboardPage() {
 
     // ----- PDF export -----
     const handleExportPDF = async () => {
-        console.log("EXPORT DEBUG — sessionId at start:", sessionId);
-        console.log("EXPORT DEBUG — pinnedIds:", pinnedIds);
-        console.log("EXPORT DEBUG — allCharts count:", allCharts.length);
         setIsExporting(true);
         const firstChart = allCharts.find(c => pinnedIds.includes(c.chart_id));
         const sid = (firstChart?.session_id ?? sessionId) as number;
@@ -254,8 +251,6 @@ export default function DashboardPage() {
                 const matchedExplanation = Object.entries(CHART_EXPLANATIONS).find(
                     ([key]) => chart.title?.toLowerCase().includes(key)
                 )?.[1] || "";
-                console.log("CHART DEBUG:", chart.chart_id, "explanation:", chart.explanation, "matched:", matchedExplanation, "description:", chart.description);
-
                 charts.push({
                     id: chart.chart_id,
                     title: chart.title,
@@ -277,12 +272,6 @@ export default function DashboardPage() {
             }
 
             const sessionData = await sessionRes.json();
-            console.log("EXPORT DEBUG — sessionId:", sessionId);
-            console.log("EXPORT DEBUG — sessionData.insights count:", sessionData.insights?.length);
-            console.log("EXPORT DEBUG — sessionData.insights[0]:", sessionData.insights?.[0]);
-            console.log("EXPORT DEBUG — kpis_json:", sessionData.kpis_json?.slice(0, 100));
-            console.log("EXPORT DEBUG — charts count:", charts.length);
-            console.log("EXPORT DEBUG — charts[0]:", charts[0]);
 
             let insights = (sessionData.insights ?? []).map((i: any) => ({
                 rule_type: i.rule_type || "",
@@ -311,7 +300,6 @@ export default function DashboardPage() {
                                     chart_data: i.chart_data || {},
                                 }
                         );
-                        console.log("EXPORT DEBUG — used localStorage fallback, insights:", insights.length);
                     } catch {}
                 }
             }

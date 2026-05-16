@@ -3581,6 +3581,9 @@ class BusinessRuleEngine:
                 # Expected low rate = proportion of scale below midpoint
                 expected_low_rate = (scale_midpoint - scale_min) / (scale_max - scale_min) * 100  # 40%
 
+                # Percentage of orders with a low (1- or 2-star) rating
+                pct_low = (pdf[col] <= low_threshold).mean() * 100
+
                 # Only fire if actual low rate meaningfully exceeds expectation
                 excess_low_rate = pct_low - expected_low_rate
 
@@ -3698,6 +3701,7 @@ class BusinessRuleEngine:
             score=8.5,
         )]
 
+    @log_rule
     def _rule_customer_concentration(
         self, df: pl.DataFrame, profile: DataProfile
     ) -> list[BusinessInsight]:

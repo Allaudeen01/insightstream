@@ -168,7 +168,7 @@ class TimeSeriesAnalyzer:
 
             # Generate month labels
             last_period = monthly.index[-1]
-            if hasattr(last_period, "to_period"):
+            if hasattr(last_period, "to_timestamp"):
                 base = last_period.to_timestamp()
             else:
                 base = pd.Timestamp(last_period)
@@ -317,7 +317,9 @@ class TimeSeriesAnalyzer:
                 "monthly_growth_pct": round(monthly_growth_pct, 2),
                 "direction": direction,
                 "forecast": self._forecast_next_months(
-                    pd.Series(revenues, index=pd.DatetimeIndex([m.to_timestamp() for m in months]))
+                    pd.Series(revenues, index=pd.DatetimeIndex([
+                        m.to_timestamp() if hasattr(m, "to_timestamp") else m for m in months
+                    ]))
                 ),
             },
         )
@@ -578,3 +580,4 @@ class TimeSeriesAnalyzer:
                 if df[col].dtype in (pl.Float64, pl.Float32, pl.Int64, pl.Int32):
                     return col
         return None
+

@@ -159,8 +159,6 @@ import pandas as pd
 import polars as pl
 import seaborn as sns
 
-print("=== REPORT_GENERATOR.PY LOADED — VERSION DEBUG ===")
-
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -1647,14 +1645,18 @@ class PDFReportGenerator:
             revenues = [d[1] for d in monthly_data]
 
             labels = []
+            dates  = []
             for m in months:
                 try:
-                    labels.append(_dt.strptime(m, "%Y-%m").strftime("%b %Y"))
+                    dt = _dt.strptime(m, "%Y-%m")
+                    labels.append(dt.strftime("%b %Y"))
+                    dates.append(pd.Timestamp(dt))
                 except Exception:
                     labels.append(m)
+                    dates.append(pd.NaT)
 
             fig, ax = plt.subplots(figsize=(8, 3.5))
-            ax.plot(labels, revenues, marker="o", linewidth=2.5,
+            ax.plot(dates, revenues, marker="o", linewidth=2.5,
                     color="#4a6fa5", markersize=8,
                     markerfacecolor="white", markeredgewidth=2.5)
 
@@ -1667,12 +1669,11 @@ class PDFReportGenerator:
             peak_idx = revenues.index(max(revenues)) if revenues else None
             trough_idx = revenues.index(min(revenues)) if revenues else None
             annotate_indices = {0, len(labels)-1, peak_idx, trough_idx}
-            for i, (label, rev) in enumerate(zip(labels, revenues)):
+            for i, (date, rev) in enumerate(zip(dates, revenues)):
                 if i not in annotate_indices:
                     continue
-                # format and annotate only these 4 points
                 val_str = smart_fmt(rev, None)
-                ax.annotate(val_str, (label, rev),
+                ax.annotate(val_str, (date, rev),
                             textcoords="offset points", xytext=(0, 12),
                             ha="center", fontsize=9, color="#1a1a2e", fontweight="bold")
 
@@ -1695,13 +1696,13 @@ class PDFReportGenerator:
                     
                     if peak_label_idx is not None:
                         ax.scatter(
-                            [labels[peak_label_idx]], [revenues[peak_label_idx]],
+                            [dates[peak_label_idx]], [revenues[peak_label_idx]],
                             marker="*", s=200, color="#10b981", zorder=5,
                             label=f"Peak: {peak_month}"
                         )
                         ax.annotate(
                             f"▲ {peak_month}",
-                            (labels[peak_label_idx], revenues[peak_label_idx]),
+                            (dates[peak_label_idx], revenues[peak_label_idx]),
                             textcoords="offset points", xytext=(0, 16),
                             ha="center", fontsize=9,
                             color="#10b981", fontweight="bold"
@@ -1728,13 +1729,13 @@ class PDFReportGenerator:
                     
                     if trough_label_idx is not None:
                         ax.scatter(
-                            [labels[trough_label_idx]], [revenues[trough_label_idx]],
+                            [dates[trough_label_idx]], [revenues[trough_label_idx]],
                             marker="v", s=150, color="#ef4444", zorder=5,
                             label=f"Trough: {trough_month}"
                         )
                         ax.annotate(
                             f"▼ {trough_month}",
-                            (labels[trough_label_idx], revenues[trough_label_idx]),
+                            (dates[trough_label_idx], revenues[trough_label_idx]),
                             textcoords="offset points", xytext=(0, -20),
                             ha="center", fontsize=9,
                             color="#ef4444", fontweight="bold"
@@ -1774,7 +1775,7 @@ class PDFReportGenerator:
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             tick_positions = range(0, len(labels), 3)
-            ax.set_xticks([labels[i] for i in tick_positions])
+            ax.set_xticks([dates[i] for i in tick_positions])
             ax.set_xticklabels([labels[i] for i in tick_positions], rotation=45, ha="right", fontsize=8)
             plt.tight_layout()
 
@@ -2683,13 +2684,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
             f"Official Strategic Analysis  •  {date.today().strftime('%B %d, %Y')}",
             self.S["Subtitle"]))
         elements.append(Spacer(1, 0.3 * inch))
-        _vstamp_style = ParagraphStyle(
-            '_VStamp', fontSize=10, fontName=PDF_FONT_BOLD,
-            textColor=colors.white,
-            backColor=colors.HexColor('#6366f1'),
-            borderPad=6, alignment=1,
-        )
-        elements.append(Paragraph(f"ENGINE v4 — {date.today().isoformat()}", _vstamp_style))
         elements.append(PageBreak())
 
         # 2. PAGE 2: EXECUTIVE SUMMARY & KPIs

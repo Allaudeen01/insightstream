@@ -17,6 +17,7 @@ import {
     LayoutDashboard,
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
+import ChatPanel from "@/components/ChatPanel";
 import { apiFetch } from "@/lib/api";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
@@ -84,7 +85,7 @@ export default function InsightsPage() {
     const [error, setError] = useState<string | null>(null);
     const [data, setData] = useState<InsightsData | null>(null);
     const [vizData, setVizData] = useState<any>(null);
-    const [activeTab, setActiveTab] = useState<"insights" | "charts">("charts");
+    const [activeTab, setActiveTab] = useState<"insights" | "charts" | "chat">("charts");
     const [copied, setCopied] = useState(false);
 
     // Branding inputs (used by export)
@@ -481,10 +482,24 @@ export default function InsightsPage() {
                                 Insights
                                 <Pill>{data?.strategic_brief?.length ?? 0}</Pill>
                             </TabBtn>
+                            <TabBtn active={activeTab === "chat"} onClick={() => setActiveTab("chat")}>
+                                Chat
+                            </TabBtn>
                         </div>
 
                         {/* Tab content */}
                         <div className="pt-6">
+                            {activeTab === "chat" && (
+                                data?.session_id ? (
+                                    <div className="h-[600px]">
+                                        <ChatPanel sessionId={Number(data.session_id)} />
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center justify-center h-64 text-zinc-400 text-sm">
+                                        Select an analysis from the sidebar to start chatting
+                                    </div>
+                                )
+                            )}
                             {activeTab === "charts" ? (
                                 charts.length === 0 ? (
                                     <EmptyState
@@ -584,7 +599,7 @@ export default function InsightsPage() {
                                 )
                             )}
 
-                            {/* Recommendations strip */}
+                            {/* Recommendations strip — insights tab only */}
                             {activeTab === "insights" && (data?.recommendations?.length ?? 0) > 0 && (
                                 <section className="mt-8">
                                     <h2 className="mb-3 text-[14px] font-semibold tracking-[-0.01em] text-zinc-900">
