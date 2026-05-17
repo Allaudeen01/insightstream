@@ -71,7 +71,7 @@ export default function Sidebar() {
 
     const handleLogout = async () => {
         const token = localStorage.getItem("access_token");
-        await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/auth/logout`, {
+        await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/auth/logout`, {
             method: "POST",
             headers: { Authorization: `Bearer ${token}` },
             credentials: "include",
