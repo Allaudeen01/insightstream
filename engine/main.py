@@ -145,7 +145,11 @@ app.include_router(chat_router)
 # Allow CORS for Next.js frontend (localhost + production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (Vercel, localhost, etc.)
+    allow_origins=[
+        "http://localhost:3000",
+        "https://insightstream-alpha.vercel.app",
+        "https://*.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
