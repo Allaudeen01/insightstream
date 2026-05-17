@@ -25,7 +25,7 @@ export default function LoginPage() {
       const { access_token } = await res.json();
       // Store access token in memory only — NOT localStorage
       sessionStorage.setItem("access_token", access_token);
-      router.push("/insights");
+      router.push("/upload");
     } else {
       const data = await res.json();
       setError(data.detail || "Login failed");
