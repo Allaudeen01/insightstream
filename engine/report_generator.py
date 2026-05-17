@@ -1299,16 +1299,17 @@ class PDFReportGenerator:
                 fontSize=10, textColor=colors.HexColor(C.TEXT_GREY),
                 alignment=TA_CENTER, spaceAfter=20, fontName=cfg["font_main"]),
             "Section": ParagraphStyle("RSec", parent=base["Heading2"],
-                fontSize=14, textColor=colors.HexColor(cfg["brand_dark"]),
-                spaceBefore=14, spaceAfter=8, fontName=cfg["font_bold"]),
+                fontSize=13, textColor=colors.HexColor(cfg["brand_dark"]),
+                spaceBefore=18, spaceAfter=6, fontName=cfg["font_bold"],
+                borderPadding=0),
             "ChartTitle": ParagraphStyle("RChartTitle", parent=base["Normal"],
                 fontSize=11, textColor=colors.HexColor(C.TEXT_DARK),
                 fontName=cfg["font_bold"], spaceAfter=6),
             "Insight": ParagraphStyle("RIns", parent=base["Normal"],
-                fontSize=9, textColor=colors.HexColor(C.TEXT_DARK),
-                backColor=colors.HexColor(cfg["brand_light"]),
-                borderPad=8, leftIndent=10, rightIndent=10,
-                leading=12, fontName=cfg["font_main"]),
+                fontSize=9, textColor=colors.HexColor(C.TEXT_GREY),
+                fontName=cfg["font_main"],
+                leading=14, spaceAfter=8, spaceBefore=3,
+                leftIndent=0, rightIndent=0),
             "Fallback": ParagraphStyle("RFall", parent=base["Normal"],
                 fontSize=8, textColor=colors.HexColor(C.TEXT_MUTED),
                 fontName=cfg["font_main"]),
@@ -1551,7 +1552,7 @@ class PDFReportGenerator:
         if not chart_path:
             elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             elements.append(Paragraph(
-                "⚠ Chart skipped — required column not found in dataset.",
+                "Chart skipped — required column not found in dataset.",
                 self.S["Fallback"]))
             elements.append(Spacer(1, 12))
             return
@@ -1559,27 +1560,27 @@ class PDFReportGenerator:
         if not os.path.exists(chart_path):
             elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             elements.append(Paragraph(
-                f"⚠ Chart file missing: {_xe(chart_path)}", self.S["Fallback"]))
+                f"Chart file missing: {_xe(chart_path)}", self.S["Fallback"]))
             elements.append(Spacer(1, 12))
             return
 
         if os.path.getsize(chart_path) == 0:
             elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
             elements.append(Paragraph(
-                "⚠ Chart file is empty (render error).", self.S["Fallback"]))
+                "Chart file is empty — render error.", self.S["Fallback"]))
             elements.append(Spacer(1, 12))
             return
 
         try:
             # KeepTogether prevents title orphaning from its chart image
             # Use reduced height to prevent overflow that causes chart dropping
-            chart_block = KeepTogether([
+            chart_block = KeepTogether([el for el in [
                 Paragraph(safe_title, self.S["ChartTitle"]),
                 RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H),
                 Spacer(1, 6),
-                Paragraph(f"📊  {safe_insight}", self.S["Insight"]),
-                Spacer(1, 16),  # Reduced from 22 to save space
-            ])
+                Paragraph(safe_insight, self.S["Insight"]) if safe_insight.strip() else None,
+                Spacer(1, 16),
+            ] if el is not None])
             elements.append(chart_block)
         except Exception as exc:
             # Fallback: add without KeepTogether if block is too large
@@ -1588,10 +1589,11 @@ class PDFReportGenerator:
             try:
                 elements.append(RLImage(chart_path, width=C.SAFE_IMG_W, height=C.SAFE_IMG_H))
                 elements.append(Spacer(1, 6))
-                elements.append(Paragraph(f"📊  {safe_insight}", self.S["Insight"]))
+                if safe_insight.strip():
+                    elements.append(Paragraph(safe_insight, self.S["Insight"]))
             except Exception as img_exc:
                 log.error("ReportLab failed loading %s: %s", chart_path, img_exc)
-                elements.append(Paragraph(f"⚠ Render error: {_xe(str(img_exc))}", self.S["Fallback"]))
+                elements.append(Paragraph(f"Render error: {_xe(str(img_exc))}", self.S["Fallback"]))
             elements.append(Spacer(1, 16))
 
     def _plotly_to_image(self, fig, width_inches: float = 7.5, height_inches: float = 3.8) -> Optional[RLImage]:
@@ -1645,18 +1647,15 @@ class PDFReportGenerator:
             revenues = [d[1] for d in monthly_data]
 
             labels = []
-            dates  = []
             for m in months:
                 try:
                     dt = _dt.strptime(m, "%Y-%m")
                     labels.append(dt.strftime("%b %Y"))
-                    dates.append(pd.Timestamp(dt))
                 except Exception:
-                    labels.append(m)
-                    dates.append(pd.NaT)
+                    labels.append(str(m))
 
             fig, ax = plt.subplots(figsize=(8, 3.5))
-            ax.plot(dates, revenues, marker="o", linewidth=2.5,
+            ax.plot(labels, revenues, marker="o", linewidth=2.5,
                     color="#4a6fa5", markersize=8,
                     markerfacecolor="white", markeredgewidth=2.5)
 
@@ -1669,40 +1668,37 @@ class PDFReportGenerator:
             peak_idx = revenues.index(max(revenues)) if revenues else None
             trough_idx = revenues.index(min(revenues)) if revenues else None
             annotate_indices = {0, len(labels)-1, peak_idx, trough_idx}
-            for i, (date, rev) in enumerate(zip(dates, revenues)):
+            for i, (label, rev) in enumerate(zip(labels, revenues)):
                 if i not in annotate_indices:
                     continue
                 val_str = smart_fmt(rev, None)
-                ax.annotate(val_str, (date, rev),
+                ax.annotate(val_str, (label, rev),
                             textcoords="offset points", xytext=(0, 12),
                             ha="center", fontsize=9, color="#1a1a2e", fontweight="bold")
 
             # ✅ Peak marker
             if peak_month:
                 try:
-                    # Handle both period strings ("2027-12") and month names ("March")
                     peak_label_idx = None
                     for i, m in enumerate(months):
                         try:
-                            # Try period format first
                             if _dt.strptime(m, "%Y-%m").strftime("%B") == peak_month:
                                 peak_label_idx = i
                                 break
-                        except:
-                            # Direct month name match
+                        except Exception:
                             if m == peak_month:
                                 peak_label_idx = i
                                 break
-                    
+
                     if peak_label_idx is not None:
                         ax.scatter(
-                            [dates[peak_label_idx]], [revenues[peak_label_idx]],
+                            [labels[peak_label_idx]], [revenues[peak_label_idx]],
                             marker="*", s=200, color="#10b981", zorder=5,
                             label=f"Peak: {peak_month}"
                         )
                         ax.annotate(
                             f"▲ {peak_month}",
-                            (dates[peak_label_idx], revenues[peak_label_idx]),
+                            (labels[peak_label_idx], revenues[peak_label_idx]),
                             textcoords="offset points", xytext=(0, 16),
                             ha="center", fontsize=9,
                             color="#10b981", fontweight="bold"
@@ -1713,29 +1709,26 @@ class PDFReportGenerator:
             # ✅ Trough marker
             if trough_month:
                 try:
-                    # Handle both period strings ("2027-12") and month names ("June")
                     trough_label_idx = None
                     for i, m in enumerate(months):
                         try:
-                            # Try period format first
                             if _dt.strptime(m, "%Y-%m").strftime("%B") == trough_month:
                                 trough_label_idx = i
                                 break
-                        except:
-                            # Direct month name match
+                        except Exception:
                             if m == trough_month:
                                 trough_label_idx = i
                                 break
-                    
+
                     if trough_label_idx is not None:
                         ax.scatter(
-                            [dates[trough_label_idx]], [revenues[trough_label_idx]],
+                            [labels[trough_label_idx]], [revenues[trough_label_idx]],
                             marker="v", s=150, color="#ef4444", zorder=5,
                             label=f"Trough: {trough_month}"
                         )
                         ax.annotate(
                             f"▼ {trough_month}",
-                            (dates[trough_label_idx], revenues[trough_label_idx]),
+                            (labels[trough_label_idx], revenues[trough_label_idx]),
                             textcoords="offset points", xytext=(0, -20),
                             ha="center", fontsize=9,
                             color="#ef4444", fontweight="bold"
@@ -1768,15 +1761,12 @@ class PDFReportGenerator:
                     framealpha=0.3, edgecolor="none"
                 )
 
-            # Removed in-chart title to avoid duplication with PDF section header
             ax.set_ylabel("Revenue", fontsize=10)
             ax.yaxis.set_major_formatter(mticker.FuncFormatter(smart_fmt))
             ax.grid(axis="y", alpha=0.3, linestyle="--")
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            tick_positions = range(0, len(labels), 3)
-            ax.set_xticks([dates[i] for i in tick_positions])
-            ax.set_xticklabels([labels[i] for i in tick_positions], rotation=45, ha="right", fontsize=8)
+            plt.xticks(rotation=45, ha="right", fontsize=8)
             plt.tight_layout()
 
             path = os.path.join(os.path.dirname(__file__), "_tmp_monthly_trend.png")
@@ -1844,9 +1834,10 @@ class PDFReportGenerator:
         kpi_val_style = ParagraphStyle(
             'KPIVal',
             fontName='DejaVuSans',
-            fontSize=22,
+            fontSize=16,
             alignment=TA_CENTER,
             textColor=colors.HexColor('#1e293b'),
+            leading=20,
         )
 
         hdr = [Paragraph(k, ParagraphStyle("kh2", fontName=PDF_FONT_BOLD,
@@ -1858,8 +1849,8 @@ class PDFReportGenerator:
             ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(cfg["purple"])),
             ("BACKGROUND",    (0, 1), (-1, 1),  colors.HexColor(cfg["brand_light"])),
             ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(C.RULE_GREY)),
-            ("TOPPADDING",    (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING",    (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
             ("FONTNAME",      (0, 1), (-1, 1),  'DejaVuSans'),
             ("FONTNAME",      (1, 0), (-1, -1), 'DejaVuSans'),
         ]))
@@ -1978,8 +1969,7 @@ class PDFReportGenerator:
                             '#d97706' if is_important else '#059669')
             badge_label  = ('CRITICAL' if is_critical else
                             'IMPORTANT' if is_important else 'MINOR')
-            badge_icon   = ('⚠️ ' if is_critical else
-                            'ℹ️ ' if is_important else '✅ ')
+            badge_icon   = ''
 
             # ── Card: two-column header row (title left, badge right) ──────
             # XML-escape title to prevent &, <, > from breaking ReportLab's XML parser
@@ -2023,11 +2013,11 @@ class PDFReportGenerator:
             ]
             if dim:
                 card_elements.append(
-                    Paragraph(f"➡️ {self._md_to_rl(dim)}", callout_style)
+                    Paragraph(f"→ {self._md_to_rl(dim)}", callout_style)
                 )
             elif rec:
                 card_elements.append(
-                    Paragraph(f"➡️ {self._md_to_rl(rec)}", decision_style)
+                    Paragraph(f"→ {self._md_to_rl(rec)}", decision_style)
                 )
             if methodology:
                 meth_style = ParagraphStyle(
@@ -2035,7 +2025,7 @@ class PDFReportGenerator:
                     textColor=colors.HexColor('#94a3b8'), spaceAfter=2, leading=11
                 )
                 card_elements.append(
-                    Paragraph(f"🔬 Method: {methodology}", meth_style)
+                    Paragraph(f"Method: {methodology}", meth_style)
                 )
             # Root-cause callout: render chart_data["root_cause"] if present
             _cd = insight.get('chart_data') if not isinstance(insight, str) else None
@@ -2681,7 +2671,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(Paragraph(_xe_title(str(final_title)), self.S["Title"]))
         elements.append(Spacer(1, 0.5 * inch))
         elements.append(Paragraph(
-            f"Official Strategic Analysis  •  {date.today().strftime('%B %d, %Y')}",
+            f"Strategic Analysis Report  •  {date.today().strftime('%B %d, %Y')}",
             self.S["Subtitle"]))
         elements.append(Spacer(1, 0.3 * inch))
         elements.append(PageBreak())
@@ -2737,8 +2727,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     )
                     if chart_path:
                         self.embed_chart_safely(elements, chart_path,
-                                                f"Strategic Distribution: {target_metric}",
-                                                f"Analysis of {target_metric} variance across identified regional clusters.")
+                                                f"{target_metric} by Region",
+                                                f"Median {target_metric} across each regional segment. Use this to identify under- and over-performing regions.")
 
                     # Add Markdown Table
                     try:
@@ -2789,18 +2779,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
             elements.append(Spacer(1, 20))
 
             finding_title_style = ParagraphStyle(
-                'FindingTitle', fontSize=11, fontName=PDF_FONT_BOLD,
-                textColor=colors.HexColor('#1e293b'), spaceAfter=4,
+                'FindingTitle', fontSize=12, fontName=PDF_FONT_BOLD,
+                textColor=colors.HexColor('#1e293b'), spaceAfter=6, spaceBefore=8,
             )
             finding_body_style = ParagraphStyle(
-                'FindingBody', fontSize=9.5, fontName='DejaVuSans',  # Force DejaVuSans for ₹ symbol
-                textColor=colors.HexColor('#334155'), leading=14,
-                leftIndent=14, spaceAfter=4,
+                'FindingBody', fontSize=10, fontName='DejaVuSans',
+                textColor=colors.HexColor('#334155'), leading=16,
+                leftIndent=16, spaceAfter=6,
             )
             finding_impact_style = ParagraphStyle(
-                'FindingImpact', fontSize=8.5, fontName=PDF_FONT_BOLD,
-                textColor=colors.HexColor('#dc2626'), spaceAfter=10,
-                leftIndent=14,
+                'FindingImpact', fontSize=9, fontName=PDF_FONT_BOLD,
+                textColor=colors.HexColor('#dc2626'), spaceAfter=14,
+                leftIndent=16,
             )
 
             if insights:
@@ -2832,7 +2822,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         recommendation = ""
 
                     if title:
-                        elements.append(Paragraph(f"• {_xe_title(str(title))}", finding_title_style))
+                        elements.append(Paragraph(f"{idx}. {_xe_title(str(title))}", finding_title_style))
                     if description:
                         # Smart truncation at sentence boundary (up to 900 chars)
                         if len(description) <= 900:
@@ -3068,12 +3058,12 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         log.error(f"[Chart {i+1}] ✗ All rendering methods failed for: {chart_title}")
                         if err and "{" not in str(err) and "[" not in str(err):
                             elements.append(Paragraph(
-                                f"⚠ {_xe_title(str(chart_title))}: {_xe_title(str(err))}",
+                                f"{_xe_title(str(chart_title))}: {_xe_title(str(err))}",
                                 self.S["Fallback"]))
                         else:
                             elements.append(Paragraph(chart_title, self.S["ChartTitle"]))
                             elements.append(Paragraph(
-                                f"📊 {chart_title} — visualization available in dashboard",
+                                f"{chart_title} — visualization available in dashboard",
                                 self.S["Fallback"]
                             ))
                         elements.append(Spacer(1, 20))
@@ -3096,6 +3086,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
             None,
         )
         print(f"[temporal_chart] temporal_insight found = {temporal_insight is not None}")
+        chart_path = None
         if temporal_insight:
             # Defensive: ensure chart_data is a dict
             chart_data_raw = temporal_insight.get("chart_data")
@@ -3103,6 +3094,13 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 chart_data_raw = {}
             
             monthly_data = chart_data_raw.get("monthly_data", [])
+            # Normalise: if months are names like "January", convert to "2026-01"
+            import calendar
+            _month_map = {m: f"{i:02d}" for i, m in enumerate(calendar.month_name) if m}
+            monthly_data = [
+                (f"2026-{_month_map[m]}" if m in _month_map else m, v)
+                for m, v in monthly_data
+            ]
             print(f"[temporal_chart] monthly_data = {monthly_data[:2] if monthly_data else 'EMPTY'}")
             _cd = chart_data_raw
             
@@ -3140,7 +3138,15 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     chart_elements.append(Spacer(1, 6))
                     peak   = (temporal_insight.get("chart_data") or {}).get("peak_month", "")
                     trough = (temporal_insight.get("chart_data") or {}).get("trough_month", "")
-                    caption = f"Revenue trajectory across all months — peak: {peak}, trough: {trough}."
+                    from datetime import datetime as _dt_fmt
+                    def _to_month_name(m):
+                        try:
+                            return _dt_fmt.strptime(m, "%Y-%m").strftime("%B")
+                        except Exception:
+                            return m
+                    peak_display   = _to_month_name(peak)
+                    trough_display = _to_month_name(trough)
+                    caption = f"Revenue trajectory across all months — peak: {peak_display}, trough: {trough_display}."
                     chart_elements.append(Paragraph(caption, self.S["Insight"]))
                     # PageBreak only fires when the image loaded successfully
                     elements.append(PageBreak())
@@ -3151,8 +3157,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 # Update flag since we added content after frontend charts
                 _last_chart_completed_pair = False
         
-        # ✅ FALLBACK: Generate time series from raw data if temporal_insight not found
-        elif df is not None and len(df) > 0:
+        # ✅ FALLBACK: Generate time series from raw data if temporal_insight produced no chart
+        if df is not None and len(df) > 0 and not (temporal_insight and chart_path and os.path.exists(chart_path)):
             try:
                 import polars as pl
                 from datetime import datetime as _dt
@@ -3168,25 +3174,23 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     pdf_tmp[date_col] = pd.to_datetime(pdf_tmp[date_col], errors="coerce", dayfirst=True)
                     pdf_tmp = pdf_tmp.dropna(subset=[date_col])
                     
-                    # Month-of-year aggregation (1-12) — matches insight_engine behavior
-                    # This collapses all dates across years into 12 calendar months
-                    pdf_tmp["month_name"] = pdf_tmp[date_col].dt.month   # 1-12
-                    pdf_tmp["month_label"] = pdf_tmp[date_col].dt.strftime("%B")  # "March"
-                    
-                    monthly = pdf_tmp.groupby("month_name").agg(
+                    pdf_tmp["month_period"] = pdf_tmp[date_col].dt.strftime("%Y-%m")  # "2026-01"
+                    pdf_tmp["month_num"] = pdf_tmp[date_col].dt.month
+
+                    monthly = pdf_tmp.groupby("month_period").agg(
                         revenue=(rev_col, "sum"),
-                        label=("month_label", "first")
-                    ).reset_index().sort_values("month_name")
-                    
+                        month_num=("month_num", "first")
+                    ).reset_index().sort_values("month_num")
+
                     if len(monthly) >= 2:
-                        # Build monthly_data as (label, revenue) tuples
-                        monthly_data = [(row["label"], row["revenue"]) for _, row in monthly.iterrows()]
-                        
+                        # Build monthly_data as (period_string, revenue) tuples
+                        monthly_data = [(row["month_period"], row["revenue"]) for _, row in monthly.iterrows()]
+
                         # Peak/trough by month-of-year
                         peak_idx = monthly["revenue"].idxmax()
                         trough_idx = monthly["revenue"].idxmin()
-                        peak_month = monthly.loc[peak_idx, "label"]
-                        trough_month = monthly.loc[trough_idx, "label"]
+                        peak_month = monthly.loc[peak_idx, "month_period"]
+                        trough_month = monthly.loc[trough_idx, "month_period"]
                         peak_val = monthly.loc[peak_idx, "revenue"]
                         trough_val = monthly.loc[trough_idx, "revenue"]
                         pct_gap = ((peak_val - trough_val) / peak_val * 100) if peak_val > 0 else 0
@@ -3242,7 +3246,15 @@ class UnifiedReportGenerator(PDFReportGenerator):
                                 img = RLImage(chart_path, width=480, height=210)
                                 chart_elements.append(img)
                                 chart_elements.append(Spacer(1, 6))
-                                caption = f"Revenue trajectory across all months — peak: {peak_month}, trough: {trough_month}."
+                                from datetime import datetime as _dt_fmt
+                                def _to_month_name(m):
+                                    try:
+                                        return _dt_fmt.strptime(m, "%Y-%m").strftime("%B")
+                                    except Exception:
+                                        return m
+                                peak_display   = _to_month_name(peak_month)
+                                trough_display = _to_month_name(trough_month)
+                                caption = f"Revenue trajectory across all months — peak: {peak_display}, trough: {trough_display}."
                                 chart_elements.append(Paragraph(caption, self.S["Insight"]))
                                 # PageBreak only fires when the image loaded successfully
                                 elements.append(PageBreak())
