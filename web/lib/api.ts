@@ -7,7 +7,7 @@ async function refreshAccessToken(): Promise<string | null> {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  sessionStorage.setItem("access_token", data.access_token);
+  localStorage.setItem("access_token", data.access_token);
   return data.access_token;
 }
 
@@ -15,7 +15,7 @@ export async function apiFetch(
   path: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  const token = sessionStorage.getItem("access_token");
+  const token = localStorage.getItem("access_token");
 
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,

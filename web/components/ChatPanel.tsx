@@ -52,7 +52,7 @@ export default function ChatPanel({ sessionId }: Props) {
     setMessages(prev => [...prev, { role: "assistant", content: "", pending: true }]);
 
     try {
-      const token = sessionStorage.getItem("access_token");
+      const token = localStorage.getItem("access_token");
       const res = await fetch(
         `${process.env.NEXT_PUBLIC_API_URL}/sessions/${sessionId}/chat`,
         {

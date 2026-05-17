@@ -44,7 +44,7 @@ export default function Sidebar() {
     const [recents, setRecents] = useState<RecentSession[]>([]);
 
     useEffect(() => {
-        const token = sessionStorage.getItem("access_token");
+        const token = localStorage.getItem("access_token");
         if (!token) return;
 
         const headers = { Authorization: `Bearer ${token}` };
@@ -70,13 +70,13 @@ export default function Sidebar() {
         : "?";
 
     const handleLogout = async () => {
-        const token = sessionStorage.getItem("access_token");
+        const token = localStorage.getItem("access_token");
         await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/auth/logout`, {
             method: "POST",
             headers: { Authorization: `Bearer ${token}` },
             credentials: "include",
         }).catch(() => {});
-        sessionStorage.removeItem("access_token");
+        localStorage.removeItem("access_token");
         window.location.href = "/login";
     };
 

@@ -214,7 +214,7 @@ export default function DashboardPage() {
         if (!sid) { alert("No session linked to pinned charts."); setIsExporting(false); return; }
 
         try {
-            const token = sessionStorage.getItem("access_token");
+            const token = localStorage.getItem("access_token");
 
             // Capture chart images
             const chartsToExport = pinnedIds

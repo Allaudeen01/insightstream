@@ -29,7 +29,7 @@ export default function RegisterPage() {
       });
       if (loginRes.ok) {
         const { access_token } = await loginRes.json();
-        sessionStorage.setItem("access_token", access_token);
+        localStorage.setItem("access_token", access_token);
         router.push("/upload");
       }
     } else {

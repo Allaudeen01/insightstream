@@ -23,8 +23,8 @@ export default function LoginPage() {
 
     if (res.ok) {
       const { access_token } = await res.json();
-      // Store access token in memory only — NOT localStorage
-      sessionStorage.setItem("access_token", access_token);
+      // Store access token in localStorage for persistence across tabs/navigation
+      localStorage.setItem("access_token", access_token);
       router.push("/upload");
     } else {
       const data = await res.json();
