@@ -389,8 +389,8 @@ export default function DashboardPage() {
 
             <div className="flex min-w-0 flex-1 flex-col">
                 {/* Top bar */}
-                <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-zinc-200 bg-white/85 px-6 backdrop-blur">
-                    <div className="flex items-center gap-3">
+                <header className="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-zinc-200 bg-white/85 px-4 md:px-6 backdrop-blur">
+                    <div className="flex items-center gap-3 pl-8 md:pl-0">
                         <h1 className="text-[17px] font-semibold tracking-[-0.01em]">Dashboard</h1>
                         <span className="text-[13px] text-zinc-500">{pinnedIds.length} pinned</span>
                     </div>
@@ -398,7 +398,7 @@ export default function DashboardPage() {
                     <div className="flex items-center gap-2">
                         <button
                             onClick={() => setShowKPIModal(true)}
-                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
+                            className="hidden sm:inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50"
                         >
                             <Calculator className="h-3.5 w-3.5" strokeWidth={1.75} />
                             Add metric
@@ -409,7 +409,7 @@ export default function DashboardPage() {
                             className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
                         >
                             <Download className="h-3.5 w-3.5" strokeWidth={1.75} />
-                            {isExporting ? "Exporting…" : "Export PDF"}
+                            <span className="hidden sm:inline">{isExporting ? "Exporting…" : "Export PDF"}</span>
                         </button>
                         <button
                             onClick={handleSave}
@@ -435,7 +435,7 @@ export default function DashboardPage() {
 
                 {/* Main */}
                 <main className="flex-1 overflow-auto">
-                    <div className="mx-auto max-w-[1400px] px-6 py-6">
+                    <div className="mx-auto max-w-[1400px] px-4 md:px-6 py-4 md:py-6">
                         {pinnedIds.length === 0 ? (
                             <EmptyState onAdd={() => setShowKPIModal(true)} />
                         ) : (

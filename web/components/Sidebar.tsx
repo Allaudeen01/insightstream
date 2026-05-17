@@ -9,6 +9,8 @@ import {
     Sparkles,
     MessageSquare,
     FileText,
+    Menu,
+    X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -42,6 +44,7 @@ export default function Sidebar() {
     const router = useRouter();
     const [user, setUser] = useState<UserInfo | null>(null);
     const [recents, setRecents] = useState<RecentSession[]>([]);
+    const [mobileOpen, setMobileOpen] = useState(false);
 
     useEffect(() => {
         const token = localStorage.getItem("access_token");
@@ -59,6 +62,11 @@ export default function Sidebar() {
             .then(data => { if (data?.items) setRecents(data.items); })
             .catch(() => {});
     }, []);
+
+    // Close mobile sidebar on route change
+    useEffect(() => {
+        setMobileOpen(false);
+    }, [pathname]);
 
     const isActive = (item: NavItem) =>
         item.matchPrefix
@@ -80,8 +88,8 @@ export default function Sidebar() {
         window.location.href = "/login";
     };
 
-    return (
-        <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
+    const sidebarContent = (
+        <>
             {/* Brand */}
             <Link href="/" className="flex items-center gap-2.5 px-4 pb-3 pt-4">
                 <div className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] bg-[#6d5ef5] text-sm font-bold text-white">
@@ -157,6 +165,47 @@ export default function Sidebar() {
                     Sign out
                 </button>
             </div>
-        </aside>
+        </>
+    );
+
+    return (
+        <>
+            {/* Hamburger button — mobile only */}
+            <button
+                onClick={() => setMobileOpen(true)}
+                className="fixed left-3 top-3.5 z-40 flex h-8 w-8 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 md:hidden"
+                aria-label="Open menu"
+            >
+                <Menu className="h-5 w-5" strokeWidth={1.75} />
+            </button>
+
+            {/* Backdrop — mobile only */}
+            {mobileOpen && (
+                <div
+                    className="fixed inset-0 z-40 bg-black/30 md:hidden"
+                    onClick={() => setMobileOpen(false)}
+                />
+            )}
+
+            {/* Sidebar — slide-in on mobile, static on desktop */}
+            <aside
+                className={[
+                    "fixed inset-y-0 left-0 z-50 flex w-60 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 transition-transform duration-200",
+                    "md:static md:translate-x-0",
+                    mobileOpen ? "translate-x-0" : "-translate-x-full",
+                ].join(" ")}
+            >
+                {/* Mobile close button */}
+                <button
+                    onClick={() => setMobileOpen(false)}
+                    className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-100 md:hidden"
+                    aria-label="Close menu"
+                >
+                    <X className="h-4 w-4" strokeWidth={1.75} />
+                </button>
+
+                {sidebarContent}
+            </aside>
+        </>
     );
 }
