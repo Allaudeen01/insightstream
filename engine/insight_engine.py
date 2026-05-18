@@ -113,40 +113,64 @@ class DomainDetector:
         if has_order and has_discount and not has_product:
             scores["ecommerce"] = scores.get("ecommerce", 0) + 0.2
 
-        # Entertainment/content library detection
+        # ── Generic Entertainment/Content Domain Detection ────────────────
         entertainment_signals = 0
-        content_cols = [c.lower() for c in df.columns]
+        _cols_lower = [c.lower().replace(" ", "_") for c in df.columns]
 
-        if any(k in content_cols for k in ["title", "show_id", "listed_in", "type"]):
+        # Signal 1: Content type columns
+        _type_signals = ["type", "content_type", "show_type", "media_type",
+                         "format", "kind"]
+        if any(k in _cols_lower for k in _type_signals):
             entertainment_signals += 2
-        if any(k in content_cols for k in ["director", "cast", "genre", "rating"]):
-            entertainment_signals += 2
-        if any(k in content_cols for k in ["release_year", "date_added", "duration"]):
+
+        # Signal 2: Content identity columns
+        _identity_signals = ["title", "show_id", "content_id", "track_id",
+                              "movie_id", "video_id", "song_id", "album_id"]
+        if any(k in _cols_lower for k in _identity_signals):
             entertainment_signals += 1
 
-        _CONTENT_TYPES = {"movie", "tv show", "series", "episode", "track",
-                          "album", "documentary", "short"}
-        _ent_type_col = next(
-            (c for c in df.columns
-             if df[c].n_unique() <= 10
-             and any(v.lower() in _CONTENT_TYPES
-                     for v in df[c].drop_nulls().cast(pl.Utf8).to_list()[:50])),
-            None
-        )
-        if _ent_type_col:
-            try:
+        # Signal 3: Content metadata columns (need ≥ 2 matches)
+        _meta_signals = ["director", "cast", "genre", "listed_in",
+                         "categories", "tags", "artist", "album",
+                         "description", "synopsis"]
+        if sum(1 for k in _meta_signals if k in _cols_lower) >= 2:
+            entertainment_signals += 2
+
+        # Signal 4: Content classification columns
+        _class_signals = ["rating", "maturity_rating", "age_rating",
+                          "content_rating", "certification"]
+        if any(k in _cols_lower for k in _class_signals):
+            entertainment_signals += 1
+
+        # Signal 5: Temporal columns for content
+        _time_signals = ["release_year", "year", "date_added", "publish_date",
+                         "upload_date", "release_date", "air_date",
+                         "premiere_date"]
+        if any(k in _cols_lower for k in _time_signals):
+            entertainment_signals += 1
+
+        # Signal 6: Check type column VALUES for entertainment content
+        _CONTENT_TYPE_VALUES = {
+            "movie", "tv show", "tv series", "series", "episode",
+            "documentary", "short", "special", "film", "video",
+            "track", "album", "podcast", "show", "animation",
+            "anime", "miniseries",
+        }
+        for _col in df.columns:
+            if _col.lower().replace(" ", "_") in _type_signals:
                 try:
-                    _type_vals = df[_ent_type_col].dropna().astype(str).str.lower().unique().tolist()
+                    _type_vals = df[_col].drop_nulls().cast(pl.Utf8).str.to_lowercase().unique().to_list()
+                    if any(v in _CONTENT_TYPE_VALUES for v in _type_vals):
+                        entertainment_signals += 3
+                        print(f"[DOMAIN] Entertainment confirmed via type values: {_type_vals[:5]}")
                 except Exception:
-                    _type_vals = df[_ent_type_col].drop_nulls().cast(pl.Utf8).str.to_lowercase().unique().to_list()
-                if any(v in _type_vals for v in _CONTENT_TYPES):
-                    entertainment_signals += 3
-            except Exception:
-                pass
+                    pass
+                break
 
         if entertainment_signals >= 4:
-            scores["entertainment"] = 0.8
-            print(f"[DOMAIN] Entertainment detected (signals={entertainment_signals})")
+            scores["entertainment"] = min(0.9, entertainment_signals * 0.15)
+            print(f"[DOMAIN] Entertainment detected (signals={entertainment_signals}, "
+                  f"score={scores['entertainment']:.2f})")
 
         # Re-pick winner after tie-breaking adjustments
         best_domain = max(scores, key=scores.get)
@@ -3050,35 +3074,47 @@ class BusinessRuleEngine:
         """Fires for Netflix/content library datasets."""
         insights = []
 
-        _CONTENT_TYPES_RULE = {"movie", "tv show", "series", "episode",
-                                "track", "album", "documentary", "short"}
+        # Generic column detection — works across Netflix, Disney+,
+        # Amazon Prime, Spotify, YouTube, IMDb, etc.
+        def _find_col(candidates: list):
+            for name in candidates:
+                for col in df.columns:
+                    if col.lower().replace(" ", "_") == name.replace(" ", "_"):
+                        return col
+                    if name in col.lower():
+                        return col
+            return None
 
-        # Generic type column detection — any low-cardinality col whose values
-        # overlap known content types
-        type_col = next(
-            (c for c in df.columns
-             if df[c].n_unique() <= 10
-             and any(v.lower() in _CONTENT_TYPES_RULE
-                     for v in df[c].drop_nulls().cast(pl.Utf8).to_list()[:50])),
-            None
-        )
-        rating_col = next(
-            (c for c in df.columns if c.lower() in ["rating", "content_rating",
-             "age_rating", "maturity_rating"]), None
-        )
-        country_col = next(
-            (c for c in df.columns if c.lower() in ["country", "countries",
-             "origin_country", "production_country"]), None
-        )
-        year_col = next(
-            (c for c in df.columns if any(k in c.lower()
-             for k in ["release_year", "release_date", "year"])), None
-        )
-        genre_col = next(
-            (c for c in df.columns if any(k in c.lower()
-             for k in ["listed_in", "genre", "category", "categories",
-                       "tags", "type_genre"])), None
-        )
+        type_col = _find_col([
+            "type", "content_type", "show_type", "media_type", "format", "kind", "category"
+        ])
+        rating_col = _find_col([
+            "rating", "maturity_rating", "age_rating", "content_rating",
+            "certification", "rated"
+        ])
+        country_col = _find_col([
+            "country", "countries", "origin_country", "country_of_origin",
+            "production_country", "region"
+        ])
+        year_col = _find_col([
+            "release_year", "year", "production_year", "release_date",
+            "year_released", "premiered"
+        ])
+        date_col = _find_col([
+            "date_added", "dateadded", "added_date", "date_uploaded",
+            "upload_date", "available_since", "publish_date", "date_published"
+        ])
+        genre_col = _find_col([
+            "listed_in", "genre", "genres", "categories", "tags",
+            "category", "type_genre", "classification"
+        ])
+        duration_col = _find_col([
+            "duration", "runtime", "length", "minutes", "run_time"
+        ])
+
+        print(f"[CONTENT_LIBRARY] Columns detected: type={type_col}, "
+              f"rating={rating_col}, country={country_col}, "
+              f"year={year_col}, date_added={date_col}, genre={genre_col}")
 
         if not type_col:
             return []
@@ -3087,27 +3123,50 @@ class BusinessRuleEngine:
             pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
             total = len(pdf)
 
-            # 1. Movie vs TV Show split
+            # 1. Content type split (generic: Movie/TV Show, Track/Album, Video/Short, etc.)
             type_counts = pdf[type_col].value_counts()
             if len(type_counts) >= 2:
                 top_type    = type_counts.index[0]
                 top_pct     = type_counts.iloc[0] / total * 100
                 second_type = type_counts.index[1]
                 second_pct  = type_counts.iloc[1] / total * 100
+
+                _STREAMING_TYPES = {"movie", "film", "tv show", "series", "documentary"}
+                _MUSIC_TYPES     = {"track", "album", "single", "ep", "song"}
+                _top_lower = str(top_type).lower()
+                if _top_lower in _STREAMING_TYPES:
+                    _context = (
+                        "Movies dominate — platform is film-first, TV Shows secondary."
+                        if _top_lower in {"movie", "film"}
+                        else "TV content leads — binge culture drives engagement."
+                    )
+                    _rec = (
+                        "Invest in original TV Show production to increase time-on-platform and reduce churn."
+                        if _top_lower in {"movie", "film"}
+                        else "Maintain TV Show dominance while ensuring Movie catalogue stays competitive."
+                    )
+                elif _top_lower in _MUSIC_TYPES:
+                    _context = (
+                        "Tracks dominate — singles-first catalogue."
+                        if _top_lower == "track"
+                        else "Albums lead — long-form listening is core to the experience."
+                    )
+                    _rec = "Balance track and album content to serve both casual and deep listeners."
+                else:
+                    _context = f"{top_type} is the dominant content format at {top_pct:.0f}%."
+                    _rec = f"Monitor the {top_type}/{second_type} ratio as catalogue scales."
+
                 insights.append(BusinessInsight(
                     title=f"Content Mix: {top_pct:.0f}% {top_type}s, {second_pct:.0f}% {second_type}s",
                     description=(
                         f"The library contains {type_counts.iloc[0]:,} {top_type}s "
                         f"({top_pct:.0f}%) and {type_counts.iloc[1]:,} {second_type}s "
-                        f"({second_pct:.0f}%). "
-                        f"{'Movies dominate — the platform is film-first, with TV Shows as a secondary offering.' if top_type == 'Movie' else 'TV Shows lead — binge-watch culture drives engagement over one-off films.'}"
+                        f"({second_pct:.0f}%). {_context}"
                     ),
                     why_it_matters="Content mix determines platform identity and subscriber retention strategy.",
                     evidence=f"{top_type}: {top_pct:.0f}% | {second_type}: {second_pct:.0f}%",
                     impact="🟠 Important",
-                    recommendation=(
-                        f"{'Invest in original TV Show production to increase time-on-platform and reduce churn.' if top_type == 'Movie' else 'Maintain TV Show dominance while ensuring Movie catalogue remains competitive.'}"
-                    ),
+                    recommendation=_rec,
                     rule_type="content_type_split",
                     score=7.5,
                     chart_data={"type_counts": type_counts.to_dict()},

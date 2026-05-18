@@ -2967,45 +2967,65 @@ class UnifiedReportGenerator(PDFReportGenerator):
         if domain_id == "entertainment" and df is not None:
             try:
                 _pdf = df if isinstance(df, pd.DataFrame) else df.to_pandas()
-                _CONTENT_TYPES_KPI = {"movie", "tv show", "series", "episode",
-                                      "track", "album", "documentary", "short"}
-                _type_col = next(
+
+                _TYPE_COL_CANDIDATES = ["type", "content_type", "show_type",
+                                        "media_type", "format", "kind"]
+                _type_col_ent = next(
                     (c for c in _pdf.columns
-                     if _pdf[c].nunique() <= 10
-                     and any(v.lower() in _CONTENT_TYPES_KPI
-                             for v in _pdf[c].dropna().astype(str).unique()[:50])),
+                     if c.lower().replace(" ", "_") in
+                     [x.replace(" ", "_") for x in _TYPE_COL_CANDIDATES]),
                     None
                 )
-                _country_col = next((c for c in _pdf.columns if c.lower() in ["country", "countries"]), None)
-                _year_col    = next((c for c in _pdf.columns
-                                     if "release_year" in c.lower() or c.lower() == "year"), None)
+                _country_col_ent = next(
+                    (c for c in _pdf.columns if any(k in c.lower() for k in
+                     ["country", "countries", "origin_country",
+                      "country_of_origin", "region"])), None
+                )
+                _year_col_ent = next(
+                    (c for c in _pdf.columns if any(k in c.lower() for k in
+                     ["release_year", "year", "production_year", "premiered"])), None
+                )
+
+                _TYPE_LABEL_MAP = {
+                    "tv show": "TV Shows", "tv shows": "TV Shows",
+                    "movie": "Movies",     "movies": "Movies",
+                    "series": "Series",    "film": "Films",
+                    "documentary": "Documentaries",
+                    "track": "Tracks",     "album": "Albums",
+                    "video": "Videos",     "short": "Shorts",
+                    "episode": "Episodes", "podcast": "Podcasts",
+                    "anime": "Anime",      "animation": "Animations",
+                }
+
                 ent_kpis = {}
-                if _type_col:
-                    _TYPE_LABELS = {
-                        "tv show": "TV Shows",
-                        "movie": "Movies",
-                        "tv shows": "TV Shows",
-                        "movies": "Movies",
-                        "series": "Series",
-                        "documentary": "Documentaries",
-                        "short": "Shorts",
-                    }
-                    _type_counts = _pdf[_type_col].value_counts()
+                if _type_col_ent:
+                    _type_counts = _pdf[_type_col_ent].value_counts()
                     for _t, _n in _type_counts.items():
                         _key = str(_t).lower().strip()
-                        _label = _TYPE_LABELS.get(_key, f"{str(_t)}s")
+                        _label = _TYPE_LABEL_MAP.get(_key, f"{str(_t)}s")
                         ent_kpis[_label] = f"{_n:,}"
                 else:
                     ent_kpis["Total Titles"] = f"{len(_pdf):,}"
-                if _country_col:
-                    _n_countries = (_pdf[_country_col].dropna()
-                                    .str.split(",").explode().str.strip().nunique())
-                    ent_kpis["Countries"] = f"{_n_countries:,}"
-                if _year_col:
-                    ent_kpis["Year Range"] = (
-                        f"{int(_pdf[_year_col].dropna().min())}–"
-                        f"{int(_pdf[_year_col].dropna().max())}"
-                    )
+
+                if _country_col_ent:
+                    try:
+                        _n_countries = (_pdf[_country_col_ent].dropna()
+                                        .str.split(",").explode().str.strip().nunique())
+                        ent_kpis["Countries"] = f"{_n_countries:,}"
+                    except Exception:
+                        pass
+
+                if _year_col_ent:
+                    try:
+                        _years = _pdf[_year_col_ent].dropna()
+                        if _years.dtype == object:
+                            _years = pd.to_datetime(_years, errors="coerce").dt.year.dropna()
+                        ent_kpis["Year Range"] = (
+                            f"{int(_years.min())}–{int(_years.max())}"
+                        )
+                    except Exception:
+                        pass
+
                 if ent_kpis:
                     kpis = ent_kpis
                     print(f"[ENTERTAINMENT KPIs] {kpis}")
@@ -3499,10 +3519,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
         if domain_id == "entertainment" and df is not None:
             try:
                 _pdf_ent = df if isinstance(df, pd.DataFrame) else df.to_pandas()
+                _DATE_ADDED_CANDIDATES = [
+                    "date_added", "added_date", "upload_date", "date_uploaded",
+                    "publish_date", "available_since", "date_published",
+                    "created_at", "added_on",
+                ]
                 _date_added_col = next(
-                    (c for c in _pdf_ent.columns if any(k in c.lower() for k in
-                     ["date_added", "dateadded", "date_uploaded",
-                      "added_date", "available_since"])), None
+                    (c for c in _pdf_ent.columns
+                     if any(k in c.lower() for k in _DATE_ADDED_CANDIDATES)), None
                 )
                 if _date_added_col:
                     _ent_dates = pd.to_datetime(
