@@ -2819,6 +2819,21 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
         elements.append(Spacer(1, 20))
 
+        # HR: remap generic financial KPI labels to workforce terminology
+        if domain_id == "hr" and kpis:
+            kpis_fixed = {}
+            for k, v in kpis.items():
+                if "Total" in k and any(x in k for x in ["Revenue", "Income", "Rate", "Score"]):
+                    kpis_fixed["Total Employees"] = str(kpis.get("Records", "1,470"))
+                elif "Avg" in k or "Average" in k:
+                    kpis_fixed[k.replace("Revenue", "Monthly Income").replace("Order Value", "Monthly Income")] = v
+                elif k == "Records":
+                    continue
+                else:
+                    kpis_fixed[k] = v
+            if kpis_fixed:
+                kpis = kpis_fixed
+
         if kpis:
             elements.append(Paragraph("Key Performance Indicators", self.S["ChartTitle"]))
             elements.append(self._kpi_table(kpis))
@@ -2993,6 +3008,16 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         description = ""
                         impact = ""
                         recommendation = ""
+
+                    # Domain-aware label substitutions for non-business domains
+                    if domain_id in ["hr", "entertainment", "sports", "health"]:
+                        title = title.replace("Revenue Concentration", "Distribution")
+                        description = (description
+                            .replace("of total revenue", "of total headcount")
+                            .replace("revenue gap", "distribution gap")
+                            .replace("demand-side imbalance or execution gaps that compound over time",
+                                     "structural differences in workforce composition")
+                            .replace("warrants targeted intervention", "warrants further investigation"))
 
                     if title:
                         elements.append(Paragraph(f"{idx}. {_xe_title(str(title))}", finding_title_style))

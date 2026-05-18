@@ -1683,7 +1683,12 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_skewed_distribution_alert, "skewed_distribution", df, domain))
         all_insights.extend(safe_rule_call(self._rule_discount_impact, "discount_impact", df, domain))
         all_insights.extend(safe_rule_call(self._rule_demographic_split, "demographic_split", df, domain))
-        
+
+        if any("attrition" in c.lower() for c in df.columns):
+            results = self._rule_hr_attrition(df, profile)
+            if results:
+                all_insights.extend(results)
+
         # ── Tier 1.2: Enhanced Time-Series Analysis ───────────────────────
         _ts = TimeSeriesAnalyzer()
         _ts_insights = safe_rule_call(_ts.analyze, "time_series_analyzer", df, profile)
@@ -2364,8 +2369,24 @@ class BusinessRuleEngine:
         if not revenue_col:
             return insights
 
+        DEMOGRAPHIC_COLS = {
+            "gender", "maritalstatus", "marital_status", "overtime",
+            "over_time", "attrition", "educationfield", "education_field",
+            "relationshipstatus", "nationality", "race", "ethnicity",
+            "religion", "age_group", "agegroup",
+        }
+
         segment_cols = self._find_segment_columns(df, max_cardinality=20)
+        _rev_seg_count = 0
         for seg_col in segment_cols:
+            if _rev_seg_count >= 3:
+                break
+
+            col_key = seg_col.lower().replace(" ", "").replace("_", "")
+            if col_key in {d.replace("_", "") for d in DEMOGRAPHIC_COLS}:
+                log.info(f"[revenue_by_segment] Skipping demographic: {seg_col}")
+                continue
+
             try:
                 grouped = (
                     df.group_by(seg_col)
@@ -2410,6 +2431,7 @@ class BusinessRuleEngine:
                     qualified_segments=[str(top[seg_col])],
                     excluded_segments=[str(bottom[seg_col])]
                 ))
+                _rev_seg_count += 1
             except Exception: pass
         return insights
 
@@ -2746,6 +2768,123 @@ class BusinessRuleEngine:
                     excluded_segments=[str(b[col])]
                 ))
             except Exception: pass
+        return insights
+
+    def _rule_hr_attrition(self, df: pl.DataFrame, profile) -> list:
+        """Fires when dataset has Attrition + Department + MonthlyIncome columns."""
+        insights = []
+
+        attr_col   = next((c for c in df.columns if "attrition"  in c.lower()), None)
+        dept_col   = next((c for c in df.columns if "department" in c.lower()), None)
+        income_col = next((c for c in df.columns
+                           if any(k in c.lower() for k in
+                                  ["income", "salary", "wage", "monthlyincome"])), None)
+
+        if not attr_col:
+            return []
+
+        try:
+            pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
+
+            total = len(pdf)
+            left  = pdf[attr_col].astype(str).str.strip().str.lower()
+            left_count    = (left == "yes").sum()
+            attrition_rate = left_count / total * 100
+
+            insights.append(BusinessInsight(
+                title=f"Attrition Rate: {attrition_rate:.1f}% of Workforce",
+                description=(
+                    f"Out of {total:,} employees, {left_count:,} have left "
+                    f"({attrition_rate:.1f}% attrition rate). "
+                    f"Industry benchmark for technology: 13–15%. "
+                    f"{'Above benchmark — retention requires immediate action.'  if attrition_rate > 15 else 'Within benchmark range — maintain current retention programmes.'}"
+                ),
+                why_it_matters=(
+                    "Each departing employee costs 50–200% of their annual salary "
+                    "in recruitment, onboarding, and lost productivity."
+                ),
+                evidence=f"{left_count:,} left out of {total:,} total employees",
+                impact="🔴 Critical" if attrition_rate > 15 else "🟠 Important",
+                recommendation=(
+                    "Focus retention on highest-risk segments. "
+                    "Exit interview data and engagement surveys should be "
+                    "reviewed quarterly to identify leading indicators."
+                ),
+                rule_type="hr_attrition",
+                score=9.5,
+                chart_data={"attrition_rate": round(attrition_rate, 1),
+                            "left_count": int(left_count), "total": total},
+            ))
+
+            if dept_col:
+                dept_attr = (
+                    pdf.groupby(dept_col)[attr_col]
+                    .apply(lambda x: (x.astype(str).str.lower() == "yes").mean() * 100)
+                    .sort_values(ascending=False)
+                )
+                if len(dept_attr) >= 2:
+                    worst_dept = dept_attr.index[0]
+                    worst_rate = dept_attr.iloc[0]
+                    best_dept  = dept_attr.index[-1]
+                    best_rate  = dept_attr.iloc[-1]
+
+                    insights.append(BusinessInsight(
+                        title=f"Highest Attrition: {worst_dept} at {worst_rate:.0f}%",
+                        description=(
+                            f"{worst_dept} has the highest attrition at {worst_rate:.0f}%, "
+                            f"vs {best_dept} at {best_rate:.0f}%. "
+                            f"A {worst_rate - best_rate:.0f}pp gap between departments "
+                            f"suggests department-specific issues — management, workload, "
+                            f"or career growth opportunities."
+                        ),
+                        why_it_matters="Department-level attrition reveals where retention investment will have highest ROI.",
+                        evidence=f"{worst_dept}: {worst_rate:.0f}% | {best_dept}: {best_rate:.0f}%",
+                        impact="🔴 Critical" if worst_rate > 20 else "🟠 Important",
+                        recommendation=(
+                            f"Conduct stay interviews in {worst_dept} within 30 days. "
+                            f"Investigate whether {best_dept}'s lower attrition "
+                            f"reflects better management or different role profiles."
+                        ),
+                        rule_type="hr_attrition_by_dept",
+                        score=8.5,
+                        chart_data={"dept_rates": dept_attr.to_dict()},
+                    ))
+
+            if income_col:
+                try:
+                    stayers_income = pdf[left == "no"][income_col].median()
+                    leavers_income = pdf[left == "yes"][income_col].median()
+                    if stayers_income and stayers_income > 0:
+                        gap_pct = (stayers_income - leavers_income) / stayers_income * 100
+                        if gap_pct > 5:
+                            insights.append(BusinessInsight(
+                                title=f"Income Gap: Leavers Earn {gap_pct:.0f}% Less Than Stayers",
+                                description=(
+                                    f"Employees who left had a median income of "
+                                    f"{_fmt_currency(leavers_income)}, vs "
+                                    f"{_fmt_currency(stayers_income)} for those who stayed — "
+                                    f"a {gap_pct:.0f}% gap. "
+                                    f"Compensation is a primary driver of voluntary attrition."
+                                ),
+                                why_it_matters="Salary competitiveness directly predicts voluntary turnover.",
+                                evidence=f"Leavers: {_fmt_currency(leavers_income)} | Stayers: {_fmt_currency(stayers_income)}",
+                                impact="🔴 Critical" if gap_pct > 20 else "🟠 Important",
+                                recommendation=(
+                                    "Conduct a compensation benchmarking study. "
+                                    "Consider targeted salary adjustments for high-risk roles."
+                                ),
+                                rule_type="hr_income_gap",
+                                score=8.0,
+                                chart_data={"leavers_income": leavers_income,
+                                            "stayers_income": stayers_income,
+                                            "gap_pct": round(gap_pct, 1)},
+                            ))
+                except Exception:
+                    pass
+
+        except Exception as e:
+            log.warning(f"[hr_attrition] Failed: {e}")
+
         return insights
 
     # --- Helpers ---
