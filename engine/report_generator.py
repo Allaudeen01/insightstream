@@ -2097,12 +2097,20 @@ class PDFReportGenerator:
                     "signals structural differences worth investigating"
                 )
 
-            if domain == "hr":
+            if domain in ["hr", "human_resources"]:
+                title = title.replace("Emerging Market Leader", "Dominant Department")
                 desc = desc.replace("of total revenue", "of total workforce")
                 desc = desc.replace("revenue per unit", "income per employee")
                 desc = desc.replace("portfolio revenue", "workforce")
                 desc = desc.replace("bottom line", "retention")
                 desc = desc.replace("market share", "headcount share")
+                desc = desc.replace(
+                    "product-market fit but requires monitoring to prevent "
+                    "future dependency risk",
+                    "workforce concentration — monitor for single-department "
+                    "over-reliance risk"
+                )
+                desc = desc.replace("product-market fit", "workforce specialisation")
 
             # ── Impact badge colours ───────────────────────────────────────
             is_critical  = '\U0001f534' in impact or 'critical' in impact.lower()
@@ -2230,8 +2238,20 @@ class PDFReportGenerator:
                 _unique_recs.append(_r)
         recommendations = _unique_recs[:6]   # hard cap at 6 items
 
+        # Re-number recommendations sequentially after all insertions/dedup
+        for _idx, _rec in enumerate(recommendations, 1):
+            if isinstance(_rec, dict):
+                _rec["priority"] = _idx
+
         if domain_id == "hr":
-            # FIX 3: post-process all action strings to remove sales-centric language
+            # Fix owner labels that default to sales/growth team names
+            for _rec in recommendations:
+                if isinstance(_rec, dict):
+                    _owner = _rec.get("owner", "")
+                    if "Growth" in _owner or "Sales lead" in _owner:
+                        _rec["owner"] = "HR / People team"
+
+            # Post-process all action strings to remove sales-centric language
             for _rec in recommendations:
                 if isinstance(_rec, dict):
                     _rec["action"] = (_rec.get("action", "")
