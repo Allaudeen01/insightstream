@@ -2967,7 +2967,15 @@ class UnifiedReportGenerator(PDFReportGenerator):
         if domain_id == "entertainment" and df is not None:
             try:
                 _pdf = df if isinstance(df, pd.DataFrame) else df.to_pandas()
-                _type_col    = next((c for c in _pdf.columns if c.lower() == "type"), None)
+                _CONTENT_TYPES_KPI = {"movie", "tv show", "series", "episode",
+                                      "track", "album", "documentary", "short"}
+                _type_col = next(
+                    (c for c in _pdf.columns
+                     if _pdf[c].nunique() <= 10
+                     and any(v.lower() in _CONTENT_TYPES_KPI
+                             for v in _pdf[c].dropna().astype(str).unique()[:50])),
+                    None
+                )
                 _country_col = next((c for c in _pdf.columns if c.lower() in ["country", "countries"]), None)
                 _year_col    = next((c for c in _pdf.columns
                                      if "release_year" in c.lower() or c.lower() == "year"), None)
@@ -3492,7 +3500,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
             try:
                 _pdf_ent = df if isinstance(df, pd.DataFrame) else df.to_pandas()
                 _date_added_col = next(
-                    (c for c in _pdf_ent.columns if "date_added" in c.lower()), None
+                    (c for c in _pdf_ent.columns if any(k in c.lower() for k in
+                     ["date_added", "dateadded", "date_uploaded",
+                      "added_date", "available_since"])), None
                 )
                 if _date_added_col:
                     _ent_dates = pd.to_datetime(

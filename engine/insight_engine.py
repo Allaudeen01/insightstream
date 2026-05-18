@@ -124,14 +124,22 @@ class DomainDetector:
         if any(k in content_cols for k in ["release_year", "date_added", "duration"]):
             entertainment_signals += 1
 
-        _ent_type_col = next((c for c in df.columns if c.lower() == "type"), None)
+        _CONTENT_TYPES = {"movie", "tv show", "series", "episode", "track",
+                          "album", "documentary", "short"}
+        _ent_type_col = next(
+            (c for c in df.columns
+             if df[c].n_unique() <= 10
+             and any(v.lower() in _CONTENT_TYPES
+                     for v in df[c].drop_nulls().cast(pl.Utf8).to_list()[:50])),
+            None
+        )
         if _ent_type_col:
             try:
                 try:
                     _type_vals = df[_ent_type_col].dropna().astype(str).str.lower().unique().tolist()
                 except Exception:
                     _type_vals = df[_ent_type_col].drop_nulls().cast(pl.Utf8).str.to_lowercase().unique().to_list()
-                if any(v in _type_vals for v in ["movie", "tv show", "series", "episode"]):
+                if any(v in _type_vals for v in _CONTENT_TYPES):
                     entertainment_signals += 3
             except Exception:
                 pass
@@ -1717,13 +1725,21 @@ class BusinessRuleEngine:
                 all_insights.extend(results)
 
         # Fire content library rule for entertainment datasets
-        if any(c.lower() == "type" for c in df.columns):
-            _type_col = next(c for c in df.columns if c.lower() == "type")
+        _CONTENT_TYPES_EXEC = {"movie", "tv show", "series", "episode",
+                                "track", "album", "documentary", "short"}
+        _type_col = next(
+            (c for c in df.columns
+             if df[c].n_unique() <= 10
+             and any(v.lower() in _CONTENT_TYPES_EXEC
+                     for v in df[c].drop_nulls().cast(pl.Utf8).to_list()[:50])),
+            None
+        )
+        if _type_col:
             try:
                 _type_vals = df[_type_col].drop_nulls().cast(pl.Utf8).str.to_lowercase().unique().to_list()
             except Exception:
                 _type_vals = []
-            if any(v in _type_vals for v in ["movie", "tv show", "series"]):
+            if any(v in _type_vals for v in _CONTENT_TYPES_EXEC):
                 results = self._rule_content_library_analysis(df, profile)
                 if results:
                     all_insights.extend(results)
@@ -3033,13 +3049,36 @@ class BusinessRuleEngine:
     def _rule_content_library_analysis(self, df, profile) -> list:
         """Fires for Netflix/content library datasets."""
         insights = []
-        cols_lower = {c.lower(): c for c in df.columns}
 
-        type_col   = cols_lower.get("type")
-        rating_col = cols_lower.get("rating")
-        country_col = cols_lower.get("country")
-        year_col   = cols_lower.get("release_year")
-        genre_col  = cols_lower.get("listed_in")
+        _CONTENT_TYPES_RULE = {"movie", "tv show", "series", "episode",
+                                "track", "album", "documentary", "short"}
+
+        # Generic type column detection — any low-cardinality col whose values
+        # overlap known content types
+        type_col = next(
+            (c for c in df.columns
+             if df[c].n_unique() <= 10
+             and any(v.lower() in _CONTENT_TYPES_RULE
+                     for v in df[c].drop_nulls().cast(pl.Utf8).to_list()[:50])),
+            None
+        )
+        rating_col = next(
+            (c for c in df.columns if c.lower() in ["rating", "content_rating",
+             "age_rating", "maturity_rating"]), None
+        )
+        country_col = next(
+            (c for c in df.columns if c.lower() in ["country", "countries",
+             "origin_country", "production_country"]), None
+        )
+        year_col = next(
+            (c for c in df.columns if any(k in c.lower()
+             for k in ["release_year", "release_date", "year"])), None
+        )
+        genre_col = next(
+            (c for c in df.columns if any(k in c.lower()
+             for k in ["listed_in", "genre", "category", "categories",
+                       "tags", "type_genre"])), None
+        )
 
         if not type_col:
             return []
@@ -3160,9 +3199,11 @@ class BusinessRuleEngine:
                 except Exception as _ye:
                     log.warning(f"[content_year] {_ye}")
 
-            # 5. Content added over time (date_added column)
+            # 5. Content added over time (date_added / upload date column)
             date_added_col = next(
-                (c for c in pdf.columns if "date_added" in c.lower()), None
+                (c for c in pdf.columns if any(k in c.lower() for k in
+                 ["date_added", "dateadded", "date_uploaded",
+                  "added_date", "available_since"])), None
             )
             if date_added_col:
                 try:
