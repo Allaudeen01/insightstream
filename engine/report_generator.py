@@ -2238,10 +2238,12 @@ class PDFReportGenerator:
                 _unique_recs.append(_r)
         recommendations = _unique_recs[:6]   # hard cap at 6 items
 
-        # Re-number recommendations sequentially after all insertions/dedup
+        # Force sequential numbering regardless of priority values
         for _idx, _rec in enumerate(recommendations, 1):
             if isinstance(_rec, dict):
                 _rec["priority"] = _idx
+            elif isinstance(_rec, str):
+                pass  # string recs handled separately
 
         if domain_id == "hr":
             # Fix owner labels that default to sales/growth team names
