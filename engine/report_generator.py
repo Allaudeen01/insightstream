@@ -2973,15 +2973,19 @@ class UnifiedReportGenerator(PDFReportGenerator):
                                      if "release_year" in c.lower() or c.lower() == "year"), None)
                 ent_kpis = {}
                 if _type_col:
-                    for _t, _n in _pdf[_type_col].value_counts().items():
-                        # Fix capitalisation: "TV Show" → "TV Shows", "Movie" → "Movies"
-                        _t_str = str(_t).strip()
-                        if _t_str.lower() == "tv show":
-                            _label = "TV Shows"
-                        elif _t_str.lower() == "movie":
-                            _label = "Movies"
-                        else:
-                            _label = f"{_t_str}s"
+                    _TYPE_LABELS = {
+                        "tv show": "TV Shows",
+                        "movie": "Movies",
+                        "tv shows": "TV Shows",
+                        "movies": "Movies",
+                        "series": "Series",
+                        "documentary": "Documentaries",
+                        "short": "Shorts",
+                    }
+                    _type_counts = _pdf[_type_col].value_counts()
+                    for _t, _n in _type_counts.items():
+                        _key = str(_t).lower().strip()
+                        _label = _TYPE_LABELS.get(_key, f"{str(_t)}s")
                         ent_kpis[_label] = f"{_n:,}"
                 else:
                     ent_kpis["Total Titles"] = f"{len(_pdf):,}"
