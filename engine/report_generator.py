@@ -2974,7 +2974,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 ent_kpis = {}
                 if _type_col:
                     for _t, _n in _pdf[_type_col].value_counts().items():
-                        ent_kpis[f"{str(_t)}s"] = f"{_n:,}"
+                        _label = str(_t).upper() if str(_t).lower() in ["tv show", "movie"] \
+                                 else str(_t)
+                        ent_kpis[f"{_label}s"] = f"{_n:,}"
                 else:
                     ent_kpis["Total Titles"] = f"{len(_pdf):,}"
                 if _country_col:
