@@ -113,6 +113,33 @@ class DomainDetector:
         if has_order and has_discount and not has_product:
             scores["ecommerce"] = scores.get("ecommerce", 0) + 0.2
 
+        # Entertainment/content library detection
+        entertainment_signals = 0
+        content_cols = [c.lower() for c in df.columns]
+
+        if any(k in content_cols for k in ["title", "show_id", "listed_in", "type"]):
+            entertainment_signals += 2
+        if any(k in content_cols for k in ["director", "cast", "genre", "rating"]):
+            entertainment_signals += 2
+        if any(k in content_cols for k in ["release_year", "date_added", "duration"]):
+            entertainment_signals += 1
+
+        _ent_type_col = next((c for c in df.columns if c.lower() == "type"), None)
+        if _ent_type_col:
+            try:
+                try:
+                    _type_vals = df[_ent_type_col].dropna().astype(str).str.lower().unique().tolist()
+                except Exception:
+                    _type_vals = df[_ent_type_col].drop_nulls().cast(pl.Utf8).str.to_lowercase().unique().to_list()
+                if any(v in _type_vals for v in ["movie", "tv show", "series", "episode"]):
+                    entertainment_signals += 3
+            except Exception:
+                pass
+
+        if entertainment_signals >= 4:
+            scores["entertainment"] = 0.8
+            print(f"[DOMAIN] Entertainment detected (signals={entertainment_signals})")
+
         # Re-pick winner after tie-breaking adjustments
         best_domain = max(scores, key=scores.get)
         best_score  = scores[best_domain]
@@ -1689,6 +1716,19 @@ class BusinessRuleEngine:
             if results:
                 all_insights.extend(results)
 
+        # Fire content library rule for entertainment datasets
+        if any(c.lower() == "type" for c in df.columns):
+            _type_col = next(c for c in df.columns if c.lower() == "type")
+            try:
+                _type_vals = df[_type_col].drop_nulls().cast(pl.Utf8).str.to_lowercase().unique().to_list()
+            except Exception:
+                _type_vals = []
+            if any(v in _type_vals for v in ["movie", "tv show", "series"]):
+                results = self._rule_content_library_analysis(df, profile)
+                if results:
+                    all_insights.extend(results)
+                    log.info(f"[content_library] Generated {len(results)} insights")
+
         # ── Tier 1.2: Enhanced Time-Series Analysis ───────────────────────
         _ts = TimeSeriesAnalyzer()
         _ts_insights = safe_rule_call(_ts.analyze, "time_series_analyzer", df, profile)
@@ -2986,6 +3026,142 @@ class BusinessRuleEngine:
 
         except Exception as e:
             log.warning(f"[hr_attrition] Failed: {e}")
+
+        return insights
+
+    @log_rule
+    def _rule_content_library_analysis(self, df, profile) -> list:
+        """Fires for Netflix/content library datasets."""
+        insights = []
+        cols_lower = {c.lower(): c for c in df.columns}
+
+        type_col   = cols_lower.get("type")
+        rating_col = cols_lower.get("rating")
+        country_col = cols_lower.get("country")
+        year_col   = cols_lower.get("release_year")
+        genre_col  = cols_lower.get("listed_in")
+
+        if not type_col:
+            return []
+
+        try:
+            pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
+            total = len(pdf)
+
+            # 1. Movie vs TV Show split
+            type_counts = pdf[type_col].value_counts()
+            if len(type_counts) >= 2:
+                top_type    = type_counts.index[0]
+                top_pct     = type_counts.iloc[0] / total * 100
+                second_type = type_counts.index[1]
+                second_pct  = type_counts.iloc[1] / total * 100
+                insights.append(BusinessInsight(
+                    title=f"Content Mix: {top_pct:.0f}% {top_type}s, {second_pct:.0f}% {second_type}s",
+                    description=(
+                        f"The library contains {type_counts.iloc[0]:,} {top_type}s "
+                        f"({top_pct:.0f}%) and {type_counts.iloc[1]:,} {second_type}s "
+                        f"({second_pct:.0f}%). "
+                        f"{'Movies dominate — the platform is film-first, with TV Shows as a secondary offering.' if top_type == 'Movie' else 'TV Shows lead — binge-watch culture drives engagement over one-off films.'}"
+                    ),
+                    why_it_matters="Content mix determines platform identity and subscriber retention strategy.",
+                    evidence=f"{top_type}: {top_pct:.0f}% | {second_type}: {second_pct:.0f}%",
+                    impact="🟠 Important",
+                    recommendation=(
+                        f"{'Invest in original TV Show production to increase time-on-platform and reduce churn.' if top_type == 'Movie' else 'Maintain TV Show dominance while ensuring Movie catalogue remains competitive.'}"
+                    ),
+                    rule_type="content_type_split",
+                    score=7.5,
+                    chart_data={"type_counts": type_counts.to_dict()},
+                ))
+
+            # 2. Rating distribution
+            if rating_col:
+                try:
+                    rating_counts = pdf[rating_col].value_counts().head(5)
+                    top_rating     = rating_counts.index[0]
+                    top_rating_pct = rating_counts.iloc[0] / total * 100
+                    mature_ratings = ["tv-ma", "r", "nc-17", "18+"]
+                    mature_count   = int(pdf[rating_col].str.lower().str.strip().isin(mature_ratings).sum())
+                    mature_pct     = mature_count / total * 100
+                    insights.append(BusinessInsight(
+                        title=f"Content Rating: {top_rating} Dominates at {top_rating_pct:.0f}%",
+                        description=(
+                            f"{top_rating} is the most common rating ({top_rating_pct:.0f}% of catalogue). "
+                            f"Top 5 ratings: {', '.join(f'{r} ({c:,})' for r, c in rating_counts.items())}. "
+                            f"{'Mature content (TV-MA/R) makes up the majority — platform skews adult.' if top_rating in ['TV-MA', 'R'] else 'Family-friendly ratings are prominent — broad audience appeal.'}"
+                        ),
+                        why_it_matters="Rating distribution defines audience demographics and content acquisition strategy.",
+                        evidence=f"Top rating: {top_rating} ({top_rating_pct:.0f}%)",
+                        impact="🟠 Important",
+                        recommendation=(
+                            "Balance mature and family content to avoid audience concentration risk. "
+                            "Ensure parental controls are prominent if mature content dominates."
+                        ),
+                        rule_type="content_rating_distribution",
+                        score=7.0,
+                        chart_data={"rating_counts": rating_counts.to_dict()},
+                    ))
+                except Exception as _re:
+                    log.warning(f"[content_rating] {_re}")
+
+            # 3. Top producing countries
+            if country_col:
+                try:
+                    country_series = pdf[country_col].dropna().str.split(",").explode().str.strip()
+                    country_counts = country_series.value_counts().head(5)
+                    top_country     = country_counts.index[0]
+                    top_country_pct = country_counts.iloc[0] / len(country_series) * 100
+                    insights.append(BusinessInsight(
+                        title=f"Top Producer: {top_country} at {top_country_pct:.0f}% of Content",
+                        description=(
+                            f"{top_country} produces {top_country_pct:.0f}% of all content "
+                            f"({country_counts.iloc[0]:,} titles). "
+                            f"Top 5 countries: {', '.join(f'{c} ({n:,})' for c, n in country_counts.items())}. "
+                            f"Geographic concentration signals both market strength and localisation opportunity."
+                        ),
+                        why_it_matters="Content origin shapes cultural relevance and international subscriber growth.",
+                        evidence=f"Top: {top_country} ({top_country_pct:.0f}%) | {len(country_counts)} countries in top 5",
+                        impact="🟠 Important",
+                        recommendation=(
+                            f"Invest in local content from underrepresented regions to drive international subscriber growth. "
+                            f"{'Reduce US dependency by commissioning content from emerging markets.' if 'united states' in top_country.lower() else f'Expand {top_country} content internationally.'}"
+                        ),
+                        rule_type="content_by_country",
+                        score=7.0,
+                        chart_data={"country_counts": country_counts.to_dict()},
+                    ))
+                except Exception as _ce:
+                    log.warning(f"[content_by_country] {_ce}")
+
+            # 4. Release year trend
+            if year_col:
+                try:
+                    year_counts   = pdf[year_col].dropna().astype(int).value_counts().sort_index()
+                    peak_year     = int(year_counts.idxmax())
+                    recent_count  = int(year_counts[year_counts.index >= 2018].sum())
+                    recent_pct    = recent_count / total * 100
+                    insights.append(BusinessInsight(
+                        title=f"Content Recency: {recent_pct:.0f}% Released 2018 or Later",
+                        description=(
+                            f"{recent_count:,} titles ({recent_pct:.0f}%) were released in 2018 or later. "
+                            f"Peak production year: {peak_year}. "
+                            f"{'Catalogue is current and fresh — high recency signals strong content investment.' if recent_pct > 50 else 'Catalogue skews older — consider refreshing with newer releases.'}"
+                        ),
+                        why_it_matters="Content recency directly impacts subscriber satisfaction and churn rates.",
+                        evidence=f"2018+: {recent_pct:.0f}% | Peak year: {peak_year}",
+                        impact="🟠 Important",
+                        recommendation=(
+                            f"{'Maintain pipeline of 2024+ releases to stay competitive.' if recent_pct > 50 else 'Prioritise licensing newer titles — catalogue age risks subscriber churn.'}"
+                        ),
+                        rule_type="content_recency",
+                        score=6.5,
+                        chart_data={"peak_year": peak_year, "recent_pct": round(recent_pct, 1)},
+                    ))
+                except Exception as _ye:
+                    log.warning(f"[content_year] {_ye}")
+
+        except Exception as e:
+            log.warning(f"[content_library_analysis] Failed: {e}")
 
         return insights
 

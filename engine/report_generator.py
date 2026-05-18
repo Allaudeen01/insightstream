@@ -3100,6 +3100,16 @@ class UnifiedReportGenerator(PDFReportGenerator):
                                      "structural differences in workforce composition")
                             .replace("warrants targeted intervention", "warrants further investigation"))
 
+                    if domain_id == "entertainment":
+                        title = title.replace("Revenue Concentration", "Distribution")
+                        description = (description
+                            .replace("of total revenue", "of total catalogue")
+                            .replace("revenue gap", "catalogue gap")
+                            .replace("business operation", "content library")
+                            .replace("strong top-line performance but structural imbalances",
+                                     "a diverse catalogue with clear content patterns")
+                            .replace("transactions totalling", "titles totalling"))
+
                     if domain_id == "hr":
                         title = (title
                             .replace("Emerging Market Leader", "Dominant Department"))
