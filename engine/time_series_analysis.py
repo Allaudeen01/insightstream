@@ -25,6 +25,11 @@ log = logging.getLogger(__name__)
 
 
 def _fmt_currency(val: float) -> str:
+    try:
+        from insight_engine import _fmt_currency as _ie_fmt
+        return _ie_fmt(val)
+    except Exception:
+        pass
     abs_val = abs(val)
     sign = "" if val >= 0 else "-"
     if abs_val >= 1_00_00_000:

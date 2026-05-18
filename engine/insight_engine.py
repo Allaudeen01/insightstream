@@ -1719,6 +1719,12 @@ class BusinessRuleEngine:
         # Root-cause must run last — it reads all_insights to attach hypotheses to parent findings
         all_insights.extend(safe_rule_call(self._rule_root_cause_analysis, "root_cause_analysis", df, profile, all_insights))
 
+        # If fewer than 3 insights generated, run generic distribution fallback
+        if len(all_insights) < 3:
+            log.info("[RuleEngine] Fewer than 3 insights — running generic fallback")
+            fallback = self._rule_generic_distribution_analysis(df, profile)
+            all_insights.extend(fallback)
+
         # ── Post-Processing ──────────────────────────────────────────────
         all_insights = self._deduplicate(all_insights)
         all_insights = self._inject_contradictions(all_insights)
@@ -2661,8 +2667,8 @@ class BusinessRuleEngine:
             
             description = (
                 f"Price tier analysis reveals significant revenue variation. "
-                f"'{highest['tier']}' tier (₹{q67:.0f}+) averages {self._format_inr(highest['avg_rev'])} per transaction, "
-                f"while '{lowest['tier']}' tier (₹0-{q33:.0f}) averages {self._format_inr(lowest['avg_rev'])} — "
+                f"'{highest['tier']}' tier ({_fmt_currency(q67)}+) averages {self._format_inr(highest['avg_rev'])} per transaction, "
+                f"while '{lowest['tier']}' tier (0–{_fmt_currency(q33)}) averages {self._format_inr(lowest['avg_rev'])} — "
                 f"a {gap_pct:.0f}% difference. "
                 f"{significance_text}"
                 f"This suggests price point significantly influences purchase behavior."
@@ -2775,13 +2781,11 @@ class BusinessRuleEngine:
         return any(k in cl for k in monetary)
 
     def _format_inr(self, value: float) -> str:
-        """Format number as Indian Rupee with smart scaling."""
-        try: value = float(value)
-        except (TypeError, ValueError): return "₹0"
-        if value >= 1_00_00_000: return f"₹{value/1_00_00_000:.2f} Cr"
-        if value >= 1_00_000: return f"₹{value/1_00_000:.2f} L"
-        if value >= 1_000: return f"₹{value/1_000:.1f}K"
-        return f"₹{value:,.0f}"
+        """Format number using the current run's currency symbol."""
+        try:
+            return _fmt_currency(float(value))
+        except (TypeError, ValueError):
+            return _fmt_currency(0)
 
     @log_rule
     def _rule_temporal_peaks(self, df: pl.DataFrame) -> list[BusinessInsight]:
@@ -5225,6 +5229,69 @@ class BusinessRuleEngine:
         insights.extend(fallbacks[:needed])
         return insights
 
+    def _rule_generic_distribution_analysis(self, df: pl.DataFrame, profile: "DataProfile") -> list[BusinessInsight]:
+        """
+        Fallback rule: fires when dataset has no clear revenue/financial column.
+        Generates distribution insights for all categorical columns.
+        Always produces at least 3 meaningful insights.
+        """
+        insights = []
+        pdf = df.to_pandas()
+
+        cat_cols = [c for c in pdf.columns
+                    if pdf[c].nunique() <= 20 and pdf[c].nunique() >= 2
+                    and pdf[c].dtype == 'object']
+
+        for col in cat_cols[:4]:
+            try:
+                counts = pdf[col].value_counts()
+                top = counts.index[0]
+                top_pct = counts.iloc[0] / len(pdf) * 100
+                bottom = counts.index[-1]
+                bottom_pct = counts.iloc[-1] / len(pdf) * 100
+
+                insights.append(BusinessInsight(
+                    title=f"{col} Distribution: {top} dominates at {top_pct:.0f}%",
+                    description=(
+                        f"{top} accounts for {top_pct:.0f}% of all records "
+                        f"({counts.iloc[0]:,} out of {len(pdf):,}), "
+                        f"while {bottom} is the smallest segment at {bottom_pct:.0f}% "
+                        f"({counts.iloc[-1]:,} records). "
+                        f"Total unique values: {pdf[col].nunique()}."
+                    ),
+                    why_it_matters=f"Understanding {col} distribution reveals concentration and diversity in the dataset.",
+                    evidence=f"Top: {top} ({top_pct:.0f}%) | Bottom: {bottom} ({bottom_pct:.0f}%)",
+                    impact="🟠 Important",
+                    recommendation=(
+                        f"Focus analysis on {top} segment — it represents the majority. "
+                        f"Investigate why {bottom} is underrepresented."
+                    ),
+                    rule_type="distribution_analysis",
+                    score=5.0,
+                    chart_data={"col": col, "top": top, "top_pct": top_pct},
+                ))
+            except Exception:
+                continue
+
+        insights.append(BusinessInsight(
+            title=f"Dataset Scale: {len(pdf):,} records across {len(pdf.columns)} dimensions",
+            description=(
+                f"This dataset contains {len(pdf):,} records and {len(pdf.columns)} columns. "
+                f"Categorical dimensions: {len(cat_cols)}. "
+                f"Numeric dimensions: {len(pdf.select_dtypes('number').columns)}. "
+                f"Completeness: {(1 - pdf.isnull().mean().mean()) * 100:.1f}% non-null values."
+            ),
+            why_it_matters="Dataset scale and completeness determine the reliability of all downstream analysis.",
+            evidence=f"{len(pdf):,} records, {len(pdf.columns)} columns",
+            impact="🟢 Minor",
+            recommendation="Ensure data completeness before drawing conclusions. Flag columns with >10% missing values.",
+            rule_type="data_quality",
+            score=4.0,
+            chart_data={},
+        ))
+
+        return insights
+
     def _rank_insights(self, insights: list[BusinessInsight]) -> list[BusinessInsight]:
         """
         ✅ FINAL V4: ROI-weighted ranking.
@@ -5356,6 +5423,18 @@ class BusinessRuleEngine:
             print("=" * 70 + "\n")
         except Exception as e:
             print(f"[DIAG] self-diagnostic failed: {e}")
+
+
+def _is_id_value(val: str) -> bool:
+    """Return True if value looks like an ID/code, not a human-readable name."""
+    val = str(val).strip()
+    if re.match(r'^[A-Z]{2,4}-[A-Z]{2,4}-\d{5,}$', val):
+        return True
+    if re.match(r'^[A-Z]{2,3}-\d{4}-\d{5,}$', val):
+        return True
+    if re.match(r'^\d{5,}$', val):
+        return True
+    return False
 
 
 class StrategicBriefBuilder:
@@ -5677,11 +5756,18 @@ class StrategicBriefBuilder:
             if total_rev == 0:
                 return ""
             
-            # Get top 3 categories
-            top_cat = cat_revenue.index[0]
-            top_pct = (cat_revenue.iloc[0] / total_rev) * 100
-            
-            # FIX 5: Build sentence with top category
+            # Get top category, skipping ID-like values
+            top_cat = None
+            top_pct = 0.0
+            for candidate, rev_val in zip(cat_revenue.index, cat_revenue.values):
+                if not _is_id_value(str(candidate)):
+                    top_cat = candidate
+                    top_pct = (rev_val / total_rev) * 100
+                    break
+            if top_cat is None:
+                return ""
+
+            # Build sentence with top category
             result = f"{top_cat} leads at {top_pct:.0f}% of revenue"
             
             # Add runners-up if available
@@ -6070,7 +6156,7 @@ class InsightNarrator:
         
         # Lead with upside if available
         if base:
-            parts.append(f"Simulated upside: ₹{base:,.0f} at base-case assumptions.")
+            parts.append(f"Simulated upside: {_fmt_currency(base)} at base-case assumptions.")
         
         # Add main description
         parts.append(ins.description)
@@ -6615,6 +6701,26 @@ class SmartChartRecommender:
                         cat_col    = cat_candidates[0]    if cat_candidates    else (
                             all_cats[1] if len(all_cats) > 1 else all_cats[0]
                         )
+
+                        # Guard: if region_col has > 20 unique values (e.g. City),
+                        # fall back to a higher-level column with fewer categories
+                        if region_col and pdf[region_col].nunique() > 20:
+                            fallback_region_cols = [
+                                c for c in pdf.columns
+                                if any(k in c.lower() for k in ["region", "state", "country", "zone"])
+                                and pdf[c].nunique() <= 20
+                                and c != region_col
+                            ]
+                            if fallback_region_cols:
+                                region_col = fallback_region_cols[0]
+                                log.info(f"[Heatmap] Switched to {region_col} (original had too many unique values)")
+                            else:
+                                log.info("[Heatmap] Skipped — no column with ≤ 20 unique values found")
+                                region_col = None
+
+                        if region_col is None:
+                            # No column with ≤ 20 unique values — skip grouped bar/heatmap
+                            raise ValueError("heatmap skipped: no valid region column")
                         pdf_tmp = pdf.copy()
                         if _is_revenue_col(revenue_col):
                             pdf_tmp["_revenue"] = pdf[revenue_col].fillna(0)
@@ -6678,9 +6784,8 @@ class SmartChartRecommender:
                                 # Format values for display (in millions)
                                 pivot_display = (pivot / 1_000_000).round(2)
                                 text_matrix = [
-                                    [f"₹{v:.1f}M" if v >= 1 else f"₹{v*1000:.0f}K"
-                                     for v in row]
-                                    for row in pivot_display.values
+                                    [_fmt_currency(v) for v in row]
+                                    for row in pivot.values
                                 ]
                                 fig_heat = go.Figure(data=go.Heatmap(
                                     z=pivot_display.values,
@@ -7169,6 +7274,13 @@ def run_insight_engine(
         if isinstance(df, pd.DataFrame):
             df = pl.from_pandas(df)
 
+        # Detect and set currency symbol for this analysis run
+        from report_generator import _detect_currency_symbol
+        _set_currency_symbol(_detect_currency_symbol(
+            df.to_pandas() if hasattr(df, 'to_pandas') else df
+        ))
+        print(f"[INSIGHT ENGINE CURRENCY] Symbol set to: {_CURRENCY_SYMBOL}")
+
         # ── Sampling for large datasets (FIX 4: Tiered Logic) ──────────
         original_row_count = len(df)
         sampled = False
@@ -7484,17 +7596,37 @@ def benchmark_compare(metric_name: str, computed_value: float, domain_id: str) -
 # HELPERS
 # ============================================================
 
+# Module-level symbol — set once per analysis run
+_CURRENCY_SYMBOL = "₹"
+
+def _set_currency_symbol(symbol: str) -> None:
+    global _CURRENCY_SYMBOL
+    _CURRENCY_SYMBOL = symbol
+
 def _fmt_currency(val: float) -> str:
-    """Format number as Indian Rupee with smart scaling."""
-    abs_val = abs(val)
-    sign = "" if val >= 0 else "-"
-    if abs_val >= 1_00_00_000:      # 1 crore
-        return f"{sign}₹{abs_val/1_00_00_000:.2f} Cr"
-    if abs_val >= 1_00_000:          # 1 lakh
-        return f"{sign}₹{abs_val/1_00_000:.2f} L"
-    if abs_val >= 1_000:
-        return f"{sign}₹{abs_val/1_000:.1f}K"
-    return f"{sign}₹{abs_val:,.0f}"
+    global _CURRENCY_SYMBOL
+    sym = _CURRENCY_SYMBOL
+    try:
+        abs_val = abs(float(val))
+        sign = "" if float(val) >= 0 else "-"
+    except (TypeError, ValueError):
+        return str(val)
+    if sym == "₹":
+        if abs_val >= 1_00_00_000:
+            return f"{sign}₹{abs_val/1_00_00_000:.2f} Cr"
+        if abs_val >= 1_00_000:
+            return f"{sign}₹{abs_val/1_00_000:.2f} L"
+        if abs_val >= 1_000:
+            return f"{sign}₹{abs_val/1_000:.1f}K"
+        return f"{sign}₹{abs_val:,.0f}"
+    else:
+        if abs_val >= 1_000_000_000:
+            return f"{sign}{sym}{abs_val/1_000_000_000:.2f}B"
+        if abs_val >= 1_000_000:
+            return f"{sign}{sym}{abs_val/1_000_000:.2f}M"
+        if abs_val >= 1_000:
+            return f"{sign}{sym}{abs_val/1_000:.1f}K"
+        return f"{sign}{sym}{abs_val:,.2f}"
 
 
 CATEGORY_BENCHMARKS = {

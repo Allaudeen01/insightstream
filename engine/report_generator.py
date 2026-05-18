@@ -174,26 +174,62 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL CURRENCY FORMATTER  — always ₹, always INR scale
+# MODULE-LEVEL CURRENCY FORMATTER  — symbol-aware, auto-detects INR vs USD etc.
 # ══════════════════════════════════════════════════════════════════════════════
-def _fmt_currency(value: float) -> str:
-    """Format a number as Indian Rupees with smart Cr / L / K scaling.
-
-    This function is the single source of truth for currency display.
-    It ALWAYS uses ₹ — no £, ¥, or other symbols can appear here.
-    """
+def _fmt_currency(value: float, symbol: str = "₹") -> str:
+    """Format a number with smart scaling. Symbol auto-detected from data."""
     try:
         abs_val = abs(float(value))
         sign = "" if float(value) >= 0 else "-"
     except (TypeError, ValueError):
         return str(value)
-    if abs_val >= 1_00_00_000:          # 1 Crore
-        return f"{sign}₹{abs_val / 1_00_00_000:.2f} Cr"
-    if abs_val >= 1_00_000:             # 1 Lakh
-        return f"{sign}₹{abs_val / 1_00_000:.2f} L"
-    if abs_val >= 1_000:
-        return f"{sign}₹{abs_val / 1_000:.1f}K"
-    return f"{sign}₹{abs_val:,.0f}"
+    if symbol == "₹":
+        if abs_val >= 1_00_00_000:
+            return f"{sign}₹{abs_val / 1_00_00_000:.2f} Cr"
+        if abs_val >= 1_00_000:
+            return f"{sign}₹{abs_val / 1_00_000:.2f} L"
+        if abs_val >= 1_000:
+            return f"{sign}₹{abs_val / 1_000:.1f}K"
+        return f"{sign}₹{abs_val:,.0f}"
+    else:
+        if abs_val >= 1_000_000_000:
+            return f"{sign}{symbol}{abs_val / 1_000_000_000:.2f}B"
+        if abs_val >= 1_000_000:
+            return f"{sign}{symbol}{abs_val / 1_000_000:.2f}M"
+        if abs_val >= 1_000:
+            return f"{sign}{symbol}{abs_val / 1_000:.1f}K"
+        return f"{sign}{symbol}{abs_val:,.2f}"
+
+
+def _detect_currency_symbol(df: pd.DataFrame) -> str:
+    """
+    Detect whether dataset uses USD, EUR, GBP, or INR.
+    Returns the correct symbol string. Defaults to ₹ if no signal found.
+    """
+    col_names = " ".join(df.columns).lower()
+    if any(k in col_names for k in ["usd", "dollar", "price_usd", "sales_usd"]):
+        return "$"
+    if any(k in col_names for k in ["eur", "euro"]):
+        return "€"
+    if any(k in col_names for k in ["gbp", "pound"]):
+        return "£"
+
+    for col in df.columns:
+        if any(k in col.lower() for k in ["country"]):
+            try:
+                vals = df[col].dropna().astype(str).str.strip().tolist()
+                us_count = sum(1 for v in vals if v.lower() in [
+                    "united states", "usa", "us", "united states of america"])
+                if us_count > 0:  # Even 1 US row = USD
+                    return "$"
+                uk_count = sum(1 for v in vals if v.lower() in [
+                    "united kingdom", "uk", "great britain", "england"])
+                if uk_count > len(vals) * 0.3:
+                    return "£"
+            except Exception:
+                pass
+
+    return "₹"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -348,7 +384,70 @@ TEMPLATES = {
         "kpi_labels": {},
         "seasonality_context": "recurring temporal patterns may reflect operational or market cycles",
         "benchmarks": {},
-    }
+    },
+    "hr": {
+        "report_title": "Workforce Analytics Report",
+        "target_metric": "MonthlyIncome",
+        "executive_summary_header": "HR Performance Executive Summary",
+        "regional_chart_title": "Department Distribution",
+        "narrative_domain_name": "human resources",
+        "high_correlation_threshold": 0.60,
+        "secondary_threshold": 0.30,
+        "regional_insight_threshold": 0.10,
+        "correlation_primary_label": "workforce driver",
+        "kpi_labels": {
+            "total_revenue": "Total Employees",
+            "avg_order_value": "Avg Monthly Income",
+        },
+        "benchmarks": {},
+    },
+    "entertainment": {
+        "report_title": "Content Library Analysis Report",
+        "target_metric": "release_year",
+        "executive_summary_header": "Content Performance Summary",
+        "regional_chart_title": "Content by Country",
+        "narrative_domain_name": "content library",
+        "high_correlation_threshold": 0.60,
+        "secondary_threshold": 0.30,
+        "regional_insight_threshold": 0.10,
+        "correlation_primary_label": "content driver",
+        "kpi_labels": {
+            "total_revenue": "Total Titles",
+            "avg_order_value": "Avg Release Year",
+        },
+        "benchmarks": {},
+    },
+    "sports": {
+        "report_title": "Sports Performance Analysis Report",
+        "target_metric": "result_margin",
+        "executive_summary_header": "Match Performance Summary",
+        "regional_chart_title": "Performance by Venue",
+        "narrative_domain_name": "tournament",
+        "high_correlation_threshold": 0.60,
+        "secondary_threshold": 0.30,
+        "regional_insight_threshold": 0.10,
+        "correlation_primary_label": "performance driver",
+        "kpi_labels": {
+            "total_revenue": "Total Matches",
+            "avg_order_value": "Avg Margin",
+        },
+        "benchmarks": {},
+    },
+    "health": {
+        "report_title": "Health Data Analysis Report",
+        "target_metric": "Confirmed",
+        "executive_summary_header": "Health Metrics Summary",
+        "regional_chart_title": "Regional Distribution",
+        "narrative_domain_name": "health dataset",
+        "high_correlation_threshold": 0.60,
+        "secondary_threshold": 0.30,
+        "regional_insight_threshold": 0.10,
+        "correlation_primary_label": "health metric driver",
+        "kpi_labels": {
+            "total_revenue": "Total Records",
+        },
+        "benchmarks": {},
+    },
 }
 
 
@@ -1046,14 +1145,37 @@ class InsightNarrator:
         except (ValueError, TypeError):
             pass
 
-        # ── Sentence 1: fixed opening template — always fires when records present
+        # ── Sentence 1: domain-aware opening — always fires when records present
         if records:
-            sentences.append(
+            _DOMAIN_OPENERS = {
+                "hr": (
+                    f"Across {records} employee records, "
+                    f"this {domain_label} dataset reveals workforce patterns "
+                    f"that require strategic attention."
+                ),
+                "entertainment": (
+                    f"Across {records} titles, "
+                    f"this content library analysis reveals distribution patterns "
+                    f"and catalogue insights worth acting on."
+                ),
+                "sports": (
+                    f"Across {records} matches, "
+                    f"this {domain_label} analysis reveals performance patterns "
+                    f"and competitive trends."
+                ),
+                "health": (
+                    f"Across {records} records, "
+                    f"this {domain_label} dataset reveals statistical patterns "
+                    f"across the measured variables."
+                ),
+            }
+            default_opener = (
                 f"Across {records} transactions totalling {total_rev}, "
                 f"this {domain_label} operation reveals an enterprise with "
                 f"strong top-line performance but structural imbalances "
                 f"that require strategic attention."
             )
+            sentences.append(_DOMAIN_OPENERS.get(domain, default_opener))
 
         # ── Sentence 2: revenue concentration / segment dominance ──────────
         # Exclude customer_concentration — it has its own sentence below and
@@ -1962,6 +2084,19 @@ class PDFReportGenerator:
                 dim      = insight.get('decision_implication', '')
                 methodology = insight.get('methodology', '')
 
+            # ── Domain-aware label fixes for non-business domains ─────────
+            if domain in ["hr", "entertainment", "sports", "health"]:
+                title = title.replace("Revenue Concentration", "Distribution")
+                title = title.replace("revenue", "records")
+                desc = desc.replace(
+                    "warrants targeted intervention. A wide revenue gap across",
+                    "warrants further investigation. A wide distribution gap across"
+                )
+                desc = desc.replace(
+                    "signals either demand-side imbalance or execution gaps",
+                    "signals structural differences worth investigating"
+                )
+
             # ── Impact badge colours ───────────────────────────────────────
             is_critical  = '\U0001f534' in impact or 'critical' in impact.lower()
             is_important = '\U0001f7e0' in impact or 'important' in impact.lower()
@@ -2295,26 +2430,26 @@ class PDFReportGenerator:
         return output_path
 
 
-    @staticmethod
-    def _derive_kpis(df: pd.DataFrame, cm: Optional[ColumnMap]) -> dict:
+    def _derive_kpis(self, df: pd.DataFrame, cm: Optional[ColumnMap]) -> dict:
         """
         Derive KPIs with verification against source data.
         P0 FIX: Prevents revenue hallucinations by validating calculations.
         """
         kpis: dict = {}
         raw_values: dict = {}  # Store raw values for verification
-        
+
         if cm and cm.numeric and cm.numeric in df.columns:
             total = df[cm.numeric].sum()
             avg = df[cm.numeric].mean()
-            
+
             # Store raw values
             raw_values['total_revenue'] = total
             raw_values['avg_revenue'] = avg
             raw_values['revenue_col'] = cm.numeric
-            
-            kpis[f"Total {cm.numeric}"] = f"\u20b9{total:,.0f}" if total > 100 else f"{total:,.2f}"
-            kpis[f"Avg {cm.numeric}"]   = f"\u20b9{avg:,.0f}"
+
+            _sym = getattr(self, '_currency_symbol', None) or _detect_currency_symbol(df)
+            kpis[f"Total {cm.numeric}"] = f"{_sym}{total:,.0f}" if total > 100 else f"{total:,.2f}"
+            kpis[f"Avg {cm.numeric}"]   = f"{_sym}{avg:,.0f}"
             
         if cm and cm.numeric2 and cm.numeric2 in df.columns:
             total2 = df[cm.numeric2].sum()
@@ -2643,7 +2778,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
         """Construct a structured multi-page PDF with domain-aware visuals and narratives."""
         if df is not None and hasattr(df, "to_pandas"):
             df = df.to_pandas()
-            
+
+        self._currency_symbol = _detect_currency_symbol(df) if df is not None else "₹"
+        print(f"[CURRENCY] Detected symbol: {self._currency_symbol}")
+
         self.config = TEMPLATE_CONFIGS.get(template, TEMPLATE_CONFIGS["modern"])
         self._setup_styles()
         
@@ -2685,6 +2823,41 @@ class UnifiedReportGenerator(PDFReportGenerator):
             elements.append(Paragraph("Key Performance Indicators", self.S["ChartTitle"]))
             elements.append(self._kpi_table(kpis))
             elements.append(Spacer(1, 30))
+
+        # Domain-aware label overrides
+        _DOMAIN_LANGUAGE = {
+            "hr": {
+                "revenue": "headcount",
+                "Revenue": "Headcount",
+                "sales operation": "HR operation",
+                "ecommerce operation": "HR operation",
+                "business operation": "HR operation",
+                "Total Revenue": "Total Employees",
+                "Average Order Value": "Avg Monthly Income",
+                "portfolio": "workforce",
+            },
+            "entertainment": {
+                "revenue": "titles",
+                "Revenue": "Titles",
+                "business operation": "content library",
+                "Total Revenue": "Total Titles",
+                "Average Order Value": "Avg Release Year",
+                "transactions": "titles",
+            },
+            "sports": {
+                "revenue": "matches",
+                "Revenue": "Matches",
+                "business operation": "tournament",
+                "Total Revenue": "Total Matches",
+                "transactions": "matches",
+            },
+            "health": {
+                "revenue": "cases",
+                "business operation": "health dataset",
+                "Total Revenue": "Total Records",
+                "transactions": "records",
+            },
+        }
 
         if ai_summary:
             elements.append(Paragraph("AI Intelligence Brief", self.S["ChartTitle"]))
