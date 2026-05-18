@@ -2340,7 +2340,7 @@ class PDFReportGenerator:
                     .replace("Audit operations in",
                              "Investigate attrition drivers in"))
 
-            priority_str = f"{int(priority_val):02d}"
+            priority_str = f"{idx:02d}"
             impact_clean = self._strip_emoji(impact)
             meta_line = f"Timeframe: {timeframe}  |  Owner: {owner}  |  Impact: {impact_clean}"
 
