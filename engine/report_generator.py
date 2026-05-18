@@ -2964,6 +2964,34 @@ class UnifiedReportGenerator(PDFReportGenerator):
             except Exception as _e:
                 log.warning(f"[HR KPIs] Failed: {_e}")
 
+        if domain_id == "entertainment" and df is not None:
+            try:
+                _pdf = df if isinstance(df, pd.DataFrame) else df.to_pandas()
+                _type_col    = next((c for c in _pdf.columns if c.lower() == "type"), None)
+                _country_col = next((c for c in _pdf.columns if c.lower() in ["country", "countries"]), None)
+                _year_col    = next((c for c in _pdf.columns
+                                     if "release_year" in c.lower() or c.lower() == "year"), None)
+                ent_kpis = {}
+                if _type_col:
+                    for _t, _n in _pdf[_type_col].value_counts().items():
+                        ent_kpis[f"{str(_t)}s"] = f"{_n:,}"
+                else:
+                    ent_kpis["Total Titles"] = f"{len(_pdf):,}"
+                if _country_col:
+                    _n_countries = (_pdf[_country_col].dropna()
+                                    .str.split(",").explode().str.strip().nunique())
+                    ent_kpis["Countries"] = f"{_n_countries:,}"
+                if _year_col:
+                    ent_kpis["Year Range"] = (
+                        f"{int(_pdf[_year_col].dropna().min())}–"
+                        f"{int(_pdf[_year_col].dropna().max())}"
+                    )
+                if ent_kpis:
+                    kpis = ent_kpis
+                    print(f"[ENTERTAINMENT KPIs] {kpis}")
+            except Exception as _ek:
+                log.warning(f"[entertainment KPIs] {_ek}")
+
         if kpis:
             elements.append(Paragraph("Key Performance Indicators", self.S["ChartTitle"]))
             elements.append(self._kpi_table(kpis))
@@ -3446,6 +3474,68 @@ class UnifiedReportGenerator(PDFReportGenerator):
         # Let ReportLab handle natural pagination - no manual PageBreaks in chart loop
         # Track chart count for temporal/deep insights logic below
         _last_chart_completed_pair = (valid_charts > 0 and valid_charts % 2 == 0)
+
+        # ── Entertainment: Content Added Over Time chart ──────────────────
+        if domain_id == "entertainment" and df is not None:
+            try:
+                _pdf_ent = df if isinstance(df, pd.DataFrame) else df.to_pandas()
+                _date_added_col = next(
+                    (c for c in _pdf_ent.columns if "date_added" in c.lower()), None
+                )
+                if _date_added_col:
+                    _ent_dates = pd.to_datetime(
+                        _pdf_ent[_date_added_col], errors="coerce"
+                    ).dropna()
+                    if len(_ent_dates) >= 12:
+                        _yearly_additions = (
+                            _ent_dates.dt.year.value_counts()
+                            .sort_index()
+                            .reset_index()
+                        )
+                        _yearly_additions.columns = ["year", "count"]
+                        _ent_monthly_data = [
+                            (f"{int(row['year'])}-01", int(row['count']))
+                            for _, row in _yearly_additions.iterrows()
+                        ]
+                        if len(_ent_monthly_data) >= 3:
+                            _peak_yr_idx   = _yearly_additions["count"].idxmax()
+                            _trough_yr_idx = _yearly_additions["count"].idxmin()
+                            _peak_yr   = str(int(_yearly_additions.loc[_peak_yr_idx,   "year"]))
+                            _trough_yr = str(int(_yearly_additions.loc[_trough_yr_idx, "year"]))
+                            _max_c = int(_yearly_additions["count"].max())
+                            _min_c = int(_yearly_additions["count"].min())
+                            _swing = (_max_c - _min_c) / _max_c * 100 if _max_c > 0 else 0
+                            _ent_chart_path = self._chart_monthly_revenue(
+                                _ent_monthly_data,
+                                peak_month=_peak_yr,
+                                trough_month=_trough_yr,
+                                pct_gap=_swing,
+                            )
+                            if (_ent_chart_path and os.path.exists(_ent_chart_path)
+                                    and os.path.getsize(_ent_chart_path) > 0):
+                                elements.append(PageBreak())
+                                elements.append(Paragraph("Content Added Over Time", self.S["Section"]))
+                                elements.append(HRFlowable(
+                                    width="100%", thickness=1,
+                                    color=colors.HexColor(C.RULE_LIGHT)
+                                ))
+                                elements.append(Spacer(1, 10))
+                                elements.append(RLImage(_ent_chart_path, width=480, height=210))
+                                elements.append(Spacer(1, 6))
+                                elements.append(Paragraph(
+                                    f"Titles added per year — peak: {_peak_yr}, "
+                                    f"lowest: {_trough_yr}.",
+                                    self.S["Insight"]
+                                ))
+                                elements.append(Spacer(1, 16))
+                                print(f"[ENTERTAINMENT] Content trend chart added")
+                            else:
+                                print(f"[ENTERTAINMENT] Chart path invalid: {_ent_chart_path}")
+            except Exception as _ent_e:
+                log.warning(f"[entertainment trend] {_ent_e}")
+                import traceback
+                traceback.print_exc()
+        # ── End Entertainment trend chart ─────────────────────────────────
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
         _TEMPORAL_RULES = {"temporal_peaks", "time_series", "temporal", "revenue_trend", "seasonality_pattern"}

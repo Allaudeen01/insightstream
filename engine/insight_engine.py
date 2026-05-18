@@ -3160,6 +3160,61 @@ class BusinessRuleEngine:
                 except Exception as _ye:
                     log.warning(f"[content_year] {_ye}")
 
+            # 5. Content added over time (date_added column)
+            date_added_col = next(
+                (c for c in pdf.columns if "date_added" in c.lower()), None
+            )
+            if date_added_col:
+                try:
+                    import pandas as _pd
+                    _dates = _pd.to_datetime(
+                        pdf[date_added_col], errors="coerce"
+                    ).dropna()
+                    if len(_dates) >= 12:
+                        _yearly = _dates.dt.year.value_counts().sort_index()
+                        _peak_add_year   = int(_yearly.idxmax())
+                        _peak_add_count  = int(_yearly.max())
+                        _recent_added    = int(_dates[_dates.dt.year >= 2019].count())
+                        _recent_pct      = _recent_added / len(_dates) * 100
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"Content Growth: Peak Additions in "
+                                f"{_peak_add_year} ({_peak_add_count:,} titles)"
+                            ),
+                            description=(
+                                f"Netflix added the most content in "
+                                f"{_peak_add_year} ({_peak_add_count:,} titles). "
+                                f"{_recent_added:,} titles ({_recent_pct:.0f}%) "
+                                f"were added in 2019 or later. "
+                                f"{'Rapid catalogue expansion has slowed — quality over quantity phase.' if _peak_add_year < 2021 else 'Catalogue is in active expansion mode.'}"
+                            ),
+                            why_it_matters=(
+                                "Content addition pace reflects platform investment "
+                                "strategy and competitive positioning."
+                            ),
+                            evidence=(
+                                f"Peak year: {_peak_add_year} "
+                                f"({_peak_add_count:,} titles) | "
+                                f"2019+: {_recent_pct:.0f}%"
+                            ),
+                            impact="🟠 Important",
+                            recommendation=(
+                                f"Analyse whether the post-{_peak_add_year} slowdown "
+                                f"reflects budget constraints or a deliberate shift to "
+                                f"original content production. "
+                                f"Subscriber growth correlates with new additions."
+                            ),
+                            rule_type="content_growth_trend",
+                            score=7.0,
+                            chart_data={
+                                "peak_year": _peak_add_year,
+                                "yearly_counts": _yearly.to_dict(),
+                                "recent_pct": round(_recent_pct, 1),
+                            },
+                        ))
+                except Exception as _de:
+                    log.warning(f"[content_growth] {_de}")
+
         except Exception as e:
             log.warning(f"[content_library_analysis] Failed: {e}")
 
