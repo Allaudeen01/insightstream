@@ -2097,6 +2097,13 @@ class PDFReportGenerator:
                     "signals structural differences worth investigating"
                 )
 
+            if domain == "hr":
+                desc = desc.replace("of total revenue", "of total workforce")
+                desc = desc.replace("revenue per unit", "income per employee")
+                desc = desc.replace("portfolio revenue", "workforce")
+                desc = desc.replace("bottom line", "retention")
+                desc = desc.replace("market share", "headcount share")
+
             # ── Impact badge colours ───────────────────────────────────────
             is_critical  = '\U0001f534' in impact or 'critical' in impact.lower()
             is_important = '\U0001f7e0' in impact or 'important' in impact.lower()
@@ -2263,6 +2270,18 @@ class PDFReportGenerator:
                 timeframe = rec.get("timeframe", "—")
                 owner = rec.get("owner", "—")
                 impact = rec.get("impact", "Medium")
+
+            # HR: replace sales-centric recommendation language
+            if domain_id == "hr":
+                action = (action
+                    .replace("demand-driven or execution-driven",
+                             "management-driven or compensation-driven")
+                    .replace("replicate the Travel_Rarely playbook",
+                             "investigate engagement drivers for non-travelling employees")
+                    .replace("replicate the No playbook",
+                             "implement targeted retention programmes")
+                    .replace("Audit operations in",
+                             "Investigate attrition drivers in"))
 
             priority_str = f"{int(priority_val):02d}"
             impact_clean = self._strip_emoji(impact)
@@ -2819,20 +2838,25 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
         elements.append(Spacer(1, 20))
 
-        # HR: remap generic financial KPI labels to workforce terminology
-        if domain_id == "hr" and kpis:
-            kpis_fixed = {}
-            for k, v in kpis.items():
-                if "Total" in k and any(x in k for x in ["Revenue", "Income", "Rate", "Score"]):
-                    kpis_fixed["Total Employees"] = str(kpis.get("Records", "1,470"))
-                elif "Avg" in k or "Average" in k:
-                    kpis_fixed[k.replace("Revenue", "Monthly Income").replace("Order Value", "Monthly Income")] = v
-                elif k == "Records":
-                    continue
-                else:
-                    kpis_fixed[k] = v
-            if kpis_fixed:
-                kpis = kpis_fixed
+        # HR: compute real workforce KPIs directly from the dataframe
+        if domain_id == "hr" and df is not None:
+            try:
+                attr_col   = next((c for c in df.columns if "attrition"   in c.lower()), None)
+                income_col = next((c for c in df.columns if any(k in c.lower() for k in
+                                   ["monthlyincome", "income", "salary"])), None)
+                hr_kpis = {"Total Employees": f"{len(df):,}"}
+                if attr_col:
+                    left = (df[attr_col].astype(str).str.lower() == "yes").sum()
+                    rate = left / len(df) * 100
+                    hr_kpis["Attrition Rate"] = f"{rate:.1f}%"
+                if income_col:
+                    avg_income = df[income_col].median()
+                    hr_kpis["Median Monthly Income"] = (
+                        f"₹{avg_income:,.0f}" if avg_income > 100 else f"{avg_income:.1f}"
+                    )
+                kpis = hr_kpis
+            except Exception as _e:
+                log.warning(f"[HR KPIs] Failed: {_e}")
 
         if kpis:
             elements.append(Paragraph("Key Performance Indicators", self.S["ChartTitle"]))

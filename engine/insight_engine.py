@@ -2388,6 +2388,59 @@ class BusinessRuleEngine:
                 continue
 
             try:
+                # HR domain: show headcount distribution, not income sums
+                _is_hr = any("attrition" in c.lower() for c in df.columns)
+                if _is_hr:
+                    grouped_hr = (
+                        df.group_by(seg_col)
+                        .agg(pl.len().alias("n_employees"))
+                        .sort("n_employees", descending=True)
+                    )
+                    if grouped_hr.height < 2:
+                        continue
+                    rows_hr = grouped_hr.to_dicts()
+                    top_hr  = rows_hr[0]
+                    bot_hr  = rows_hr[-1]
+                    total_emps = len(df)
+                    top_count  = int(top_hr["n_employees"])
+                    bot_count  = int(bot_hr["n_employees"])
+                    top_pct    = top_count / total_emps * 100
+                    bot_pct    = bot_count / total_emps * 100
+                    gap_pp     = top_pct - bot_pct
+                    if gap_pp < 5:
+                        continue
+                    n_segments    = grouped_hr.height
+                    top_segment   = str(top_hr[seg_col])
+                    bottom_segment = str(bot_hr[seg_col])
+                    col_label     = seg_col.replace("_", " ").title()
+                    insights.append(BusinessInsight(
+                        title=f"Distribution: {col_label}",
+                        impact="🟠 Important",
+                        description=(
+                            f"{top_segment} has {top_count:,} employees "
+                            f"({top_pct:.1f}% of workforce), while "
+                            f"{bottom_segment} has {bot_count:,} employees "
+                            f"({bot_pct:.1f}%). "
+                            f"This {gap_pp:.1f}pp headcount gap across "
+                            f"{n_segments} {col_label} segments reflects workforce "
+                            f"composition — not a performance issue."
+                        ),
+                        why_it_matters=(
+                            f"Understanding headcount distribution across {col_label} segments "
+                            f"helps with workforce planning and equitable resource allocation."
+                        ),
+                        recommendation=(
+                            f"Review whether {bottom_segment} headcount aligns "
+                            f"with business needs. Headcount imbalance may indicate "
+                            f"hiring focus or natural role distribution."
+                        ),
+                        rule_type=f"hr_distribution_{seg_col.lower()}",
+                        qualified_segments=[top_segment],
+                        excluded_segments=[bottom_segment],
+                    ))
+                    _rev_seg_count += 1
+                    continue
+
                 grouped = (
                     df.group_by(seg_col)
                     .agg([
@@ -2881,6 +2934,55 @@ class BusinessRuleEngine:
                             ))
                 except Exception:
                     pass
+
+            # Job satisfaction distribution
+            sat_col = next((c for c in pdf.columns if any(k in c.lower() for k in
+                ["jobsatisfaction", "satisfaction", "engagement",
+                 "worklifebalance", "worksatisfaction"])), None)
+            if sat_col:
+                try:
+                    low_count  = int((pdf[sat_col] <= 2).sum())
+                    low_pct    = low_count / len(pdf) * 100
+                    low_sat    = 0.0
+                    high_sat   = 0.0
+                    if attr_col:
+                        low_sat  = (pdf[pdf[sat_col] <= 2][attr_col]
+                                    .apply(lambda x: str(x).lower() == "yes")
+                                    .mean()) * 100
+                        high_sat = (pdf[pdf[sat_col] >= 3][attr_col]
+                                    .apply(lambda x: str(x).lower() == "yes")
+                                    .mean()) * 100
+                    insights.append(BusinessInsight(
+                        title=f"Job Satisfaction: {low_pct:.0f}% Rate Low Satisfaction",
+                        description=(
+                            f"{low_count:,} employees ({low_pct:.0f}%) report low satisfaction "
+                            f"(score 1-2 out of 4). "
+                            f"Low-satisfaction employees leave at {low_sat:.0f}% "
+                            f"vs {high_sat:.0f}% for satisfied employees — "
+                            f"a {low_sat - high_sat:.0f}pp attrition gap driven by engagement."
+                        ),
+                        why_it_matters=(
+                            "Job satisfaction is the strongest leading indicator of voluntary "
+                            "attrition — more predictive than salary alone."
+                        ),
+                        evidence=(
+                            f"Low satisfaction attrition: {low_sat:.0f}% | "
+                            f"High satisfaction attrition: {high_sat:.0f}%"
+                        ),
+                        impact="🔴 Critical" if low_sat > 20 else "🟠 Important",
+                        recommendation=(
+                            "Run pulse surveys to identify top satisfaction drivers. "
+                            "Prioritise manager quality and career growth — the two "
+                            "highest-leverage satisfaction levers."
+                        ),
+                        rule_type="hr_satisfaction",
+                        score=8.5,
+                        chart_data={"low_sat_pct": round(low_pct, 1),
+                                    "low_attrition": round(low_sat, 1),
+                                    "high_attrition": round(high_sat, 1)},
+                    ))
+                except Exception as _se:
+                    log.warning(f"[hr_satisfaction] {_se}")
 
         except Exception as e:
             log.warning(f"[hr_attrition] Failed: {e}")
@@ -5703,7 +5805,15 @@ class StrategicBriefBuilder:
                 f"Strategic focus: center forecasting efforts on {driver_col} as the leading indicator."
             )
 
-        return " ".join(lines)
+        result = " ".join(lines)
+
+        # HR domain: strip monetary totals and use workforce language
+        if self.domain == "hr":
+            import re
+            result = re.sub(r'totaling [₹$€£][\d,.]+[KLCrMB\s]*,?\s*', '', result)
+            result = result.replace("transactions", "employees")
+
+        return result
 
     def _is_tautology(self, col_a: str, col_b: str) -> bool:
         """Returns True if col_a and col_b are likely derived from each other."""
