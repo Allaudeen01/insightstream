@@ -8339,23 +8339,40 @@ class SmartChartRecommender:
 
         # ── 7. Top N Categorical count (bar) ────────────────────────────────
         # Shows record COUNT per category, NOT the metric.
-        def _is_truly_categorical(series, max_unique: int = 20) -> bool:
-            """True only if column is genuine text labels, not numbers stored as strings."""
+        def _is_truly_categorical(series, max_unique: int = 50) -> bool:
+            """True only if column contains genuine text labels."""
             import pandas as _pd_inner
-            if series.dtype in ["int64", "float64"]:
+            # Native numeric dtype → not categorical
+            if series.dtype in ["int64", "float64", "int32", "float32"]:
                 return False
+            # Check if values are numeric strings (e.g. "2,970", "39,723")
             try:
                 cleaned = (series.dropna()
                                  .astype(str)
                                  .str.replace(",", "", regex=False)
                                  .str.replace(" ", "", regex=False)
                                  .str.strip())
-                numeric_count = _pd_inner.to_numeric(cleaned, errors="coerce").notna().sum()
-                if numeric_count / max(len(cleaned), 1) > 0.8:
+                numeric_count = (
+                    _pd_inner.to_numeric(cleaned, errors="coerce")
+                    .notna().sum()
+                )
+                total = max(len(cleaned), 1)
+                # If >80% look numeric AND not a geographic column
+                _is_geo = any(
+                    k in str(series.name).lower()
+                    for k in ["country", "region", "state",
+                              "province", "city", "location"]
+                )
+                if numeric_count / total > 0.8 and not _is_geo:
                     return False
             except Exception:
                 pass
-            if series.nunique() > max_unique:
+            # High cardinality check — only block if >50 AND not geo
+            if series.nunique() > max_unique and not any(
+                k in str(series.name).lower()
+                for k in ["country", "region", "state",
+                          "province", "city"]
+            ):
                 return False
             return True
 
