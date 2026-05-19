@@ -1161,7 +1161,7 @@ class InsightNarrator:
                 "sports": (
                     f"Across {records} matches, "
                     f"this tournament dataset reveals competitive "
-                    f"patterns and performance trends."
+                    f"patterns and performance trends worth analysing."
                 ),
                 "health": (
                     f"Across {records} records, "
@@ -2018,6 +2018,20 @@ class PDFReportGenerator:
                     "worth acting on."
                 )
                 prose = _re.sub(r'\s+', ' ', prose).strip()
+            elif prose and domain == "sports":
+                import re as _re
+                prose = _re.sub(r'Revenue is heavily concentrated[^.]+\.', '', prose)
+                prose = _re.sub(r'top-performing segments account for[^.]+\.', '', prose)
+                prose = prose.replace(
+                    "strong top-line performance but structural "
+                    "imbalances that require strategic attention",
+                    "competitive patterns and performance trends "
+                    "worth analysing"
+                )
+                prose = prose.replace(
+                    "transactions totalling", "matches across"
+                )
+                prose = _re.sub(r'\s+', ' ', prose).strip()
             if prose:
                 narrative_style = ParagraphStyle(
                     'NarrativeStyle',
@@ -2465,7 +2479,12 @@ class PDFReportGenerator:
                 region_stats_df.columns = [region_col, f"Median {target_metric}"]
                 # Format numeric column to avoid floating point display issues
                 if pd.api.types.is_numeric_dtype(region_stats_df[f"Median {target_metric}"]):
-                    region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].apply(lambda v: f"₹{v:,.0f}")
+                    _financial_domains = ["ecommerce", "sales", "general"]
+                    _dom_id = domain_template.get("domain", "general") if domain_template else "general"
+                    _use_currency = _dom_id in _financial_domains
+                    region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].apply(
+                        lambda v: f"₹{v:,.0f}" if _use_currency else f"{v:,.1f}"
+                    )
                 md_table = generate_markdown_table(region_stats_df)
             except Exception as e:
                 log.warning(f"Failed to generate regional stats table: {e}")
@@ -2483,7 +2502,8 @@ class PDFReportGenerator:
         elements.append(Spacer(1, 14))
 
         # 3. KPIs
-        kpis = self._derive_kpis(df, cm)
+        _call_domain = domain_template.get("domain", "general") if domain_template else "general"
+        kpis = self._derive_kpis(df, cm, domain_id=_call_domain)
         if kpis:
             elements.append(Paragraph("Key Metrics", self.S["Section"]))
             elements.append(self._kpi_table(kpis))
@@ -2555,7 +2575,7 @@ class PDFReportGenerator:
         return output_path
 
 
-    def _derive_kpis(self, df: pd.DataFrame, cm: Optional[ColumnMap]) -> dict:
+    def _derive_kpis(self, df: pd.DataFrame, cm: Optional[ColumnMap], domain_id: str = "general") -> dict:
         """
         Derive KPIs with verification against source data.
         P0 FIX: Prevents revenue hallucinations by validating calculations.
@@ -2572,9 +2592,14 @@ class PDFReportGenerator:
             raw_values['avg_revenue'] = avg
             raw_values['revenue_col'] = cm.numeric
 
-            _sym = getattr(self, '_currency_symbol', None) or _detect_currency_symbol(df)
-            kpis[f"Total {cm.numeric}"] = f"{_sym}{total:,.0f}" if total > 100 else f"{total:,.2f}"
-            kpis[f"Avg {cm.numeric}"]   = f"{_sym}{avg:,.0f}"
+            _non_financial = {"sports", "entertainment", "health", "hr"}
+            if domain_id in _non_financial:
+                kpis[f"Total {cm.numeric}"] = f"{total:,.0f}"
+                kpis[f"Avg {cm.numeric}"]   = f"{avg:,.1f}"
+            else:
+                _sym = getattr(self, '_currency_symbol', None) or _detect_currency_symbol(df)
+                kpis[f"Total {cm.numeric}"] = f"{_sym}{total:,.0f}" if total > 100 else f"{total:,.2f}"
+                kpis[f"Avg {cm.numeric}"]   = f"{_sym}{avg:,.0f}"
             
         if cm and cm.numeric2 and cm.numeric2 in df.columns:
             total2 = df[cm.numeric2].sum()
@@ -3176,8 +3201,12 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         region_stats_df = df.groupby(region_col)[target_metric].median().reset_index()
                         region_stats_df.columns = [region_col, f"Median {target_metric}"]
                         # Format numeric column to avoid floating point display issues
+                        _financial_domains_bfa = ["ecommerce", "sales", "general"]
+                        _use_currency_bfa = domain_id in _financial_domains_bfa
                         if pd.api.types.is_numeric_dtype(region_stats_df[f"Median {target_metric}"]):
-                            region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].apply(lambda v: f"₹{v:,.0f}")
+                            region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].apply(
+                                lambda v: f"₹{v:,.0f}" if _use_currency_bfa else f"{v:,.1f}"
+                            )
                         md_table = generate_markdown_table(region_stats_df)
                     except Exception as e:
                         log.warning(f"Failed to generate regional stats table: {e}")

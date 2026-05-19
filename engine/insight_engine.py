@@ -3380,9 +3380,28 @@ class BusinessRuleEngine:
                         return col
             return None
 
-        winner_col = _find_col([
-            "winner", "match_winner", "result_winner"
-        ])
+        # EXACT match first for winner — must not match toss_winner
+        winner_col = None
+        for col in df.columns:
+            if col.lower().strip() == "winner":
+                winner_col = col
+                break
+        if not winner_col:
+            # Substring fallback — exclude any col containing "toss"
+            for col in df.columns:
+                if "winner" in col.lower() and "toss" not in col.lower():
+                    winner_col = col
+                    break
+
+        # toss_winner — exact match only
+        toss_col = None
+        for col in df.columns:
+            if col.lower().strip() in ["toss_winner", "toss"]:
+                toss_col = col
+                break
+
+        print(f"[SPORTS] winner_col={winner_col}, toss_col={toss_col}")
+
         team1_col  = _find_col(["team1", "home_team", "team_1"])
         team2_col  = _find_col(["team2", "away_team", "team_2"])
         venue_col  = _find_col(["venue", "stadium", "ground",
@@ -3390,7 +3409,6 @@ class BusinessRuleEngine:
         season_col = _find_col(["season", "year", "edition"])
         margin_col = _find_col(["result_margin", "margin",
                                  "win_by_runs", "score_diff"])
-        toss_col   = _find_col(["toss_winner", "toss"])
         pom_col    = _find_col(["player_of_match", "man_of_match",
                                  "best_player", "mvp"])
 
