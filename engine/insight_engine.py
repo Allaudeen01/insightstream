@@ -8658,7 +8658,7 @@ class SmartChartRecommender:
                                 x=_confirmed_col,
                                 y=_country_col,
                                 orientation="h",
-                                title=f"Top 10 {_region_label}s by Confirmed Cases",
+                                title="Top 10 Countries by Confirmed Cases",
                                 text_auto=".2s",
                                 color_discrete_sequence=["#3B82F6"],
                             )
@@ -8666,8 +8666,8 @@ class SmartChartRecommender:
                             add("health_cases_by_country", {
                                 "chart_id": "health_cases_by_country",
                                 "chart_type": "bar",
-                                "title": f"Top 10 {_region_label}s by Confirmed Cases",
-                                "description": f"Countries/regions with the highest confirmed case counts",
+                                "title": "Top 10 Countries by Confirmed Cases",
+                                "description": "Countries with the highest confirmed case burden",
                                 "plotly_json": json.loads(fig_a.update_layout(**CHART_LAYOUT_BASE).to_json()),
                                 "columns_used": [_country_col, _confirmed_col],
                                 "priority_score": 95,
@@ -8701,7 +8701,7 @@ class SmartChartRecommender:
                                 x=_deaths_col,
                                 y=_country_col,
                                 orientation="h",
-                                title=f"Top 10 {_region_label_b}s by Deaths",
+                                title="Top 10 Countries by Deaths",
                                 text_auto=".2s",
                                 color_discrete_sequence=["#EF4444"],
                             )
@@ -8709,8 +8709,8 @@ class SmartChartRecommender:
                             add("health_deaths_by_country", {
                                 "chart_id": "health_deaths_by_country",
                                 "chart_type": "bar",
-                                "title": f"Top 10 {_region_label_b}s by Deaths",
-                                "description": f"Countries/regions with the highest death tolls",
+                                "title": "Top 10 Countries by Deaths",
+                                "description": "Countries with the highest death toll",
                                 "plotly_json": json.loads(fig_b.update_layout(**CHART_LAYOUT_BASE).to_json()),
                                 "columns_used": [_country_col, _deaths_col],
                                 "priority_score": 93,
