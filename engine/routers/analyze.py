@@ -16,6 +16,7 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
 @router.post("/analyze")
 async def analyze(
     file: UploadFile,
+    currency: str = Form("auto"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -50,6 +51,21 @@ async def analyze(
                 df = pd.read_csv(io.BytesIO(contents), encoding="latin-1")
         else:
             raise HTTPException(400, "Unsupported file type. Please upload CSV or Excel.")
+
+        # Override currency if user specified
+        if currency != "auto":
+            _CURRENCY_MAP = {
+                "INR": "₹", "USD": "$", "GBP": "£",
+                "EUR": "€", "AED": "AED", "SGD": "S$",
+                "JPY": "¥",
+            }
+            sym = _CURRENCY_MAP.get(currency, "₹")
+            # Import and set in both engines
+            from insight_engine import _set_currency_symbol
+            _set_currency_symbol(sym)
+            print(f"[CURRENCY] User selected: {currency} → {sym}")
+        else:
+            print(f"[CURRENCY] Auto-detecting...")
 
         session_record.row_count = len(df)
         session_record.column_count = len(df.columns)

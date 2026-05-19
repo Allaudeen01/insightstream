@@ -46,8 +46,20 @@ export default function UploadPage() {
     const [pendingFile, setPendingFile] = useState<File | null>(null);
     const [qualityReport, setQualityReport] = useState<any>(null);
     const [qualitySessionId, setQualitySessionId] = useState<number | undefined>(undefined);
+    const [currency, setCurrency] = useState("auto");
     const qualityPanelRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+
+    const CURRENCIES = [
+        { code: "auto", symbol: "AUTO", label: "Auto-detect" },
+        { code: "INR",  symbol: "₹",   label: "₹ INR — Indian Rupee" },
+        { code: "USD",  symbol: "$",   label: "$ USD — US Dollar" },
+        { code: "GBP",  symbol: "£",   label: "£ GBP — British Pound" },
+        { code: "EUR",  symbol: "€",   label: "€ EUR — Euro" },
+        { code: "AED",  symbol: "AED", label: "AED — UAE Dirham" },
+        { code: "SGD",  symbol: "S$",  label: "S$ SGD — Singapore Dollar" },
+        { code: "JPY",  symbol: "¥",   label: "¥ JPY — Japanese Yen" },
+    ];
 
     // ----- API health (silent unless offline) -----
     const [apiStatus, setApiStatus] = useState<"checking" | "online" | "offline">("checking");
@@ -73,6 +85,7 @@ export default function UploadPage() {
 
         const formData = new FormData();
         formData.append("file", file);
+        formData.append("currency", currency);
         if (sheetName) formData.append("sheet_name", sheetName);
 
         try {
@@ -160,6 +173,27 @@ export default function UploadPage() {
                         <p className="mt-2 text-sm leading-relaxed text-zinc-600">
                             Drop a CSV or Excel file. We&rsquo;ll analyze the data and show insights, charts, and a quality report.
                         </p>
+
+                        {/* Currency Selector */}
+                        <div className="mt-6">
+                            <label className="block text-sm font-medium text-zinc-700 mb-2">
+                                Currency
+                            </label>
+                            <select
+                                value={currency}
+                                onChange={(e) => setCurrency(e.target.value)}
+                                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#6d5ef5] focus:border-transparent"
+                            >
+                                {CURRENCIES.map(c => (
+                                    <option key={c.code} value={c.code}>
+                                        {c.label}
+                                    </option>
+                                ))}
+                            </select>
+                            <p className="text-xs text-zinc-500 mt-1.5">
+                                Select the currency your data is in. Auto-detect works for most datasets.
+                            </p>
+                        </div>
 
                         {/* Dropzone */}
                         <div
