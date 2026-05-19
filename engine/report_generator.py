@@ -1795,11 +1795,20 @@ class PDFReportGenerator:
                     color="#4a6fa5", markersize=8,
                     markerfacecolor="white", markeredgewidth=2.5)
 
+            # Use detected currency symbol
+            _sym = getattr(self, '_currency_symbol', '₹')
+            
             def smart_fmt(x, _):
-                if x >= 1e7:   return f"₹{x/1e7:.1f}Cr"
-                if x >= 1e5:   return f"₹{x/1e5:.1f}L"
-                if x >= 1e3:   return f"₹{x/1e3:.0f}K"
-                return f"₹{x:.0f}"
+                if _sym == '₹':
+                    if x >= 1e7:   return f"₹{x/1e7:.1f}Cr"
+                    if x >= 1e5:   return f"₹{x/1e5:.1f}L"
+                    if x >= 1e3:   return f"₹{x/1e3:.0f}K"
+                    return f"₹{x:.0f}"
+                else:
+                    if x >= 1e9:   return f"{_sym}{x/1e9:.1f}B"
+                    if x >= 1e6:   return f"{_sym}{x/1e6:.1f}M"
+                    if x >= 1e3:   return f"{_sym}{x/1e3:.0f}K"
+                    return f"{_sym}{x:.0f}"
 
             peak_idx = revenues.index(max(revenues)) if revenues else None
             trough_idx = revenues.index(min(revenues)) if revenues else None
@@ -2630,8 +2639,9 @@ class PDFReportGenerator:
                     _financial_domains = ["ecommerce", "sales", "general"]
                     _dom_id = domain_template.get("domain", "general") if domain_template else "general"
                     _use_currency = _dom_id in _financial_domains
+                    _sym = getattr(self, '_currency_symbol', '₹')
                     region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].apply(
-                        lambda v: f"₹{v:,.0f}" if _use_currency else f"{v:,.1f}"
+                        lambda v: f"{_sym}{v:,.0f}" if _use_currency else f"{v:,.1f}"
                     )
                 md_table = generate_markdown_table(region_stats_df)
             except Exception as e:
@@ -3148,8 +3158,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     hr_kpis["Attrition Rate"] = f"{rate:.1f}%"
                 if income_col:
                     avg_income = df[income_col].median()
+                    _sym = getattr(self, '_currency_symbol', '₹')
                     hr_kpis["Median Monthly Income"] = (
-                        f"₹{avg_income:,.0f}" if avg_income > 100 else f"{avg_income:.1f}"
+                        f"{_sym}{avg_income:,.0f}" if avg_income > 100 else f"{avg_income:.1f}"
                     )
                 kpis = hr_kpis
             except Exception as _e:
@@ -3458,9 +3469,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         # Format numeric column to avoid floating point display issues
                         _financial_domains_bfa = ["ecommerce", "sales", "general"]
                         _use_currency_bfa = domain_id in _financial_domains_bfa
+                        _sym = getattr(self, '_currency_symbol', '₹')
                         if pd.api.types.is_numeric_dtype(region_stats_df[f"Median {target_metric}"]):
                             region_stats_df[f"Median {target_metric}"] = region_stats_df[f"Median {target_metric}"].apply(
-                                lambda v: f"₹{v:,.0f}" if _use_currency_bfa else f"{v:,.1f}"
+                                lambda v: f"{_sym}{v:,.0f}" if _use_currency_bfa else f"{v:,.1f}"
                             )
                         md_table = generate_markdown_table(region_stats_df)
                     except Exception as e:
