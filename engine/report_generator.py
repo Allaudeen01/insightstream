@@ -218,14 +218,25 @@ def _detect_currency_symbol(df: pd.DataFrame) -> str:
         if any(k in col.lower() for k in ["country"]):
             try:
                 vals = df[col].dropna().astype(str).str.strip().tolist()
-                us_count = sum(1 for v in vals if v.lower() in [
-                    "united states", "usa", "us", "united states of america"])
-                if us_count > 0:  # Even 1 US row = USD
-                    return "$"
-                uk_count = sum(1 for v in vals if v.lower() in [
+                
+                # Check unique countries AND record counts
+                unique_vals = list(set(v.strip().lower() for v in vals))
+                uk_unique = sum(1 for v in unique_vals if v in [
                     "united kingdom", "uk", "great britain", "england"])
-                if uk_count > len(vals) * 0.3:
+                us_unique = sum(1 for v in unique_vals if v in [
+                    "united states", "usa", "us", "america"])
+                
+                # Check by record count too
+                uk_records = sum(1 for v in vals if v.strip().lower() in [
+                    "united kingdom", "uk", "great britain"])
+                us_records = sum(1 for v in vals if v.strip().lower() in [
+                    "united states", "usa", "us"])
+                
+                # Prioritize by record count (dominant country)
+                if uk_records > us_records and uk_records > len(vals) * 0.3:
                     return "£"
+                if us_records > uk_records and us_records > len(vals) * 0.3:
+                    return "$"
             except Exception:
                 pass
 
@@ -1114,14 +1125,15 @@ class InsightNarrator:
             v = v.get("value", "")
         return str(v) if v != "" else ""
 
-    @classmethod
-    def _find_revenue(cls, metrics: dict) -> str:
-        """Return the first revenue-like metric value, formatted as INR."""
+    def _find_revenue(self, metrics: dict) -> str:
+        """Return the first revenue-like metric value, formatted with detected currency."""
         for k, v in metrics.items():
             if any(t in k.lower() for t in ("revenue", "sales", "amount", "total")):
                 raw = v.get("value", "") if isinstance(v, dict) else v
                 if raw != "":
-                    return cls._fmt_inr(raw)
+                    # Use detected currency symbol instead of hardcoded INR
+                    symbol = getattr(self, '_currency_symbol', '₹')
+                    return _fmt_currency(raw, symbol)
         return ""
 
     def generate(self, insights: list, metrics: dict, domain: str, df=None) -> str:
@@ -2733,7 +2745,17 @@ class PDFReportGenerator:
             else:
                 _sym = getattr(self, '_currency_symbol', None) or _detect_currency_symbol(df)
                 kpis[f"Total {cm.numeric}"] = f"{_sym}{total:,.0f}" if total > 100 else f"{total:,.2f}"
-                kpis[f"Avg {cm.numeric}"]   = f"{_sym}{avg:,.0f}"
+                
+                # Fix 3: Use context-aware label for average metric
+                numeric_lower = str(cm.numeric).lower()
+                if "price" in numeric_lower and "unit" in numeric_lower:
+                    kpis["Avg Unit Price"] = f"{_sym}{avg:,.2f}"
+                elif "price" in numeric_lower:
+                    kpis["Avg Unit Price"] = f"{_sym}{avg:,.2f}"
+                elif "sales" in numeric_lower or "revenue" in numeric_lower or "amount" in numeric_lower:
+                    kpis["Avg Order Value"] = f"{_sym}{avg:,.2f}"
+                else:
+                    kpis[f"Avg {cm.numeric}"] = f"{_sym}{avg:,.2f}"
             
         if cm and cm.numeric2 and cm.numeric2 in df.columns:
             total2 = df[cm.numeric2].sum()
