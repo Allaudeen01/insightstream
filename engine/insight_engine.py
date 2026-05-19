@@ -8614,7 +8614,8 @@ class SmartChartRecommender:
         # ── 10. Fallback generic charts if we still have space ─────────────
         if len(charts) < 4 and num_cols and profile.categoricals:
             self._add_fallback_charts(pdf, profile, num_cols, charts,
-                                      chart_ids_used, max_charts)
+                                      chart_ids_used, max_charts,
+                                      domain_id=domain_id)
 
         # ── 11. Health-domain specific charts ──────────────────────────────
         if domain_id == "health":
@@ -8645,22 +8646,27 @@ class SmartChartRecommender:
                         )
                         if len(_agg) >= 2 and is_chart_informative(_agg[_confirmed_col].tolist()):
                             _agg = _agg.sort_values(_confirmed_col, ascending=True)
-                            _label_c = str(_confirmed_col).replace("\n", " ").replace(",", "")
-                            _label_r = str(_country_col).replace("\n", " ").replace(",", "")
+                            _label_c = str(_confirmed_col).replace("\n", " ").replace(",", "").replace("  ", " ").strip()
+                            _country_display = (
+                                str(_country_col)
+                                .replace("\n", " ").replace(",", "")
+                                .replace("  ", " ").strip()
+                            )
+                            _region_label = "Country" if "country" in _country_display.lower() else _country_display
                             fig_a = px.bar(
                                 _agg,
                                 x=_confirmed_col,
                                 y=_country_col,
                                 orientation="h",
-                                title=f"Top 10 {_label_r}s by Confirmed Cases",
+                                title=f"Top 10 {_region_label}s by Confirmed Cases",
                                 text_auto=".2s",
                                 color_discrete_sequence=["#3B82F6"],
                             )
-                            fig_a.update_layout(template="plotly_dark", yaxis_title=_label_r, xaxis_title="Confirmed Cases")
+                            fig_a.update_layout(template="plotly_dark", yaxis_title=_region_label, xaxis_title="Confirmed Cases")
                             add("health_cases_by_country", {
                                 "chart_id": "health_cases_by_country",
                                 "chart_type": "bar",
-                                "title": f"Top 10 {_label_r}s by Confirmed Cases",
+                                "title": f"Top 10 {_region_label}s by Confirmed Cases",
                                 "description": f"Countries/regions with the highest confirmed case counts",
                                 "plotly_json": json.loads(fig_a.update_layout(**CHART_LAYOUT_BASE).to_json()),
                                 "columns_used": [_country_col, _confirmed_col],
@@ -8683,22 +8689,27 @@ class SmartChartRecommender:
                         )
                         if len(_agg_d) >= 2 and is_chart_informative(_agg_d[_deaths_col].tolist()):
                             _agg_d = _agg_d.sort_values(_deaths_col, ascending=True)
-                            _label_d = str(_deaths_col).replace("\n", " ").replace(",", "")
-                            _label_r2 = str(_country_col).replace("\n", " ").replace(",", "")
+                            _label_d = str(_deaths_col).replace("\n", " ").replace(",", "").replace("  ", " ").strip()
+                            _country_display_b = (
+                                str(_country_col)
+                                .replace("\n", " ").replace(",", "")
+                                .replace("  ", " ").strip()
+                            )
+                            _region_label_b = "Country" if "country" in _country_display_b.lower() else _country_display_b
                             fig_b = px.bar(
                                 _agg_d,
                                 x=_deaths_col,
                                 y=_country_col,
                                 orientation="h",
-                                title=f"Top 10 {_label_r2}s by Deaths",
+                                title=f"Top 10 {_region_label_b}s by Deaths",
                                 text_auto=".2s",
                                 color_discrete_sequence=["#EF4444"],
                             )
-                            fig_b.update_layout(template="plotly_dark", yaxis_title=_label_r2, xaxis_title="Deaths")
+                            fig_b.update_layout(template="plotly_dark", yaxis_title=_region_label_b, xaxis_title="Deaths")
                             add("health_deaths_by_country", {
                                 "chart_id": "health_deaths_by_country",
                                 "chart_type": "bar",
-                                "title": f"Top 10 {_label_r2}s by Deaths",
+                                "title": f"Top 10 {_region_label_b}s by Deaths",
                                 "description": f"Countries/regions with the highest death tolls",
                                 "plotly_json": json.loads(fig_b.update_layout(**CHART_LAYOUT_BASE).to_json()),
                                 "columns_used": [_country_col, _deaths_col],
@@ -8760,7 +8771,8 @@ class SmartChartRecommender:
         return charts[:max_charts]
 
     def _add_fallback_charts(
-        self, pdf, profile, num_cols, charts, chart_ids_used, max_charts
+        self, pdf, profile, num_cols, charts, chart_ids_used, max_charts,
+        domain_id: str = "general"
     ):
         import plotly.express as px, json
         cat = profile.category_col
@@ -8862,6 +8874,9 @@ class SmartChartRecommender:
                     continue
             
             return  # Skip numeric-based fallback charts
+
+        if domain_id in ["health"]:
+            return  # health charts are handled in the dedicated block
 
         for num in ordered_nums:
             if len(charts) >= max_charts:
