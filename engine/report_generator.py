@@ -1108,10 +1108,19 @@ class InsightNarrator:
             v = float(val)
         except (TypeError, ValueError):
             return str(val)
-        if v >= 1_00_00_000: return f"₹{v / 1_00_00_000:.2f} Cr"
-        if v >= 1_00_000:    return f"₹{v / 1_00_000:.2f} L"
-        if v >= 1_000:       return f"₹{v / 1_000:.1f}K"
-        return f"₹{v:,.0f}"
+        
+        # Use detected currency symbol instead of hardcoded ₹
+        _sym = getattr(self, '_currency_symbol', '₹')
+        if _sym == '₹':
+            if v >= 1_00_00_000: return f"₹{v / 1_00_00_000:.2f} Cr"
+            if v >= 1_00_000:    return f"₹{v / 1_00_000:.2f} L"
+            if v >= 1_000:       return f"₹{v / 1_000:.1f}K"
+            return f"₹{v:,.0f}"
+        else:
+            if v >= 1_000_000_000: return f"{_sym}{v/1_000_000_000:.2f}B"
+            if v >= 1_000_000:     return f"{_sym}{v/1_000_000:.2f}M"
+            if v >= 1_000:         return f"{_sym}{v/1_000:.1f}K"
+            return f"{_sym}{v:,.2f}"
 
     @staticmethod
     def _kv(metrics: dict, key: str) -> str:
@@ -1467,10 +1476,9 @@ class PDFReportGenerator:
         # Replace LaTeX-style currency escapes BEFORE XML-escaping so the ₹ glyph
         # flows through the font-tag wrapper below rather than appearing as literals.
         text = str(text)
-        # Force INR symbol — replace every known currency escape with ₹
+        # Fix currency symbol escapes
         text = text.replace(r'\mathbb{1}', '₹').replace('\\mathbb{1}', '₹')
-        text = text.replace(r'\yen', '₹').replace(r'\pounds', '₹')
-        text = text.replace('¥', '₹').replace('£', '₹')
+        text = text.replace(r'\yen', '¥').replace(r'\pounds', '£')
         safe = _xml_escape(text)
         
         # CRITICAL FIX 1: Ensure proper spacing after sentence-ending punctuation
@@ -1619,10 +1627,8 @@ class PDFReportGenerator:
             (r'\\mathbb{1}', '₹'),
             ('\\mathbb{1}', '₹'),
             ('\mathbb{1}',  '₹'),
-            (r'\yen',       '₹'),   # Force INR — no yen
-            (r'\pounds',    '₹'),   # Force INR — no pounds
-            ('¥',           '₹'),   # Replace any raw yen glyph
-            ('£',           '₹'),   # Replace any raw pound glyph
+            (r'\yen',       '¥'),
+            (r'\pounds',    '£'),
         ]
 
         import re as _re
@@ -2703,10 +2709,6 @@ class PDFReportGenerator:
             elements.extend(self._build_section_6_deep_insights(
                 insights, metrics=kpis, domain=target_metric, df=df
             ))
-        
-        # ── FIX 2: Post-process all Paragraph elements to fix currency symbols ──
-        log.info("[Currency Fix] Post-processing elements to replace \\mathbb{1} with ₹")
-        elements = self._fix_currency_symbols(elements)
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]
@@ -4277,10 +4279,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.extend(self._build_section_7_recommendations(
             recs, insights=insights, domain_id=domain_id
         ))
-
-        # ── FIX 2: Post-process all Paragraph elements to fix currency symbols ──
-        log.info("[Currency Fix] Post-processing elements to replace \\mathbb{1} with ₹")
-        elements = self._fix_currency_symbols(elements)
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]

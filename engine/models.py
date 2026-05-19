@@ -47,6 +47,9 @@ class AnalysisSession(Base):
     # Domain detection
     detected_domain = Column(String(100))  # e.g. "ecommerce", "saas", "logistics"
 
+    # Currency override (user-selected or auto-detected)
+    currency = Column(String(10), nullable=True, default=None)  # "INR", "USD", "GBP", etc.
+
     # KPIs stored as JSON string (SQLite-safe)
     kpis_json = Column(Text)
 

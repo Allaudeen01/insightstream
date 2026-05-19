@@ -71,6 +71,12 @@ async def analyze(
         session_record.column_count = len(df.columns)
         session_record.file_size_bytes = len(contents)
         session_record.status = "processing"
+        
+        # Store currency selection in session
+        if currency and currency != "auto":
+            session_record.currency = currency
+            print(f"[SESSION] Stored currency: {currency}")
+        
         await db.commit()
 
         results = run_insight_engine(df)

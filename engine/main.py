@@ -118,6 +118,32 @@ def is_chart_informative(values: list[float], min_variance_pct: float = 1.0) -> 
     cv_pct = (np.std(arr) / abs(mean)) * 100
     return cv_pct >= min_variance_pct
 
+import sqlite3
+import os
+
+async def run_migrations(db_path: str):
+    """Add missing columns to existing database."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Get existing columns
+    cursor.execute("PRAGMA table_info(analysis_sessions)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    
+    # Add currency column if missing
+    if "currency" not in existing_cols:
+        try:
+            cursor.execute(
+                "ALTER TABLE analysis_sessions "
+                "ADD COLUMN currency VARCHAR(10) DEFAULT NULL"
+            )
+            conn.commit()
+            print("[DB MIGRATION] Added 'currency' column ✓")
+        except Exception as e:
+            print(f"[DB MIGRATION] Error or already exists: {e}")
+    
+    conn.close()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create session directory and initialize database on startup."""
@@ -129,6 +155,11 @@ async def lifespan(app: FastAPI):
     # Initialize SQLite database
     db.init_db()
     print("Database initialized.")
+    
+    # Run migrations
+    db_path = str(Path(os.environ.get("INSIGHTSTREAM_DATA_DIR", Path(__file__).parent / "data")) / "insightstream.db")
+    await run_migrations(db_path)
+    
     yield
 
 app = FastAPI(title="Virtual Data Scientist Engine", lifespan=lifespan)
@@ -730,7 +761,8 @@ class DashboardExportRequest(BaseModel):
 async def export_dashboard_pdf(
     session_id: str,
     body: DashboardExportRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Unified Pixel-Perfect Export (Multi-page).
@@ -740,6 +772,30 @@ async def export_dashboard_pdf(
     logger = logging.getLogger(__name__)
     logger.info(f"🚀 [PIPELINE] New Pixel-Perfect Export hit for session: {session_id}")
     logger.info(f"📦 [PAYLOAD] Received {len(body.charts)} charts, {len(body.insights)} insights.")
+
+    # Load currency from session
+    _currency_code = None
+    try:
+        from services.session_service import get_session_detail
+        try:
+            from auth import get_current_user_optional
+        except ImportError:
+            get_current_user_optional = None
+        # Try to get current user, but don't fail if not authenticated (for shared links)
+        try:
+            current_user = await get_current_user_optional(db)
+            user_id = current_user.id if current_user else None
+        except:
+            user_id = None
+        
+        if user_id:
+            _session = await get_session_detail(db, int(session_id), user_id)
+            if _session:
+                _currency_code = getattr(_session, 'currency', None)
+                print(f"[PDF EXPORT] Currency override: {_currency_code}")
+    except Exception as e:
+        logger.warning(f"Could not load session currency: {e}")
+        print(f"[PDF EXPORT] Currency load failed: {e}")
 
     try:
         out_name = f"Report_{session_id}_{uuid.uuid4().hex[:6]}.pdf"
@@ -838,7 +894,8 @@ async def export_dashboard_pdf(
             template=body.template,
             session_id=session_id,
             df=df,
-            domain_id=domain_id
+            domain_id=domain_id,
+            currency_override=_currency_code  # ← Pass currency from session
         )
         logger.info(f"✅ [SUCCESS] PDF generated at: {out_path}")
 
