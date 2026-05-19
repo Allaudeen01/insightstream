@@ -3719,62 +3719,76 @@ class BusinessRuleEngine:
                 except Exception as _ve:
                     log.warning(f"[sports_venue] {_ve}")
 
-            # 4b. Result type breakdown — runs vs wickets (chasing vs defending)
-            _runs_col = _find_col(
-                ["win_by_runs", "runs_margin", "runs"]
-            )
-            _wkts_col = _find_col(
-                ["win_by_wickets", "wickets_margin", "wickets"]
-            )
-            print(f"[SPORTS] result cols: runs={_runs_col}, wickets={_wkts_col}")
-            if _runs_col and _wkts_col:
+            # 4b. Result type from 'result' column (e.g. "runs"/"wickets"/"tie"/"no result")
+            _result_col = _find_col(["result", "result_type",
+                                     "win_by", "outcome"])
+            print(f"[SPORTS] result_col={_result_col}")
+            if _result_col:
                 try:
-                    _won_runs = int((pdf[_runs_col] > 0).sum())
-                    _won_wkts = int((pdf[_wkts_col] > 0).sum())
-                    _other    = total - _won_runs - _won_wkts
-                    _chase_dominant = _won_wkts > _won_runs
-                    insights.append(BusinessInsight(
-                        title=(
-                            f"Match Outcomes: "
-                            f"{max(_won_runs, _won_wkts):,} "
-                            f"{'Wicket' if _chase_dominant else 'Run'}"
-                            f" Wins Lead"
-                        ),
-                        description=(
-                            f"Of {total:,} matches: "
-                            f"{_won_wkts:,} won by wickets (chasing), "
-                            f"{_won_runs:,} won by runs (defending), "
-                            f"{_other} ties/no results. "
-                            f"{'Chasing teams win more often — batting second is statistically advantageous.' if _chase_dominant else 'Defending teams win more often — posting big totals is the stronger strategy.'}"
-                        ),
-                        why_it_matters=(
-                            "Win method distribution directly informs "
-                            "toss decision strategy. Captains should "
-                            "choose to bat or field based on this data."
-                        ),
-                        evidence=(
-                            f"Wicket wins: {_won_wkts} ({_won_wkts/total*100:.0f}%) | "
-                            f"Run wins: {_won_runs} ({_won_runs/total*100:.0f}%)"
-                        ),
-                        impact="🟠 Important",
-                        recommendation=(
-                            f"{'Winning the toss and choosing to chase gives a statistical edge.' if _chase_dominant else 'Bat first and post a big total — defending scores wins more matches in this dataset.'}"
-                        ),
-                        rule_type="sports_result_type",
-                        score=8.0,
-                        chart_data={
-                            "won_by_runs": _won_runs,
-                            "won_by_wickets": _won_wkts,
-                            "other": _other,
-                        },
-                    ))
-                    print(f"[SPORTS] Result type insight: runs={_won_runs}, wickets={_won_wkts}")
+                    _result_vals = (
+                        pdf[_result_col].dropna()
+                        .astype(str).str.lower().str.strip()
+                    )
+                    _won_runs  = int((_result_vals == "runs").sum())
+                    _won_wkts  = int((_result_vals == "wickets").sum())
+                    _ties      = int((_result_vals == "tie").sum())
+                    _no_result = int((_result_vals == "no result").sum())
+                    _other     = _ties + _no_result
+
+                    print(f"[SPORTS] Results — runs:{_won_runs}, "
+                          f"wickets:{_won_wkts}, ties:{_ties}, "
+                          f"no result:{_no_result}")
+
+                    if _won_runs + _won_wkts > 0:
+                        _chase_dominant = _won_wkts > _won_runs
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"Match Outcomes: "
+                                f"{max(_won_runs, _won_wkts):,} "
+                                f"{'Wicket' if _chase_dominant else 'Run'}"
+                                f" Wins Lead"
+                            ),
+                            description=(
+                                f"Of {total:,} matches: "
+                                f"{_won_wkts:,} won by wickets "
+                                f"(chasing, "
+                                f"{_won_wkts/total*100:.0f}%), "
+                                f"{_won_runs:,} won by runs "
+                                f"(defending, "
+                                f"{_won_runs/total*100:.0f}%). "
+                                f"{_ties} ties, "
+                                f"{_no_result} no results. "
+                                f"{'Chasing teams win more often — batting second is statistically advantageous in this tournament.' if _chase_dominant else 'Defending teams win more — posting big totals is the stronger strategy.'}"
+                            ),
+                            why_it_matters=(
+                                "Win method distribution directly informs "
+                                "toss decision strategy. Teams winning the "
+                                "toss should use this data to decide "
+                                "bat or field."
+                            ),
+                            evidence=(
+                                f"Wicket wins: {_won_wkts} "
+                                f"({_won_wkts/total*100:.0f}%) | "
+                                f"Run wins: {_won_runs} "
+                                f"({_won_runs/total*100:.0f}%)"
+                            ),
+                            impact="🟠 Important",
+                            recommendation=(
+                                f"{'Choose to chase when winning the toss — wicket wins dominate, confirming chasing is the stronger strategy.' if _chase_dominant else 'Bat first and post a competitive total — run wins are more common, defending scores wins matches.'}"
+                            ),
+                            rule_type="sports_result_type",
+                            score=8.0,
+                            chart_data={
+                                "won_by_runs": _won_runs,
+                                "won_by_wickets": _won_wkts,
+                                "ties": _ties,
+                                "no_result": _no_result,
+                            },
+                        ))
                 except Exception as _rte:
-                    print(f"[SPORTS RESULT TYPE ERROR] {_rte}")
+                    print(f"[SPORTS RESULT ERROR] {_rte}")
                     import traceback
                     traceback.print_exc()
-            else:
-                print(f"[SPORTS] No result type columns found — checked win_by_runs, win_by_wickets")
 
             # 5. Player of Match frequency
             if pom_col:
