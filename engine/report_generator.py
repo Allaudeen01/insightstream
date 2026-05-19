@@ -3941,11 +3941,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     matplotlib.use("Agg")
                     import matplotlib.pyplot as _plt
 
+                    def _parse_season_year(s) -> int:
+                        """Handle '2007/08', '2020/21', '2009' → int year."""
+                        try:
+                            return int(str(s).split('/')[0].split('-')[0].strip())
+                        except Exception:
+                            return 0
+
                     _sc = (
                         _pdf_sp[_season_col_c]
                         .value_counts().sort_index()
                     )
-                    _seasons = [str(int(x)) for x in _sc.index]
+                    _seasons = [str(_parse_season_year(x)) for x in _sc.index]
                     _counts  = list(_sc.values)
 
                     _fig, _ax = _plt.subplots(figsize=(8, 3.5))
@@ -3957,10 +3964,11 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         "IPL Matches per Season",
                         fontsize=13, fontweight="bold"
                     )
-                    _peak_yr = str(int(_sc.idxmax()))
+                    _peak_yr = str(_sc.idxmax())  # Keep original label e.g. "2007/08"
+                    _peak_yr_display = str(_parse_season_year(_sc.idxmax()))
                     _ax.annotate(
                         f"Peak: {_peak_yr}",
-                        xy=(_seasons.index(_peak_yr),
+                        xy=(_seasons.index(_peak_yr_display),
                             _sc.max()),
                         xytext=(0, 8),
                         textcoords="offset points",

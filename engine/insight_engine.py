@@ -3554,8 +3554,8 @@ class BusinessRuleEngine:
                         ),
                         description=(
                             f"The tournament spans {total_seasons} seasons "
-                            f"({int(season_counts.index.min())}–"
-                            f"{int(season_counts.index.max())}) "
+                            f"({str(season_counts.index.min())}–"
+                            f"{str(season_counts.index.max())}) "
                             f"with {total:,} total matches "
                             f"({total/total_seasons:.0f} per season avg). "
                             f"Peak season: {peak_season} ({peak_count} matches). "
@@ -3585,13 +3585,13 @@ class BusinessRuleEngine:
                             "season_counts": season_counts.to_dict(),
                             "peak_season": str(peak_season),
                             "peak_month": str(peak_season),
-                            "trough_month": str(int(season_counts.idxmin())),
+                            "trough_month": str(season_counts.idxmin()),
                             "pct_gap": round(
                                 (season_counts.max() - season_counts.min())
                                 / max(season_counts.max(), 1) * 100, 1
                             ),
                             "monthly_data": [
-                                (f"{int(yr)}-01", int(cnt))
+                                (f"{str(yr).split('/')[0].strip()}-01", int(cnt))
                                 for yr, cnt in season_counts.items()
                             ],
                         },
