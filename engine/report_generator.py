@@ -1164,9 +1164,9 @@ class InsightNarrator:
                     f"patterns and performance trends worth analysing."
                 ),
                 "health": (
-                    f"Across {records} records, "
-                    f"this {domain_label} dataset reveals statistical patterns "
-                    f"across the measured variables."
+                    f"Across {records} health records, "
+                    f"this dataset reveals epidemiological patterns "
+                    f"including case burden, mortality, and recovery rates."
                 ),
             }
             default_opener = (
@@ -3188,6 +3188,40 @@ class UnifiedReportGenerator(PDFReportGenerator):
             except Exception as _sk:
                 log.warning(f"[sports KPIs] {_sk}")
 
+        if domain_id == "health" and df is not None:
+            try:
+                _pdf_h = df if isinstance(df, pd.DataFrame) \
+                         else df.to_pandas()
+
+                def _find_h(candidates):
+                    for name in candidates:
+                        for col in _pdf_h.columns:
+                            if name in col.lower().replace(" ", "_"):
+                                return col
+                    return None
+
+                _conf_col  = _find_h(["confirmed", "cases", "total_cases"])
+                _death_col = _find_h(["deaths", "death", "fatalities"])
+                _rec_col   = _find_h(["recovered", "recovery"])
+
+                health_kpis = {"Total Records": f"{len(_pdf_h):,}"}
+                if _conf_col:
+                    health_kpis["Total Cases"] = (
+                        f"{int(_pdf_h[_conf_col].sum()):,}"
+                    )
+                if _death_col:
+                    health_kpis["Total Deaths"] = (
+                        f"{int(_pdf_h[_death_col].sum()):,}"
+                    )
+                if _rec_col:
+                    health_kpis["Total Recovered"] = (
+                        f"{int(_pdf_h[_rec_col].sum()):,}"
+                    )
+                kpis = health_kpis
+                print(f"[HEALTH KPIs] {kpis}")
+            except Exception as _hk:
+                log.warning(f"[health KPIs] {_hk}")
+
         if kpis:
             elements.append(Paragraph("Key Performance Indicators", self.S["ChartTitle"]))
             elements.append(self._kpi_table(kpis))
@@ -3275,6 +3309,20 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 f"50% — indicating toss has minimal predictive value. "
                 f"Eden Gardens is the most-used venue. AB de Villiers "
                 f"leads all-time Player of Match awards."
+            )
+
+        if domain_id == "health" and (
+            "General Business" in ai_summary
+            or "No single numeric driver" in ai_summary
+            or not ai_summary.strip()
+        ):
+            ai_summary = (
+                f"This health dataset contains {len(df):,} records "
+                f"covering confirmed cases, deaths, and recoveries. "
+                f"Key metrics include case fatality rate and recovery "
+                f"rate. Regional distribution reveals which areas "
+                f"carry the highest burden. Data completeness is "
+                f"critical for reliable epidemiological conclusions."
             )
 
         if ai_summary:
@@ -3479,6 +3527,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         title = (title
                             .replace("Revenue Trend:", "Match Volume:")
                             .replace("Flat", "Stable"))
+
+                    if domain_id == "health":
+                        description = (description
+                            .replace("of total revenue", "of total cases")
+                            .replace("business operation", "health dataset")
+                            .replace(
+                                "strong top-line performance but structural "
+                                "imbalances that require strategic attention",
+                                "epidemiological patterns requiring health "
+                                "system attention"
+                            )
+                            .replace("transactions totalling", "records covering"))
 
                     if domain_id == "hr":
                         title = (title

@@ -208,6 +208,39 @@ class DomainDetector:
                   f"(signals={sports_signals}, "
                   f"score={scores['sports']:.2f})")
 
+        # ── Health Domain Detection ───────────────────────
+        health_signals = 0
+        _cols_h = [c.lower().replace(" ", "_") for c in df.columns]
+
+        _case_signals = ["confirmed", "cases", "infected",
+                         "positive", "total_cases", "new_cases"]
+        if any(k in _cols_h or any(k in c for c in _cols_h)
+               for k in _case_signals):
+            health_signals += 3
+
+        _outcome_signals = ["deaths", "death", "fatalities",
+                            "mortality", "deceased", "dead"]
+        if any(any(k in c for c in _cols_h) for k in _outcome_signals):
+            health_signals += 2
+
+        _recovery_signals = ["recovered", "recovery", "discharged",
+                              "healed", "cured"]
+        if any(any(k in c for c in _cols_h) for k in _recovery_signals):
+            health_signals += 2
+
+        _health_signals = ["active", "hospitalized", "icu",
+                           "critical", "serious", "quarantine",
+                           "vaccinated", "tests", "tested"]
+        if sum(1 for k in _health_signals
+               if any(k in c for c in _cols_h)) >= 2:
+            health_signals += 2
+
+        if health_signals >= 4:
+            scores["health"] = min(0.9, health_signals * 0.15)
+            print(f"[DOMAIN] Health detected "
+                  f"(signals={health_signals}, "
+                  f"score={scores['health']:.2f})")
+
         # Re-pick winner after tie-breaking adjustments
         best_domain = max(scores, key=scores.get)
         best_score  = scores[best_domain]
@@ -1816,6 +1849,19 @@ class BusinessRuleEngine:
             if results:
                 all_insights.extend(results)
                 log.info(f"[sports] Generated {len(results)} insights")
+
+        _has_health = any(
+            any(k in c.lower() for k in
+                ["confirmed", "cases", "deaths", "recovered"])
+            for c in df.columns
+        )
+        if _has_health:
+            results = self._rule_health_analysis(df, profile)
+            if results:
+                all_insights.extend(results)
+                log.info(
+                    f"[health] Generated {len(results)} insights"
+                )
 
         # ── Tier 1.2: Enhanced Time-Series Analysis ───────────────────────
         _ts = TimeSeriesAnalyzer()
@@ -4489,6 +4535,332 @@ class BusinessRuleEngine:
             pass
         
         return None
+
+    def _rule_health_analysis(self, df, profile) -> list:
+        """Fires for COVID/health/epidemiological datasets."""
+        insights = []
+
+        def _find_col(candidates):
+            for name in candidates:
+                for col in df.columns:
+                    if name in col.lower().replace(" ", "_"):
+                        return col
+            return None
+
+        confirmed_col = _find_col([
+            "confirmed", "cases", "total_cases",
+            "infected", "positive"
+        ])
+        deaths_col = _find_col([
+            "deaths", "death", "fatalities",
+            "mortality", "deceased", "total_deaths"
+        ])
+        recovered_col = _find_col([
+            "recovered", "recovery", "discharged", "cured"
+        ])
+        active_col = _find_col([
+            "active", "active_cases", "current_cases"
+        ])
+        serious_col = _find_col([
+            "serious", "critical", "icu",
+            "hospitalized", "serious,_critical"
+        ])
+        country_col = _find_col([
+            "country", "region", "location",
+            "country/region", "state", "province"
+        ])
+
+        if not confirmed_col and not deaths_col:
+            return []
+
+        try:
+            pdf = df.to_pandas() if hasattr(df, "to_pandas") \
+                  else df
+            total_records = len(pdf)
+
+            # 1. Overall scale insight
+            if confirmed_col:
+                try:
+                    total_cases = pdf[confirmed_col].sum()
+                    avg_cases   = pdf[confirmed_col].mean()
+
+                    _death_rate_str = ""
+                    if deaths_col:
+                        total_deaths = pdf[deaths_col].sum()
+                        death_rate   = (
+                            total_deaths / total_cases * 100
+                            if total_cases > 0 else 0
+                        )
+                        _death_rate_str = (
+                            f" Death rate: {death_rate:.2f}%."
+                        )
+
+                    _rec_rate_str = ""
+                    if recovered_col:
+                        total_recovered = pdf[recovered_col].sum()
+                        rec_rate = (
+                            total_recovered / total_cases * 100
+                            if total_cases > 0 else 0
+                        )
+                        _rec_rate_str = (
+                            f" Recovery rate: {rec_rate:.1f}%."
+                        )
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Total Cases: "
+                            f"{int(total_cases):,} across "
+                            f"{total_records} records"
+                        ),
+                        description=(
+                            f"Dataset covers {total_records} records "
+                            f"with {int(total_cases):,} total confirmed "
+                            f"cases (avg {avg_cases:,.0f} per record)."
+                            f"{_death_rate_str}"
+                            f"{_rec_rate_str}"
+                        ),
+                        why_it_matters=(
+                            "Total case count and rates provide the "
+                            "baseline for all epidemiological analysis."
+                        ),
+                        evidence=(
+                            f"Total cases: {int(total_cases):,} | "
+                            f"Records: {total_records}"
+                        ),
+                        impact="🔴 Critical",
+                        recommendation=(
+                            "Monitor death rate and recovery rate trends "
+                            "over time — sustained improvement in both "
+                            "indicates effective intervention."
+                        ),
+                        rule_type="health_case_summary",
+                        score=9.5,
+                        chart_data={
+                            "total_cases": int(total_cases),
+                            "total_records": total_records,
+                        },
+                    ))
+                except Exception as _ce:
+                    log.warning(f"[health_cases] {_ce}")
+
+            # 2. Death rate analysis
+            if deaths_col and confirmed_col:
+                try:
+                    total_deaths  = int(pdf[deaths_col].sum())
+                    total_cases   = int(pdf[confirmed_col].sum())
+                    death_rate    = (
+                        total_deaths / total_cases * 100
+                        if total_cases > 0 else 0
+                    )
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Mortality Rate: "
+                            f"{death_rate:.2f}% "
+                            f"({total_deaths:,} deaths)"
+                        ),
+                        description=(
+                            f"Total deaths: {total_deaths:,} from "
+                            f"{total_cases:,} confirmed cases "
+                            f"({death_rate:.2f}% case fatality rate). "
+                            f"{'Above 2% — elevated mortality requiring urgent intervention.' if death_rate > 2 else 'Below 2% — within manageable range for most health systems.'}"
+                        ),
+                        why_it_matters=(
+                            "Case fatality rate (CFR) is the primary "
+                            "indicator of disease severity and healthcare "
+                            "system capacity."
+                        ),
+                        evidence=(
+                            f"Deaths: {total_deaths:,} | "
+                            f"CFR: {death_rate:.2f}%"
+                        ),
+                        impact=(
+                            "🔴 Critical" if death_rate > 2
+                            else "🟠 Important"
+                        ),
+                        recommendation=(
+                            "Track CFR by region and time period. "
+                            "Rising CFR indicates overwhelmed healthcare "
+                            "capacity — trigger surge protocols "
+                            "when CFR exceeds 3%."
+                        ),
+                        rule_type="health_mortality",
+                        score=9.0,
+                        chart_data={
+                            "death_rate": round(death_rate, 2),
+                            "total_deaths": total_deaths,
+                        },
+                    ))
+                except Exception as _de:
+                    log.warning(f"[health_deaths] {_de}")
+
+            # 3. Recovery analysis
+            if recovered_col and confirmed_col:
+                try:
+                    total_recovered = int(pdf[recovered_col].sum())
+                    total_cases     = int(pdf[confirmed_col].sum())
+                    rec_rate = (
+                        total_recovered / total_cases * 100
+                        if total_cases > 0 else 0
+                    )
+                    active_cases = (
+                        int(pdf[active_col].sum())
+                        if active_col else None
+                    )
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Recovery Rate: {rec_rate:.1f}% "
+                            f"({total_recovered:,} recovered)"
+                        ),
+                        description=(
+                            f"{total_recovered:,} patients have "
+                            f"recovered ({rec_rate:.1f}% of confirmed "
+                            f"cases). "
+                            + (
+                                f"{active_cases:,} cases remain active. "
+                                if active_cases else ""
+                            ) +
+                            f"{'High recovery rate (>80%) indicates effective treatment protocols.' if rec_rate > 80 else 'Recovery rate below 80% — treatment pathway optimisation needed.'}"
+                        ),
+                        why_it_matters=(
+                            "Recovery rate reflects healthcare system "
+                            "effectiveness and treatment quality."
+                        ),
+                        evidence=(
+                            f"Recovered: {total_recovered:,} "
+                            f"({rec_rate:.1f}%) | "
+                            + (
+                                f"Active: {active_cases:,}"
+                                if active_cases else ""
+                            )
+                        ),
+                        impact="🟠 Important",
+                        recommendation=(
+                            "Publish recovery rate data publicly to "
+                            "reduce fear and panic. "
+                            "High recovery rates are a key indicator "
+                            "of healthcare system readiness."
+                        ),
+                        rule_type="health_recovery",
+                        score=8.5,
+                        chart_data={
+                            "rec_rate": round(rec_rate, 1),
+                            "total_recovered": total_recovered,
+                        },
+                    ))
+                except Exception as _re:
+                    log.warning(f"[health_recovery] {_re}")
+
+            # 4. Country/region comparison
+            if country_col and confirmed_col:
+                try:
+                    country_cases = (
+                        pdf.groupby(country_col)[confirmed_col]
+                        .sum().sort_values(ascending=False)
+                    )
+                    top_country = country_cases.index[0]
+                    top_cases   = int(country_cases.iloc[0])
+                    total_cases = int(country_cases.sum())
+                    top_pct     = top_cases / total_cases * 100
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Highest Burden: {top_country} "
+                            f"({top_pct:.0f}% of cases)"
+                        ),
+                        description=(
+                            f"{top_country} has the highest case "
+                            f"burden with {top_cases:,} confirmed "
+                            f"cases ({top_pct:.0f}% of total). "
+                            f"Top 5 regions: "
+                            f"{', '.join(f'{c} ({n:,})' for c, n in country_cases.head(5).items())}."
+                        ),
+                        why_it_matters=(
+                            "Regional case distribution guides "
+                            "resource allocation and intervention "
+                            "prioritisation."
+                        ),
+                        evidence=(
+                            f"Top: {top_country} "
+                            f"({top_pct:.0f}% of all cases)"
+                        ),
+                        impact="🔴 Critical",
+                        recommendation=(
+                            f"Prioritise resource deployment to "
+                            f"{top_country}. Establish cross-border "
+                            f"coordination to prevent spillover to "
+                            f"lower-burden regions."
+                        ),
+                        rule_type="health_regional",
+                        score=8.0,
+                        chart_data={
+                            "country_cases": (
+                                country_cases.head(10).to_dict()
+                            ),
+                        },
+                    ))
+                except Exception as _coe:
+                    log.warning(f"[health_country] {_coe}")
+
+            # 5. Serious/critical cases
+            if serious_col and confirmed_col:
+                try:
+                    total_serious = int(pdf[serious_col].sum())
+                    total_cases   = int(pdf[confirmed_col].sum())
+                    serious_rate  = (
+                        total_serious / total_cases * 100
+                        if total_cases > 0 else 0
+                    )
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Critical Cases: "
+                            f"{total_serious:,} "
+                            f"({serious_rate:.1f}% of confirmed)"
+                        ),
+                        description=(
+                            f"{total_serious:,} cases are serious "
+                            f"or critical ({serious_rate:.1f}% of "
+                            f"confirmed cases). These patients "
+                            f"require intensive care resources. "
+                            f"{'High critical rate (>1%) — ICU capacity is a key constraint.' if serious_rate > 1 else 'Critical rate below 1% — within manageable ICU capacity for most systems.'}"
+                        ),
+                        why_it_matters=(
+                            "Critical case rate determines ICU demand "
+                            "and is the primary driver of healthcare "
+                            "system overload."
+                        ),
+                        evidence=(
+                            f"Critical: {total_serious:,} "
+                            f"({serious_rate:.1f}%)"
+                        ),
+                        impact=(
+                            "🔴 Critical" if serious_rate > 1
+                            else "🟠 Important"
+                        ),
+                        recommendation=(
+                            "Maintain ICU surge capacity at 120% of "
+                            "normal. Track critical case rate weekly — "
+                            "rising trend is the earliest warning of "
+                            "system overload."
+                        ),
+                        rule_type="health_critical_cases",
+                        score=8.0,
+                        chart_data={
+                            "serious_rate": round(serious_rate, 1),
+                            "total_serious": total_serious,
+                        },
+                    ))
+                except Exception as _se:
+                    log.warning(f"[health_serious] {_se}")
+
+        except Exception as e:
+            log.warning(f"[health_analysis] Failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return insights
 
     @log_rule
     def _rule_simulation(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
