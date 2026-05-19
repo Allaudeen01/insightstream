@@ -3129,7 +3129,29 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 if _winner_col:
                     top_team = _pdf_s[_winner_col]\
                         .value_counts().index[0]
-                    sports_kpis["Most Wins"] = str(top_team)
+                    _team_str = str(top_team)
+                    _IPL_ABBR = {
+                        "Mumbai Indians": "Mumbai Indians",
+                        "Chennai Super Kings": "Chennai Super Kings",
+                        "Kolkata Knight Riders": "KKR",
+                        "Royal Challengers Bangalore": "RCB",
+                        "Royal Challengers Bengaluru": "RCB",
+                        "Rajasthan Royals": "Rajasthan Royals",
+                        "Delhi Capitals": "Delhi Capitals",
+                        "Delhi Daredevils": "Delhi Daredevils",
+                        "Sunrisers Hyderabad": "SRH",
+                        "Punjab Kings": "Punjab Kings",
+                        "Kings XI Punjab": "Kings XI Punjab",
+                        "Deccan Chargers": "Deccan Chargers",
+                        "Rising Pune Supergiant": "Pune Supergiant",
+                        "Rising Pune Supergiants": "Pune Supergiants",
+                        "Gujarat Titans": "Gujarat Titans",
+                        "Lucknow Super Giants": "LSG",
+                    }
+                    _team_short = _IPL_ABBR.get(_team_str, _team_str)
+                    if len(_team_short) > 15:
+                        _team_short = _team_short[:13] + "…"
+                    sports_kpis["Most Wins"] = _team_short
 
                 kpis = sports_kpis
                 print(f"[SPORTS KPIs] {kpis}")
@@ -3927,10 +3949,77 @@ class UnifiedReportGenerator(PDFReportGenerator):
             except Exception as _e:
                 log.warning("Fallback time series generation failed: %s", _e)
 
+        # ── Sports: Matches per Season chart ─────────────────────────────
+        if domain_id == "sports" and df is not None:
+            try:
+                _pdf_sp = df if isinstance(df, pd.DataFrame) \
+                          else df.to_pandas()
+                _season_col_c = next(
+                    (c for c in _pdf_sp.columns
+                     if c.lower() in ["season", "year", "edition"]),
+                    None
+                )
+                if _season_col_c:
+                    _season_counts = (
+                        _pdf_sp[_season_col_c]
+                        .value_counts().sort_index()
+                    )
+                    if len(_season_counts) >= 3:
+                        _sport_monthly_data = [
+                            (f"{int(yr)}-01", int(cnt))
+                            for yr, cnt in _season_counts.items()
+                        ]
+                        _peak_s = str(int(_season_counts.idxmax()))
+                        _trough_s = str(int(_season_counts.idxmin()))
+                        _max_c = int(_season_counts.max())
+                        _min_c = int(_season_counts.min())
+                        _swing = (
+                            (_max_c - _min_c) / _max_c * 100
+                            if _max_c > 0 else 0
+                        )
+                        _sp_chart = self._chart_monthly_revenue(
+                            _sport_monthly_data,
+                            peak_month=_peak_s,
+                            trough_month=_trough_s,
+                            pct_gap=_swing,
+                        )
+                        if (_sp_chart and
+                                os.path.exists(_sp_chart) and
+                                os.path.getsize(_sp_chart) > 0):
+                            elements.append(PageBreak())
+                            elements.append(Paragraph(
+                                "Matches per Season",
+                                self.S["Section"]
+                            ))
+                            elements.append(HRFlowable(
+                                width="100%", thickness=1,
+                                color=colors.HexColor(C.RULE_LIGHT)
+                            ))
+                            elements.append(Spacer(1, 10))
+                            elements.append(
+                                RLImage(_sp_chart, width=480, height=210)
+                            )
+                            elements.append(Spacer(1, 6))
+                            elements.append(Paragraph(
+                                f"Match volume per season — "
+                                f"peak: {_peak_s}, "
+                                f"lowest: {_trough_s}.",
+                                self.S["Insight"]
+                            ))
+                            elements.append(Spacer(1, 16))
+                            print(f"[SPORTS] Season trend chart added")
+                        else:
+                            print(f"[SPORTS] Chart failed: {_sp_chart}")
+            except Exception as _spe:
+                log.warning(f"[sports trend chart] {_spe}")
+                import traceback
+                traceback.print_exc()
+        # ── End Sports trend chart ────────────────────────────────────────
+
         # ✅ ADD MISSING SECTIONS 6 & 7
         print(f"[PRE-SECTION6] insights type={type(insights)}, len={len(insights) if insights else 0}, df is None={df is None}")
         print(f"[build_from_assets] df passed to section 6: type={type(df)}, is None={df is None}")
-        
+
         # Always start Deep Insights on a fresh page
         if insights:
             elements.append(PageBreak())

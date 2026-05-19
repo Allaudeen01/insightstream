@@ -3537,6 +3537,15 @@ class BusinessRuleEngine:
                     peak_count  = int(season_counts.max())
                     total_seasons = season_counts.nunique()
 
+                    _growth = (
+                        (season_counts.iloc[-1] - season_counts.iloc[0])
+                        / max(season_counts.iloc[0], 1) * 100
+                    )
+                    _trend_dir = (
+                        "growing" if _growth > 10
+                        else "declining" if _growth < -10
+                        else "stable"
+                    )
                     insights.append(BusinessInsight(
                         title=(
                             f"Tournament Scale: "
@@ -3544,14 +3553,18 @@ class BusinessRuleEngine:
                             f"Peak in {peak_season}"
                         ),
                         description=(
-                            f"Dataset spans {total_seasons} seasons "
-                            f"with {total:,} matches total "
-                            f"({total/total_seasons:.0f} matches/season avg). "
-                            f"Most active season: {peak_season} "
-                            f"({peak_count} matches). "
-                            f"Season range: "
-                            f"{int(season_counts.index.min())}–"
-                            f"{int(season_counts.index.max())}."
+                            f"The tournament spans {total_seasons} seasons "
+                            f"({int(season_counts.index.min())}–"
+                            f"{int(season_counts.index.max())}) "
+                            f"with {total:,} total matches "
+                            f"({total/total_seasons:.0f} per season avg). "
+                            f"Peak season: {peak_season} ({peak_count} matches). "
+                            f"Match volume is {_trend_dir} — "
+                            f"{abs(_growth):.0f}% "
+                            f"{'increase' if _growth > 0 else 'decrease'} "
+                            f"from first to last season. "
+                            f"Season growth reflects league expansion, "
+                            f"franchise additions, and format changes."
                         ),
                         why_it_matters=(
                             "Tournament growth over seasons reflects "
@@ -3567,7 +3580,7 @@ class BusinessRuleEngine:
                             f"as a proxy for league health and expansion."
                         ),
                         rule_type="sports_season_trend",
-                        score=6.5,
+                        score=8.5,
                         chart_data={
                             "season_counts": season_counts.to_dict(),
                             "peak_season": str(peak_season),
