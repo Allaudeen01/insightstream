@@ -3663,7 +3663,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 _cg = ChartGenerator()
                 _cg_result, _ = _cg.generate_all(df)
                 _cg_chart_paths = _cg_result
-                if domain_id == "health":
+                if domain_id in ["health", "sports"]:
                     _cg_chart_paths.pop("order_count", None)
                 log.info(f"[Charts] Pre-generated {len(_cg_chart_paths)} ChartGenerator images: {list(_cg_chart_paths.keys())}")
             except Exception as _cg_e:
@@ -3833,7 +3833,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         _cg_key = "distribution"
                     elif any(k in _tl for k in ("correlation", "heatmap")):
                         _cg_key = "correlation"
-                    elif any(k in _tl for k in ("order", "count", "volume", "records", "payment", "method")):
+                    elif (any(k in _tl for k in ("order", "count", "volume", "records", "payment", "method"))
+                          and domain_id not in ["health", "sports"]):
                         _cg_key = "order_count"
 
                     _cg_img = _cg_chart_paths.get(_cg_key) if _cg_key else None
