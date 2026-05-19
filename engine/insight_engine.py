@@ -4831,16 +4831,21 @@ class BusinessRuleEngine:
                         total_serious / total_cases * 100
                         if total_cases > 0 else 0
                     )
+                    _serious_fmt = (
+                        f"{serious_rate:.3f}%"
+                        if serious_rate < 0.1
+                        else f"{serious_rate:.1f}%"
+                    )
 
                     insights.append(BusinessInsight(
                         title=(
                             f"Critical Cases: "
                             f"{total_serious:,} "
-                            f"({serious_rate:.1f}% of confirmed)"
+                            f"({_serious_fmt} of confirmed)"
                         ),
                         description=(
                             f"{total_serious:,} cases are serious "
-                            f"or critical ({serious_rate:.1f}% of "
+                            f"or critical ({_serious_fmt} of "
                             f"confirmed cases). These patients "
                             f"require intensive care resources. "
                             f"{'High critical rate (>1%) — ICU capacity is a key constraint.' if serious_rate > 1 else 'Critical rate below 1% — within manageable ICU capacity for most systems.'}"
@@ -4852,7 +4857,7 @@ class BusinessRuleEngine:
                         ),
                         evidence=(
                             f"Critical: {total_serious:,} "
-                            f"({serious_rate:.1f}%)"
+                            f"({_serious_fmt})"
                         ),
                         impact=(
                             "🔴 Critical" if serious_rate > 1
