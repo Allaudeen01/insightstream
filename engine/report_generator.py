@@ -2186,6 +2186,28 @@ class PDFReportGenerator:
             sentences = _re.split(r'(?<=[\.!?])\s+', desc.replace('\n\n', '. '))
             short_desc = ' '.join(sentences[:3])
 
+            if domain_id == "sports":
+                short_desc = short_desc.replace(
+                    "Revenue follows a predictable seasonal pattern",
+                    "Match volume follows a seasonal pattern"
+                ).replace(
+                    "Revenue is broadly flat outside the seasonal cycle",
+                    "Match count is stable across seasons"
+                ).replace(
+                    "the primary source of cash flow risk",
+                    "reflecting league scheduling patterns"
+                ).replace(
+                    "If inventory and staffing aren't pre-positioned",
+                    "Peak seasons"
+                ).replace(
+                    "you'll leave money on the table",
+                    "see the highest match concentration"
+                ).replace(
+                    "cash-flow management to avoid overstaffing "
+                    "or excess stock",
+                    "scheduling reflects lower tournament activity"
+                )
+
             # ── Why it matters callout ────────────────────────────────────
             callout_style = ParagraphStyle(
                 f'Callout_{i}', fontSize=9.5, fontName=PDF_FONT_REGULAR,
@@ -3797,10 +3819,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
         # ── End Entertainment trend chart ─────────────────────────────────
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
-        # Skip revenue trend for sports — use Matches per Season instead
-        if domain_id == "sports":
-            temporal_insight = None
-            chart_path = None
         _TEMPORAL_RULES = {"temporal_peaks", "time_series", "temporal", "revenue_trend", "seasonality_pattern"}
         temporal_insight = next(
             (i for i in (insights or [])
@@ -3852,7 +3870,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 trough_month=_cd.get("trough_month", ""),
                 pct_gap=_cd.get("pct_gap", 0),
             )
-            if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
+            # Sports uses Matches per Season instead — skip Monthly Revenue Trend
+            if domain_id != "sports" and chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
                 chart_elements = []
                 chart_elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
                 chart_elements.append(HRFlowable(width="100%", thickness=1,
@@ -3882,7 +3901,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     log.error("Monthly trend chart embed failed: %s", _e)
                 # Update flag since we added content after frontend charts
                 _last_chart_completed_pair = False
-        
+
         # ✅ FALLBACK: Generate time series from raw data if temporal_insight produced no chart
         if domain_id != "sports" and df is not None and len(df) > 0 and not (temporal_insight and chart_path and os.path.exists(chart_path)):
             try:
