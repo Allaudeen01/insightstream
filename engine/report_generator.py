@@ -4052,7 +4052,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     _ax.set_xlabel("Season", fontsize=10)
                     _ax.set_ylabel("Matches", fontsize=10)
                     _ax.set_title(
-                        "IPL Matches per Season",
+                        "Matches per Season",
                         fontsize=13, fontweight="bold"
                     )
                     _peak_yr = str(_sc.idxmax())  # Keep original label e.g. "2007/08"

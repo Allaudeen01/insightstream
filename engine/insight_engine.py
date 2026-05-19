@@ -179,7 +179,9 @@ class DomainDetector:
 
         # Team columns
         _team_signals = ["team1", "team2", "home_team",
-                         "away_team", "team", "club", "side"]
+                         "away_team", "team", "club", "side",
+                         "driver", "constructor", "player", "athlete",
+                         "winner_name", "loser_name", "home", "away"]
         if sum(1 for k in _team_signals
                if any(k in c for c in _cols_lower_s)) >= 2:
             sports_signals += 3
@@ -3412,13 +3414,26 @@ class BusinessRuleEngine:
         pom_col    = _find_col(["player_of_match", "man_of_match",
                                  "best_player", "mvp"])
 
-        if not winner_col:
-            return []
-
         try:
             pdf = df.to_pandas() if hasattr(df, "to_pandas") \
                   else df
             total = len(pdf)
+
+            # Football: derive winner from home/away goals
+            home_goals = _find_col(["home_goals", "fthg",
+                                    "home_score", "score_home"])
+            away_goals = _find_col(["away_goals", "ftag",
+                                    "away_score", "score_away"])
+            if home_goals and away_goals and not winner_col:
+                pdf["_derived_winner"] = pdf.apply(
+                    lambda r: r[team1_col] if r[home_goals] > r[away_goals]
+                    else (r[team2_col] if r[away_goals] > r[home_goals]
+                          else "Draw"), axis=1
+                )
+                winner_col = "_derived_winner"
+
+            if not winner_col:
+                return []
 
             # 1. Team win rate analysis
             if team1_col and team2_col:
