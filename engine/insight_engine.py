@@ -7758,6 +7758,39 @@ class SmartChartRecommender:
         import json
 
         pdf = df.to_pandas()
+
+        # ── Pre-process: convert comma-formatted strings to numeric ──
+        _NUMERIC_KEYWORDS = [
+            "cases", "deaths", "recovered", "active", "tests",
+            "population", "confirmed", "infected", "serious",
+            "critical", "sales", "revenue", "amount", "price",
+            "total", "count", "number", "qty", "quantity"
+        ]
+        for _col in pdf.columns:
+            if pdf[_col].dtype == object:
+                _col_lower = str(_col).lower().replace("\n", "")
+                _is_numeric_col = any(
+                    k in _col_lower for k in _NUMERIC_KEYWORDS
+                )
+                if _is_numeric_col:
+                    try:
+                        _converted = (
+                            pdf[_col].astype(str)
+                                     .str.replace(",", "", regex=False)
+                                     .str.replace(" ", "", regex=False)
+                                     .str.strip()
+                        )
+                        _numeric = pd.to_numeric(
+                            _converted, errors="coerce"
+                        )
+                        if _numeric.notna().mean() > 0.8:
+                            pdf[_col] = _numeric
+                            print(f"[VIZ PREPROCESS] "
+                                  f"Converted {_col} to numeric")
+                    except Exception:
+                        pass
+        # ── End preprocessing ─────────────────────────────────────────
+
         charts = []
         chart_ids_used: set[str] = set()
 
