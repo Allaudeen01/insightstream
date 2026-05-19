@@ -219,23 +219,19 @@ def _detect_currency_symbol(df: pd.DataFrame) -> str:
             try:
                 vals = df[col].dropna().astype(str).str.strip().tolist()
                 
-                # Check unique countries AND record counts
-                unique_vals = list(set(v.strip().lower() for v in vals))
-                uk_unique = sum(1 for v in unique_vals if v in [
+                # Count records per country (not just unique countries)
+                _vals_lower = [v.strip().lower() for v in vals]
+                _uk_records = sum(1 for v in _vals_lower if v in [
                     "united kingdom", "uk", "great britain", "england"])
-                us_unique = sum(1 for v in unique_vals if v in [
-                    "united states", "usa", "us", "america"])
+                _us_records = sum(1 for v in _vals_lower if v in [
+                    "united states", "usa", "us", "united states of america"])
+                _total = max(len(_vals_lower), 1)
                 
-                # Check by record count too
-                uk_records = sum(1 for v in vals if v.strip().lower() in [
-                    "united kingdom", "uk", "great britain"])
-                us_records = sum(1 for v in vals if v.strip().lower() in [
-                    "united states", "usa", "us"])
-                
-                # Prioritize by record count (dominant country)
-                if uk_records > us_records and uk_records > len(vals) * 0.3:
+                # UK dominant (>30% of records)
+                if _uk_records / _total > 0.3 and _uk_records > _us_records:
                     return "£"
-                if us_records > uk_records and us_records > len(vals) * 0.3:
+                # US dominant (>30% of records)
+                if _us_records / _total > 0.3 and _us_records > _uk_records:
                     return "$"
             except Exception:
                 pass
