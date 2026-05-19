@@ -3579,11 +3579,21 @@ class BusinessRuleEngine:
                             f"Track season-over-season match volume "
                             f"as a proxy for league health and expansion."
                         ),
-                        rule_type="sports_season_trend",
-                        score=8.5,
+                        rule_type="temporal_peaks",
+                        score=10.0,
                         chart_data={
                             "season_counts": season_counts.to_dict(),
                             "peak_season": str(peak_season),
+                            "peak_month": str(peak_season),
+                            "trough_month": str(int(season_counts.idxmin())),
+                            "pct_gap": round(
+                                (season_counts.max() - season_counts.min())
+                                / max(season_counts.max(), 1) * 100, 1
+                            ),
+                            "monthly_data": [
+                                (f"{int(yr)}-01", int(cnt))
+                                for yr, cnt in season_counts.items()
+                            ],
                         },
                     ))
                 except Exception as _se:

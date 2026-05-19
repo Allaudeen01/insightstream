@@ -3121,37 +3121,12 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         _pdf_s[_season_col].nunique()
                     )
                 if _team1_col and _team2_col:
-                    n_teams = pd.concat([
-                        _pdf_s[_team1_col],
-                        _pdf_s[_team2_col]
+                    _n_t = pd.concat([
+                        _pdf_s[_team1_col], _pdf_s[_team2_col]
                     ]).nunique()
-                    sports_kpis["Teams"] = str(n_teams)
-                if _winner_col:
-                    top_team = _pdf_s[_winner_col]\
-                        .value_counts().index[0]
-                    _team_str = str(top_team)
-                    _IPL_ABBR = {
-                        "Mumbai Indians": "Mumbai Indians",
-                        "Chennai Super Kings": "Chennai Super Kings",
-                        "Kolkata Knight Riders": "KKR",
-                        "Royal Challengers Bangalore": "RCB",
-                        "Royal Challengers Bengaluru": "RCB",
-                        "Rajasthan Royals": "Rajasthan Royals",
-                        "Delhi Capitals": "Delhi Capitals",
-                        "Delhi Daredevils": "Delhi Daredevils",
-                        "Sunrisers Hyderabad": "SRH",
-                        "Punjab Kings": "Punjab Kings",
-                        "Kings XI Punjab": "Kings XI Punjab",
-                        "Deccan Chargers": "Deccan Chargers",
-                        "Rising Pune Supergiant": "Pune Supergiant",
-                        "Rising Pune Supergiants": "Pune Supergiants",
-                        "Gujarat Titans": "Gujarat Titans",
-                        "Lucknow Super Giants": "LSG",
-                    }
-                    _team_short = _IPL_ABBR.get(_team_str, _team_str)
-                    if len(_team_short) > 15:
-                        _team_short = _team_short[:13] + "…"
-                    sports_kpis["Most Wins"] = _team_short
+                    sports_kpis["Teams"] = str(_n_t)
+                # Skip "Most Wins" — team names too long for KPI cell
+                # Winner shown in AI Brief and insights instead
 
                 kpis = sports_kpis
                 print(f"[SPORTS KPIs] {kpis}")
@@ -3956,62 +3931,88 @@ class UnifiedReportGenerator(PDFReportGenerator):
                           else df.to_pandas()
                 _season_col_c = next(
                     (c for c in _pdf_sp.columns
-                     if c.lower() in ["season", "year", "edition"]),
-                    None
+                     if c.lower() in ["season", "year",
+                                      "edition"]), None
                 )
-                if _season_col_c:
-                    _season_counts = (
+                if _season_col_c and \
+                   _pdf_sp[_season_col_c].nunique() >= 3:
+
+                    import matplotlib
+                    matplotlib.use("Agg")
+                    import matplotlib.pyplot as _plt
+
+                    _sc = (
                         _pdf_sp[_season_col_c]
                         .value_counts().sort_index()
                     )
-                    if len(_season_counts) >= 3:
-                        _sport_monthly_data = [
-                            (f"{int(yr)}-01", int(cnt))
-                            for yr, cnt in _season_counts.items()
-                        ]
-                        _peak_s = str(int(_season_counts.idxmax()))
-                        _trough_s = str(int(_season_counts.idxmin()))
-                        _max_c = int(_season_counts.max())
-                        _min_c = int(_season_counts.min())
-                        _swing = (
-                            (_max_c - _min_c) / _max_c * 100
-                            if _max_c > 0 else 0
+                    _seasons = [str(int(x)) for x in _sc.index]
+                    _counts  = list(_sc.values)
+
+                    _fig, _ax = _plt.subplots(figsize=(8, 3.5))
+                    _ax.bar(_seasons, _counts, color="#3B82F6",
+                            edgecolor="white", linewidth=0.5)
+                    _ax.set_xlabel("Season", fontsize=10)
+                    _ax.set_ylabel("Matches", fontsize=10)
+                    _ax.set_title(
+                        "IPL Matches per Season",
+                        fontsize=13, fontweight="bold"
+                    )
+                    _peak_yr = str(int(_sc.idxmax()))
+                    _ax.annotate(
+                        f"Peak: {_peak_yr}",
+                        xy=(_seasons.index(_peak_yr),
+                            _sc.max()),
+                        xytext=(0, 8),
+                        textcoords="offset points",
+                        ha="center", fontsize=9,
+                        color="#1e293b", fontweight="bold"
+                    )
+                    _plt.xticks(rotation=45, ha="right",
+                                fontsize=8)
+                    _ax.grid(axis="y", alpha=0.3,
+                             linestyle="--")
+                    _ax.spines["top"].set_visible(False)
+                    _ax.spines["right"].set_visible(False)
+                    _plt.tight_layout()
+
+                    import tempfile as _tmpfile
+                    _sp_path = os.path.join(
+                        _tmpfile.gettempdir(),
+                        "_sports_season_trend.png"
+                    )
+                    _fig.savefig(_sp_path, dpi=130,
+                                 bbox_inches="tight",
+                                 facecolor="white")
+                    _plt.close(_fig)
+
+                    if (os.path.exists(_sp_path) and
+                            os.path.getsize(_sp_path) > 0):
+                        elements.append(PageBreak())
+                        elements.append(Paragraph(
+                            "Matches per Season",
+                            self.S["Section"]
+                        ))
+                        elements.append(HRFlowable(
+                            width="100%", thickness=1,
+                            color=colors.HexColor(C.RULE_LIGHT)
+                        ))
+                        elements.append(Spacer(1, 10))
+                        elements.append(
+                            RLImage(_sp_path, width=480, height=200)
                         )
-                        _sp_chart = self._chart_monthly_revenue(
-                            _sport_monthly_data,
-                            peak_month=_peak_s,
-                            trough_month=_trough_s,
-                            pct_gap=_swing,
-                        )
-                        if (_sp_chart and
-                                os.path.exists(_sp_chart) and
-                                os.path.getsize(_sp_chart) > 0):
-                            elements.append(PageBreak())
-                            elements.append(Paragraph(
-                                "Matches per Season",
-                                self.S["Section"]
-                            ))
-                            elements.append(HRFlowable(
-                                width="100%", thickness=1,
-                                color=colors.HexColor(C.RULE_LIGHT)
-                            ))
-                            elements.append(Spacer(1, 10))
-                            elements.append(
-                                RLImage(_sp_chart, width=480, height=210)
-                            )
-                            elements.append(Spacer(1, 6))
-                            elements.append(Paragraph(
-                                f"Match volume per season — "
-                                f"peak: {_peak_s}, "
-                                f"lowest: {_trough_s}.",
-                                self.S["Insight"]
-                            ))
-                            elements.append(Spacer(1, 16))
-                            print(f"[SPORTS] Season trend chart added")
-                        else:
-                            print(f"[SPORTS] Chart failed: {_sp_chart}")
+                        elements.append(Spacer(1, 6))
+                        elements.append(Paragraph(
+                            f"Match volume per season — "
+                            f"peak: {_peak_yr} "
+                            f"({int(_sc.max())} matches).",
+                            self.S["Insight"]
+                        ))
+                        elements.append(Spacer(1, 16))
+                        print("[SPORTS] Season chart added ✓")
+                    else:
+                        print("[SPORTS] Chart save failed")
             except Exception as _spe:
-                log.warning(f"[sports trend chart] {_spe}")
+                print(f"[SPORTS CHART ERROR] {_spe}")
                 import traceback
                 traceback.print_exc()
         # ── End Sports trend chart ────────────────────────────────────────
