@@ -7844,6 +7844,21 @@ class SmartChartRecommender:
                 print(f"[VIZ] cat overridden → {_cat_override}")
         # ── End ColumnMap override ────────────────────────────────────────
 
+        def _sanitize_id(raw: str) -> str:
+            """Make a string safe for use as a CSS selector / chart ID."""
+            import re as _re
+            clean = (str(raw)
+                     .replace("\n", "_").replace("\r", "_")
+                     .replace(",", "_").replace(" ", "_")
+                     .replace("/", "_").replace("\\", "_")
+                     .replace(".", "_").replace("(", "_")
+                     .replace(")", "_").replace("[", "_")
+                     .replace("]", "_").replace("'", "_")
+                     .replace('"', "_").replace("#", "_")
+                     .replace("%", "_"))
+            clean = _re.sub(r'_+', '_', clean).strip('_')
+            return clean or "col"
+
         charts = []
         chart_ids_used: set[str] = set()
 
@@ -8487,20 +8502,22 @@ class SmartChartRecommender:
                         print(f"[CHART SUPPRESSED] Volume by {cat} — all values flat")
                     else:
                         colors = ["#6B5CE7" if i == 0 else "#CBD5E1" for i in range(len(counts))]
+                        _cat_clean = str(cat).replace("\n", " ").replace(",", "")
                         fig = px.bar(
                             counts, x=cat, y="count",
-                            title=f"Records per {cat}",
+                            title=f"Records per {_cat_clean}",
                             text_auto=True
                         )
                         fig.update_traces(marker_color=colors)
                         fig.update_layout(template="plotly_dark",
                                           coloraxis_showscale=False, showlegend=False,
                                           yaxis_title="Records")
-                        add("count_by_cat", {
-                            "chart_id": "count_by_cat",
+                        _cid_cat = f"count_by_{_sanitize_id(cat)}"
+                        add(_cid_cat, {
+                            "chart_id": _cid_cat,
                             "chart_type": "bar",
-                            "title": f"Records per {cat}",
-                            "description": f"Number of records in each {cat}",
+                            "title": f"Records per {_cat_clean}",
+                            "description": f"Number of records in each {_cat_clean}",
                             "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                             "columns_used": [cat],
                             "priority_score": 70,
@@ -8679,13 +8696,19 @@ class SmartChartRecommender:
                     )
                     fig.update_layout(template="plotly_dark")
                     
-                    chart_id = f"count_by_{cat_col.lower().replace(' ', '_')}"
+                    import re as _re_fb
+                    _cat_col_safe = (_re_fb.sub(r'_+', '_',
+                        str(cat_col).lower()
+                        .replace('\n', '_').replace(',', '_')
+                        .replace(' ', '_')).strip('_'))
+                    _cat_col_clean = str(cat_col).replace("\n", " ").replace(",", "")
+                    chart_id = f"count_by_{_cat_col_safe}"
                     if chart_id not in chart_ids_used:
                         charts.append({
                             "chart_id": chart_id,
                             "chart_type": "bar",
-                            "title": f"Distribution by {cat_col}",
-                            "description": f"Count of records by {cat_col}",
+                            "title": f"Distribution by {_cat_col_clean}",
+                            "description": f"Count of records by {_cat_col_clean}",
                             "plotly_json": json.loads(fig.to_json()),
                             "columns_used": [cat_col],
                             "priority_score": 70,
@@ -8738,14 +8761,23 @@ class SmartChartRecommender:
                     ),
                     yaxis=dict(autorange="reversed"),
                 )
-                cid = f"fallback_bar_{num}_{cat}"
+                import re as _re_fbb
+                def _sid(s):
+                    c = _re_fbb.sub(r'_+', '_',
+                        str(s).lower().replace('\n','_').replace('\r','_')
+                        .replace(',',' ').replace(' ','_').replace('/','_')
+                        .replace('\\','_').replace('.','_')).strip('_')
+                    return c or "col"
+                _num_clean = str(num).replace("\n", " ").replace(",", "")
+                _cat_clean_fb = str(cat).replace("\n", " ").replace(",", "")
+                cid = f"fallback_bar_{_sid(num)}_{_sid(cat)}"
                 if cid not in chart_ids_used:
                     chart_ids_used.add(cid)
                     charts.append({
                         "chart_id": cid,
                         "chart_type": "bar",
-                        "title": f"{num} by {cat}",
-                        "description": f"Median {num} comparison (robust to outliers)",
+                        "title": f"{_num_clean} by {_cat_clean_fb}",
+                        "description": f"Median {_num_clean} comparison (robust to outliers)",
                         "plotly_json": json.loads(
                             fig.update_layout(**CHART_LAYOUT_BASE).to_json()
                         ),
