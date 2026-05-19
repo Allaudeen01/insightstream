@@ -3196,9 +3196,20 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 def _find_h(candidates):
                     for name in candidates:
                         for col in _pdf_h.columns:
-                            if name in col.lower().replace(" ", "_"):
+                            col_clean = (col.lower()
+                                           .replace("\n", "")
+                                           .replace(",", "")
+                                           .replace(" ", "_"))
+                            if name in col_clean:
                                 return col
                     return None
+
+                def _to_num_h(series):
+                    if series.dtype == object:
+                        return (series.astype(str)
+                                      .str.replace(",", "", regex=False)
+                                      .pipe(pd.to_numeric, errors="coerce"))
+                    return pd.to_numeric(series, errors="coerce")
 
                 _conf_col  = _find_h(["confirmed", "cases", "total_cases"])
                 _death_col = _find_h(["deaths", "death", "fatalities"])
@@ -3207,15 +3218,15 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 health_kpis = {"Total Records": f"{len(_pdf_h):,}"}
                 if _conf_col:
                     health_kpis["Total Cases"] = (
-                        f"{int(_pdf_h[_conf_col].sum()):,}"
+                        f"{int(_to_num_h(_pdf_h[_conf_col]).sum()):,}"
                     )
                 if _death_col:
                     health_kpis["Total Deaths"] = (
-                        f"{int(_pdf_h[_death_col].sum()):,}"
+                        f"{int(_to_num_h(_pdf_h[_death_col]).sum()):,}"
                     )
                 if _rec_col:
                     health_kpis["Total Recovered"] = (
-                        f"{int(_pdf_h[_rec_col].sum()):,}"
+                        f"{int(_to_num_h(_pdf_h[_rec_col]).sum()):,}"
                     )
                 kpis = health_kpis
                 print(f"[HEALTH KPIs] {kpis}")

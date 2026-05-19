@@ -1851,8 +1851,9 @@ class BusinessRuleEngine:
                 log.info(f"[sports] Generated {len(results)} insights")
 
         _has_health = any(
-            any(k in c.lower() for k in
-                ["confirmed", "cases", "deaths", "recovered"])
+            any(k in c.lower().replace("\n", "").replace(",", "")
+                for k in ["confirmed", "cases", "deaths",
+                          "recovered", "fatalities"])
             for c in df.columns
         )
         if _has_health:
@@ -4541,11 +4542,28 @@ class BusinessRuleEngine:
         insights = []
 
         def _find_col(candidates):
+            """Find column — handles newlines and spaces in names."""
             for name in candidates:
                 for col in df.columns:
-                    if name in col.lower().replace(" ", "_"):
+                    col_clean = (col.lower()
+                                   .replace("\n", "")
+                                   .replace(" ", "_")
+                                   .replace(",", ""))
+                    if name.replace(" ", "_") in col_clean:
                         return col
             return None
+
+        def _to_numeric(series):
+            """Convert comma-formatted strings to numbers."""
+            try:
+                if series.dtype == object:
+                    return (series.astype(str)
+                                  .str.replace(",", "", regex=False)
+                                  .str.replace(" ", "", regex=False)
+                                  .pipe(pd.to_numeric, errors="coerce"))
+                return pd.to_numeric(series, errors="coerce")
+            except Exception:
+                return series
 
         confirmed_col = _find_col([
             "confirmed", "cases", "total_cases",
@@ -4581,12 +4599,12 @@ class BusinessRuleEngine:
             # 1. Overall scale insight
             if confirmed_col:
                 try:
-                    total_cases = pdf[confirmed_col].sum()
-                    avg_cases   = pdf[confirmed_col].mean()
+                    total_cases = _to_numeric(pdf[confirmed_col]).sum()
+                    avg_cases   = _to_numeric(pdf[confirmed_col]).mean()
 
                     _death_rate_str = ""
                     if deaths_col:
-                        total_deaths = pdf[deaths_col].sum()
+                        total_deaths = _to_numeric(pdf[deaths_col]).sum()
                         death_rate   = (
                             total_deaths / total_cases * 100
                             if total_cases > 0 else 0
@@ -4597,7 +4615,7 @@ class BusinessRuleEngine:
 
                     _rec_rate_str = ""
                     if recovered_col:
-                        total_recovered = pdf[recovered_col].sum()
+                        total_recovered = _to_numeric(pdf[recovered_col]).sum()
                         rec_rate = (
                             total_recovered / total_cases * 100
                             if total_cases > 0 else 0
@@ -4646,8 +4664,8 @@ class BusinessRuleEngine:
             # 2. Death rate analysis
             if deaths_col and confirmed_col:
                 try:
-                    total_deaths  = int(pdf[deaths_col].sum())
-                    total_cases   = int(pdf[confirmed_col].sum())
+                    total_deaths  = int(_to_numeric(pdf[deaths_col]).sum())
+                    total_cases   = int(_to_numeric(pdf[confirmed_col]).sum())
                     death_rate    = (
                         total_deaths / total_cases * 100
                         if total_cases > 0 else 0
@@ -4697,14 +4715,14 @@ class BusinessRuleEngine:
             # 3. Recovery analysis
             if recovered_col and confirmed_col:
                 try:
-                    total_recovered = int(pdf[recovered_col].sum())
-                    total_cases     = int(pdf[confirmed_col].sum())
+                    total_recovered = int(_to_numeric(pdf[recovered_col]).sum())
+                    total_cases     = int(_to_numeric(pdf[confirmed_col]).sum())
                     rec_rate = (
                         total_recovered / total_cases * 100
                         if total_cases > 0 else 0
                     )
                     active_cases = (
-                        int(pdf[active_col].sum())
+                        int(_to_numeric(pdf[active_col]).sum())
                         if active_col else None
                     )
 
@@ -4755,8 +4773,9 @@ class BusinessRuleEngine:
             # 4. Country/region comparison
             if country_col and confirmed_col:
                 try:
+                    pdf["_cases_numeric"] = _to_numeric(pdf[confirmed_col])
                     country_cases = (
-                        pdf.groupby(country_col)[confirmed_col]
+                        pdf.groupby(country_col)["_cases_numeric"]
                         .sum().sort_values(ascending=False)
                     )
                     top_country = country_cases.index[0]
@@ -4806,8 +4825,8 @@ class BusinessRuleEngine:
             # 5. Serious/critical cases
             if serious_col and confirmed_col:
                 try:
-                    total_serious = int(pdf[serious_col].sum())
-                    total_cases   = int(pdf[confirmed_col].sum())
+                    total_serious = int(_to_numeric(pdf[serious_col]).sum())
+                    total_cases   = int(_to_numeric(pdf[confirmed_col]).sum())
                     serious_rate  = (
                         total_serious / total_cases * 100
                         if total_cases > 0 else 0
