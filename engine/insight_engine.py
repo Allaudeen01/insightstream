@@ -7791,6 +7791,59 @@ class SmartChartRecommender:
                         pass
         # ── End preprocessing ─────────────────────────────────────────
 
+        # ── Override profile fields with post-preprocessing numeric cols ──
+        _post_numeric_cols = [
+            c for c in pdf.select_dtypes(include=["number"]).columns
+            if not any(k in str(c).lower()
+                       for k in ["#", "index", "row", "id", "rank",
+                                  "unnamed", "1m", "per_"])
+        ]
+        print(f"[VIZ] Numeric cols after preprocess: {_post_numeric_cols}")
+
+        # Rebuild num_cols to include any newly converted columns
+        _orig_num_cols = [c for c in profile.numericals
+                          if c not in profile.identifiers]
+        num_cols_pre = list(dict.fromkeys(
+            _orig_num_cols + [c for c in _post_numeric_cols
+                               if c not in _orig_num_cols]
+        ))
+
+        # Find best price/metric col if profile has none
+        _NUMERIC_PRIORITY = [
+            "cases", "confirmed", "sales", "revenue",
+            "deaths", "amount", "total", "value"
+        ]
+        _best_num = profile.price_col or profile.revenue_col
+        if not _best_num:
+            for _kw in _NUMERIC_PRIORITY:
+                _match = next(
+                    (c for c in _post_numeric_cols
+                     if _kw in str(c).lower().replace("\n", "")),
+                    None
+                )
+                if _match:
+                    _best_num = _match
+                    break
+            if not _best_num and _post_numeric_cols:
+                _best_num = _post_numeric_cols[0]
+            if _best_num:
+                print(f"[VIZ] price_col overridden → {_best_num}")
+
+        # Find best categorical col if profile has none
+        _cat_override = profile.category_col
+        if not _cat_override:
+            _geo_cols = [
+                c for c in pdf.columns
+                if any(k in str(c).lower().replace("\n", "")
+                       for k in ["country", "region", "state",
+                                  "city", "province", "location"])
+                and pdf[c].nunique() >= 2
+            ]
+            if _geo_cols:
+                _cat_override = _geo_cols[0]
+                print(f"[VIZ] cat overridden → {_cat_override}")
+        # ── End ColumnMap override ────────────────────────────────────────
+
         charts = []
         chart_ids_used: set[str] = set()
 
@@ -7819,9 +7872,9 @@ class SmartChartRecommender:
                 chart_ids_used.add(chart_id)
                 charts.append(spec)
 
-        cat  = profile.category_col
+        cat  = _cat_override or profile.category_col
         geo_col = profile.geographic_col
-        num_cols  = [c for c in profile.numericals if c not in profile.identifiers]
+        num_cols  = num_cols_pre
         date_col  = profile.date_col
         ret_col   = profile.return_col
         del_col   = profile.delivery_days_col
@@ -7829,7 +7882,7 @@ class SmartChartRecommender:
         # Price col   = unit price column (Unit Price, Price, etc.)
         # Rule: if revenue_col exists, always use it directly — never multiply by qty
         revenue_col_direct = profile.revenue_col   # e.g. "Sales Amount"
-        price_col          = profile.price_col or profile.revenue_col
+        price_col          = _best_num or profile.price_col or profile.revenue_col
         qty_col            = profile.qty_col
 
         # The key guard: is our "price_col" already a revenue/sales/amount column?
