@@ -3076,14 +3076,25 @@ class UnifiedReportGenerator(PDFReportGenerator):
                           template: str = "modern",
                           session_id: str = "default",
                           df: Optional[pd.DataFrame | pl.DataFrame] = None,
-                          domain_id: str = "general") -> str:
+                          domain_id: str = "general",
+                          currency_override: Optional[str] = None) -> str:
         """Construct a structured multi-page PDF with domain-aware visuals and narratives."""
         self._current_domain_id = domain_id  # Store for nested use
         if df is not None and hasattr(df, "to_pandas"):
             df = df.to_pandas()
 
-        self._currency_symbol = _detect_currency_symbol(df) if df is not None else "₹"
-        print(f"[CURRENCY] Detected symbol: {self._currency_symbol}")
+        # Check for currency override first (from session or user selection)
+        if currency_override and currency_override != "auto":
+            _CURRENCY_MAP = {
+                "INR": "₹", "USD": "$", "GBP": "£",
+                "EUR": "€", "AED": "AED", "SGD": "S$",
+                "JPY": "¥"
+            }
+            self._currency_symbol = _CURRENCY_MAP.get(currency_override, "₹")
+            print(f"[CURRENCY] Using override: {currency_override} → {self._currency_symbol}")
+        else:
+            self._currency_symbol = _detect_currency_symbol(df) if df is not None else "₹"
+            print(f"[CURRENCY] Detected symbol: {self._currency_symbol}")
 
         self.config = TEMPLATE_CONFIGS.get(template, TEMPLATE_CONFIGS["modern"])
         self._setup_styles()
