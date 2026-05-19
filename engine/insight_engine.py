@@ -3435,7 +3435,7 @@ class BusinessRuleEngine:
             if not winner_col:
                 return []
 
-            # 1. Team win rate analysis
+            # 1. Team win rate analysis — wins + rate side by side
             if team1_col and team2_col:
                 all_teams = pd.concat([
                     pdf[team1_col],
@@ -3443,56 +3443,94 @@ class BusinessRuleEngine:
                 ]).dropna().unique().tolist()
 
                 win_counts = pdf[winner_col].value_counts()
-                win_counts = win_counts[
-                    win_counts.index.isin(all_teams)
-                ]
+                win_counts = win_counts[win_counts.index.isin(all_teams)]
 
                 if len(win_counts) >= 2:
-                    top_team    = win_counts.index[0]
-                    top_wins    = int(win_counts.iloc[0])
-                    top_matches = int(
-                        (pdf[team1_col] == top_team).sum() +
-                        (pdf[team2_col] == top_team).sum()
-                    )
-                    top_rate = (top_wins / top_matches * 100
-                                if top_matches > 0 else 0)
+                    # Per-team stats: matches played and win rate
+                    _team_stats = []
+                    for _t in win_counts.index:
+                        _played = int(
+                            (pdf[team1_col] == _t).sum() +
+                            (pdf[team2_col] == _t).sum()
+                        )
+                        _wins = int(win_counts[_t])
+                        _rate = _wins / _played * 100 if _played > 0 else 0
+                        _team_stats.append({
+                            "team": _t,
+                            "wins": _wins,
+                            "played": _played,
+                            "rate": _rate,
+                        })
 
-                    worst_team  = win_counts.index[-1]
-                    worst_wins  = int(win_counts.iloc[-1])
+                    # Sort by wins for headline; by rate for "most consistent"
+                    _by_wins = sorted(
+                        _team_stats, key=lambda x: x["wins"], reverse=True
+                    )
+                    _by_rate = sorted(
+                        [s for s in _team_stats if s["played"] >= 10],
+                        key=lambda x: x["rate"], reverse=True
+                    )
+
+                    top = _by_wins[0]
+                    worst = _by_wins[-1]
+                    consistent = _by_rate[0] if _by_rate else top
+
+                    _top5_wins_str = ", ".join(
+                        f"{s['team']} ({s['wins']} W, {s['rate']:.0f}%)"
+                        for s in _by_wins[:5]
+                    )
+
+                    _consistent_note = (
+                        f" {consistent['team']} has the highest win rate "
+                        f"among active teams ({consistent['rate']:.0f}% "
+                        f"from {consistent['played']} matches)."
+                        if consistent["team"] != top["team"] else ""
+                    )
 
                     insights.append(BusinessInsight(
                         title=(
-                            f"Dominant Team: {top_team} "
-                            f"({top_wins} wins, {top_rate:.0f}% rate)"
+                            f"Dominant Team: {top['team']} "
+                            f"({top['wins']} wins, {top['rate']:.0f}% rate)"
                         ),
                         description=(
-                            f"{top_team} leads with {top_wins} wins "
-                            f"from {top_matches} matches "
-                            f"({top_rate:.0f}% win rate). "
-                            f"{worst_team} has the fewest wins "
-                            f"({worst_wins}). "
-                            f"Top 5 teams by wins: "
-                            f"{', '.join(f'{t} ({n})' for t, n in win_counts.head(5).items())}."
+                            f"{top['team']} leads with {top['wins']} wins "
+                            f"from {top['played']} matches "
+                            f"({top['rate']:.0f}% win rate). "
+                            f"{worst['team']} has the fewest wins "
+                            f"({worst['wins']} from {worst['played']} "
+                            f"matches, {worst['rate']:.0f}% rate)."
+                            f"{_consistent_note} "
+                            f"Top 5 by wins: {_top5_wins_str}."
                         ),
                         why_it_matters=(
                             "Team performance distribution reveals "
                             "competitive balance and dominant franchises."
                         ),
                         evidence=(
-                            f"Leader: {top_team} {top_wins} wins | "
-                            f"Bottom: {worst_team} {worst_wins} wins"
+                            f"Leader: {top['team']} {top['wins']} W "
+                            f"({top['rate']:.0f}%) | "
+                            f"Bottom: {worst['team']} {worst['wins']} W "
+                            f"({worst['rate']:.0f}%)"
                         ),
                         impact="🔴 Critical",
                         recommendation=(
-                            f"Analyse {top_team}'s success factors — "
+                            f"Analyse {top['team']}'s success factors — "
                             f"squad depth, home advantage, or tactical "
-                            f"patterns. Study {worst_team}'s losses for "
+                            f"patterns. Study {worst['team']}'s losses for "
                             f"correctable patterns."
                         ),
                         rule_type="sports_team_performance",
                         score=9.0,
                         chart_data={
-                            "win_counts": win_counts.head(10).to_dict()
+                            "win_counts": win_counts.head(10).to_dict(),
+                            "team_stats": {
+                                s["team"]: {
+                                    "wins": s["wins"],
+                                    "played": s["played"],
+                                    "rate": round(s["rate"], 1),
+                                }
+                                for s in _by_wins[:10]
+                            },
                         },
                     ))
 
@@ -3542,6 +3580,68 @@ class BusinessRuleEngine:
                     ))
                 except Exception as _te:
                     log.warning(f"[sports_toss] {_te}")
+
+            # 2b. Result type breakdown — runs vs wickets
+            runs_col    = _find_col(["win_by_runs", "runs_margin", "run_margin"])
+            wickets_col = _find_col(["win_by_wickets", "wickets_margin", "wicket_margin"])
+            if runs_col and wickets_col:
+                try:
+                    _won_runs = int((pdf[runs_col] > 0).sum())
+                    _won_wkts = int((pdf[wickets_col] > 0).sum())
+                    _total_result = _won_runs + _won_wkts
+                    if _total_result > 0:
+                        _runs_pct  = _won_runs / _total_result * 100
+                        _wkts_pct  = _won_wkts / _total_result * 100
+                        _avg_runs  = pdf.loc[pdf[runs_col] > 0, runs_col].mean()
+                        _avg_wkts  = pdf.loc[pdf[wickets_col] > 0, wickets_col].mean()
+                        _dominant  = "defending (batting first)" if _won_runs > _won_wkts else "chasing (batting second)"
+                        _edge_pct  = abs(_runs_pct - _wkts_pct)
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"Chasing vs Defending: "
+                                f"{'Defending' if _won_runs > _won_wkts else 'Chasing'} "
+                                f"wins {max(_runs_pct, _wkts_pct):.0f}% of matches"
+                            ),
+                            description=(
+                                f"Of {_total_result:,} completed matches, "
+                                f"{_won_runs:,} ({_runs_pct:.0f}%) were won by runs "
+                                f"(batting first) and {_won_wkts:,} ({_wkts_pct:.0f}%) "
+                                f"by wickets (chasing). "
+                                f"{_dominant.capitalize()} has the edge by "
+                                f"{_edge_pct:.0f} percentage points. "
+                                f"Average winning margin: {_avg_runs:.0f} runs or "
+                                f"{_avg_wkts:.1f} wickets."
+                            ),
+                            why_it_matters=(
+                                "Understanding whether the pitch favours batting "
+                                "first or chasing guides toss and strategy decisions."
+                            ),
+                            evidence=(
+                                f"Won by runs: {_won_runs} ({_runs_pct:.0f}%) | "
+                                f"Won by wickets: {_won_wkts} ({_wkts_pct:.0f}%)"
+                            ),
+                            impact=(
+                                "🔴 Critical" if _edge_pct > 15
+                                else "🟠 Important"
+                            ),
+                            recommendation=(
+                                f"Captains should {'bat first' if _won_runs > _won_wkts else 'chase'} "
+                                f"when winning the toss — {_dominant} is the "
+                                f"statistically stronger position on this dataset."
+                            ),
+                            rule_type="sports_result_type",
+                            score=7.5,
+                            chart_data={
+                                "won_by_runs": _won_runs,
+                                "won_by_wickets": _won_wkts,
+                                "runs_pct": round(_runs_pct, 1),
+                                "wickets_pct": round(_wkts_pct, 1),
+                                "avg_margin_runs": round(_avg_runs, 1),
+                                "avg_margin_wickets": round(_avg_wkts, 1),
+                            },
+                        ))
+                except Exception as _rte:
+                    log.warning(f"[sports_result_type] {_rte}")
 
             # 3. Season trend
             if season_col:
