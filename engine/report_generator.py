@@ -1160,8 +1160,8 @@ class InsightNarrator:
                 ),
                 "sports": (
                     f"Across {records} matches, "
-                    f"this {domain_label} analysis reveals performance patterns "
-                    f"and competitive trends."
+                    f"this tournament dataset reveals competitive "
+                    f"patterns and performance trends."
                 ),
                 "health": (
                     f"Across {records} records, "
@@ -3032,6 +3032,45 @@ class UnifiedReportGenerator(PDFReportGenerator):
             except Exception as _ek:
                 log.warning(f"[entertainment KPIs] {_ek}")
 
+        if domain_id == "sports" and df is not None:
+            try:
+                _pdf_s = df if isinstance(df, pd.DataFrame) \
+                         else df.to_pandas()
+                _winner_col = next((c for c in _pdf_s.columns
+                    if "winner" in c.lower()), None)
+                _season_col = next((c for c in _pdf_s.columns
+                    if c.lower() in ["season", "year", "edition"]),
+                    None)
+                _team1_col = next((c for c in _pdf_s.columns
+                    if "team1" in c.lower() or
+                       c.lower() == "home_team"), None)
+                _team2_col = next((c for c in _pdf_s.columns
+                    if "team2" in c.lower() or
+                       c.lower() == "away_team"), None)
+
+                sports_kpis = {
+                    "Total Matches": f"{len(_pdf_s):,}"
+                }
+                if _season_col:
+                    sports_kpis["Seasons"] = str(
+                        _pdf_s[_season_col].nunique()
+                    )
+                if _team1_col and _team2_col:
+                    n_teams = pd.concat([
+                        _pdf_s[_team1_col],
+                        _pdf_s[_team2_col]
+                    ]).nunique()
+                    sports_kpis["Teams"] = str(n_teams)
+                if _winner_col:
+                    top_team = _pdf_s[_winner_col]\
+                        .value_counts().index[0]
+                    sports_kpis["Most Wins"] = str(top_team)
+
+                kpis = sports_kpis
+                print(f"[SPORTS KPIs] {kpis}")
+            except Exception as _sk:
+                log.warning(f"[sports KPIs] {_sk}")
+
         if kpis:
             elements.append(Paragraph("Key Performance Indicators", self.S["ChartTitle"]))
             elements.append(self._kpi_table(kpis))
@@ -3242,6 +3281,16 @@ class UnifiedReportGenerator(PDFReportGenerator):
                             .replace("strong top-line performance but structural imbalances",
                                      "a diverse catalogue with clear content patterns")
                             .replace("transactions totalling", "titles totalling"))
+
+                    if domain_id == "sports":
+                        description = (description
+                            .replace("of total revenue", "of total matches")
+                            .replace("business operation", "tournament")
+                            .replace(
+                                "strong top-line performance but structural "
+                                "imbalances that require strategic attention",
+                                "competitive patterns worth analysing")
+                            .replace("transactions totalling", "matches totalling"))
 
                     if domain_id == "hr":
                         title = (title

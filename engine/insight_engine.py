@@ -172,6 +172,40 @@ class DomainDetector:
             print(f"[DOMAIN] Entertainment detected (signals={entertainment_signals}, "
                   f"score={scores['entertainment']:.2f})")
 
+        # ── Sports Domain Detection ───────────────────────
+        sports_signals = 0
+        _cols_lower_s = [c.lower().replace(" ", "_")
+                         for c in df.columns]
+
+        # Team columns
+        _team_signals = ["team1", "team2", "home_team",
+                         "away_team", "team", "club", "side"]
+        if sum(1 for k in _team_signals
+               if any(k in c for c in _cols_lower_s)) >= 2:
+            sports_signals += 3
+
+        # Match result columns
+        _result_signals = ["winner", "result", "result_margin",
+                           "win_by_runs", "win_by_wickets",
+                           "score", "goals", "points"]
+        if any(k in _cols_lower_s for k in _result_signals):
+            sports_signals += 2
+
+        # Sports-specific columns
+        _sport_signals = ["venue", "toss_winner", "toss_decision",
+                          "player_of_match", "match_type",
+                          "season", "umpire", "innings",
+                          "wickets", "overs", "runs"]
+        if sum(1 for k in _sport_signals
+               if k in _cols_lower_s) >= 2:
+            sports_signals += 2
+
+        if sports_signals >= 4:
+            scores["sports"] = min(0.9, sports_signals * 0.15)
+            print(f"[DOMAIN] Sports detected "
+                  f"(signals={sports_signals}, "
+                  f"score={scores['sports']:.2f})")
+
         # Re-pick winner after tie-breaking adjustments
         best_domain = max(scores, key=scores.get)
         best_score  = scores[best_domain]
@@ -1769,6 +1803,18 @@ class BusinessRuleEngine:
                     all_insights.extend(results)
                     log.info(f"[content_library] Generated {len(results)} insights")
 
+        # Fire sports rule when team columns detected
+        _has_teams = any(
+            any(k in c.lower() for k in ["team1", "team2",
+                "home_team", "away_team"])
+            for c in df.columns
+        )
+        if _has_teams:
+            results = self._rule_sports_analysis(df, profile)
+            if results:
+                all_insights.extend(results)
+                log.info(f"[sports] Generated {len(results)} insights")
+
         # ── Tier 1.2: Enhanced Time-Series Analysis ───────────────────────
         _ts = TimeSeriesAnalyzer()
         _ts_insights = safe_rule_call(_ts.analyze, "time_series_analyzer", df, profile)
@@ -3317,6 +3363,283 @@ class BusinessRuleEngine:
 
         except Exception as e:
             log.warning(f"[content_library_analysis] Failed: {e}")
+
+        return insights
+
+    def _rule_sports_analysis(self, df, profile) -> list:
+        """Fires for cricket/football/sports match datasets."""
+        insights = []
+
+        def _find_col(candidates):
+            for name in candidates:
+                for col in df.columns:
+                    if col.lower().replace(" ", "_") == \
+                       name.replace(" ", "_"):
+                        return col
+                    if name in col.lower():
+                        return col
+            return None
+
+        winner_col = _find_col([
+            "winner", "match_winner", "result_winner"
+        ])
+        team1_col  = _find_col(["team1", "home_team", "team_1"])
+        team2_col  = _find_col(["team2", "away_team", "team_2"])
+        venue_col  = _find_col(["venue", "stadium", "ground",
+                                 "city", "location"])
+        season_col = _find_col(["season", "year", "edition"])
+        margin_col = _find_col(["result_margin", "margin",
+                                 "win_by_runs", "score_diff"])
+        toss_col   = _find_col(["toss_winner", "toss"])
+        pom_col    = _find_col(["player_of_match", "man_of_match",
+                                 "best_player", "mvp"])
+
+        if not winner_col:
+            return []
+
+        try:
+            pdf = df.to_pandas() if hasattr(df, "to_pandas") \
+                  else df
+            total = len(pdf)
+
+            # 1. Team win rate analysis
+            if team1_col and team2_col:
+                all_teams = pd.concat([
+                    pdf[team1_col],
+                    pdf[team2_col]
+                ]).dropna().unique().tolist()
+
+                win_counts = pdf[winner_col].value_counts()
+                win_counts = win_counts[
+                    win_counts.index.isin(all_teams)
+                ]
+
+                if len(win_counts) >= 2:
+                    top_team    = win_counts.index[0]
+                    top_wins    = int(win_counts.iloc[0])
+                    top_matches = int(
+                        (pdf[team1_col] == top_team).sum() +
+                        (pdf[team2_col] == top_team).sum()
+                    )
+                    top_rate = (top_wins / top_matches * 100
+                                if top_matches > 0 else 0)
+
+                    worst_team  = win_counts.index[-1]
+                    worst_wins  = int(win_counts.iloc[-1])
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Dominant Team: {top_team} "
+                            f"({top_wins} wins, {top_rate:.0f}% rate)"
+                        ),
+                        description=(
+                            f"{top_team} leads with {top_wins} wins "
+                            f"from {top_matches} matches "
+                            f"({top_rate:.0f}% win rate). "
+                            f"{worst_team} has the fewest wins "
+                            f"({worst_wins}). "
+                            f"Top 5 teams by wins: "
+                            f"{', '.join(f'{t} ({n})' for t, n in win_counts.head(5).items())}."
+                        ),
+                        why_it_matters=(
+                            "Team performance distribution reveals "
+                            "competitive balance and dominant franchises."
+                        ),
+                        evidence=(
+                            f"Leader: {top_team} {top_wins} wins | "
+                            f"Bottom: {worst_team} {worst_wins} wins"
+                        ),
+                        impact="🔴 Critical",
+                        recommendation=(
+                            f"Analyse {top_team}'s success factors — "
+                            f"squad depth, home advantage, or tactical "
+                            f"patterns. Study {worst_team}'s losses for "
+                            f"correctable patterns."
+                        ),
+                        rule_type="sports_team_performance",
+                        score=9.0,
+                        chart_data={
+                            "win_counts": win_counts.head(10).to_dict()
+                        },
+                    ))
+
+            # 2. Toss impact analysis
+            if toss_col and winner_col:
+                try:
+                    toss_won_match = (
+                        pdf[toss_col] == pdf[winner_col]
+                    ).sum()
+                    valid = pdf[[toss_col, winner_col]]\
+                        .dropna().__len__()
+                    toss_win_rate = (toss_won_match / valid * 100
+                                     if valid > 0 else 0)
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Toss Advantage: "
+                            f"{toss_win_rate:.0f}% of Toss Winners "
+                            f"Win the Match"
+                        ),
+                        description=(
+                            f"Teams that win the toss go on to win "
+                            f"the match {toss_win_rate:.0f}% of the "
+                            f"time ({toss_won_match:,} out of "
+                            f"{valid:,} matches). "
+                            f"{'Toss has significant impact — strategic decision-making at toss is critical.' if toss_win_rate > 55 else 'Toss has minimal impact — match outcome depends more on performance than toss.'}"
+                        ),
+                        why_it_matters=(
+                            "Toss win rate reveals whether conditions "
+                            "favour batting/fielding first and informs "
+                            "captain decision-making."
+                        ),
+                        evidence=(
+                            f"Toss winner wins match: "
+                            f"{toss_win_rate:.0f}% ({toss_won_match}/{valid})"
+                        ),
+                        impact=(
+                            "🔴 Critical" if toss_win_rate > 60
+                            else "🟠 Important"
+                        ),
+                        recommendation=(
+                            f"{'Prioritise winning the toss — it provides a decisive edge. Analyse pitch conditions before deciding to bat or field.' if toss_win_rate > 55 else 'Toss outcome is not a strong predictor — focus on team composition and match strategy.'}"
+                        ),
+                        rule_type="sports_toss_impact",
+                        score=7.5,
+                        chart_data={"toss_win_rate": round(toss_win_rate, 1)},
+                    ))
+                except Exception as _te:
+                    log.warning(f"[sports_toss] {_te}")
+
+            # 3. Season trend
+            if season_col:
+                try:
+                    season_counts = pdf[season_col].value_counts()\
+                        .sort_index()
+                    peak_season = season_counts.idxmax()
+                    peak_count  = int(season_counts.max())
+                    total_seasons = season_counts.nunique()
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Tournament Scale: "
+                            f"{total_seasons} Seasons, "
+                            f"Peak in {peak_season}"
+                        ),
+                        description=(
+                            f"Dataset spans {total_seasons} seasons "
+                            f"with {total:,} matches total "
+                            f"({total/total_seasons:.0f} matches/season avg). "
+                            f"Most active season: {peak_season} "
+                            f"({peak_count} matches). "
+                            f"Season range: "
+                            f"{int(season_counts.index.min())}–"
+                            f"{int(season_counts.index.max())}."
+                        ),
+                        why_it_matters=(
+                            "Tournament growth over seasons reflects "
+                            "league expansion and commercial growth."
+                        ),
+                        evidence=(
+                            f"{total_seasons} seasons | "
+                            f"Peak: {peak_season} ({peak_count} matches)"
+                        ),
+                        impact="🟠 Important",
+                        recommendation=(
+                            f"Track season-over-season match volume "
+                            f"as a proxy for league health and expansion."
+                        ),
+                        rule_type="sports_season_trend",
+                        score=6.5,
+                        chart_data={
+                            "season_counts": season_counts.to_dict(),
+                            "peak_season": str(peak_season),
+                        },
+                    ))
+                except Exception as _se:
+                    log.warning(f"[sports_season] {_se}")
+
+            # 4. Venue analysis
+            if venue_col and winner_col:
+                try:
+                    venue_counts = pdf[venue_col].value_counts()
+                    top_venue = venue_counts.index[0]
+                    top_venue_count = int(venue_counts.iloc[0])
+                    top_venue_pct = top_venue_count / total * 100
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Top Venue: {top_venue} "
+                            f"({top_venue_count} matches, "
+                            f"{top_venue_pct:.0f}%)"
+                        ),
+                        description=(
+                            f"{top_venue} hosted the most matches "
+                            f"({top_venue_count}, {top_venue_pct:.0f}% "
+                            f"of all games). "
+                            f"Top 5 venues: "
+                            f"{', '.join(f'{v} ({n})' for v, n in venue_counts.head(5).items())}. "
+                            f"Venue concentration affects home "
+                            f"advantage and pitch conditions."
+                        ),
+                        why_it_matters=(
+                            "Venue frequency and home advantage "
+                            "significantly influence match outcomes."
+                        ),
+                        evidence=(
+                            f"Top venue: {top_venue} "
+                            f"({top_venue_pct:.0f}% of matches)"
+                        ),
+                        impact="🟠 Important",
+                        recommendation=(
+                            f"Analyse {top_venue} win rates by team "
+                            f"to identify home advantage patterns."
+                        ),
+                        rule_type="sports_venue_analysis",
+                        score=6.0,
+                        chart_data={
+                            "venue_counts": venue_counts.head(10).to_dict()
+                        },
+                    ))
+                except Exception as _ve:
+                    log.warning(f"[sports_venue] {_ve}")
+
+            # 5. Player of Match frequency
+            if pom_col:
+                try:
+                    pom_counts = pdf[pom_col].value_counts().head(5)
+                    top_player = pom_counts.index[0]
+                    top_awards = int(pom_counts.iloc[0])
+
+                    insights.append(BusinessInsight(
+                        title=(
+                            f"Most Valuable Player: "
+                            f"{top_player} ({top_awards} awards)"
+                        ),
+                        description=(
+                            f"{top_player} won Player of the Match "
+                            f"{top_awards} times. "
+                            f"Top 5: "
+                            f"{', '.join(f'{p} ({n})' for p, n in pom_counts.items())}."
+                        ),
+                        why_it_matters=(
+                            "Player of Match frequency identifies "
+                            "match-winners and high-impact performers."
+                        ),
+                        evidence=f"Top: {top_player} ({top_awards} awards)",
+                        impact="🟠 Important",
+                        recommendation=(
+                            f"Track {top_player}'s match conditions "
+                            f"to understand what triggers peak performance."
+                        ),
+                        rule_type="sports_player_performance",
+                        score=6.0,
+                        chart_data={"pom_counts": pom_counts.to_dict()},
+                    ))
+                except Exception as _pe:
+                    log.warning(f"[sports_player] {_pe}")
+
+        except Exception as e:
+            log.warning(f"[sports_analysis] Failed: {e}")
 
         return insights
 
