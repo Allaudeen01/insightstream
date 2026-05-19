@@ -2031,6 +2031,19 @@ class PDFReportGenerator:
                 prose = prose.replace(
                     "transactions totalling", "matches across"
                 )
+                prose = prose.replace(
+                    "Revenue shows clear seasonality",
+                    "Match volume shows seasonal variation"
+                ).replace(
+                    "peak month", "peak season"
+                ).replace(
+                    "demands proactive inventory and cash-flow planning",
+                    "reflects normal tournament scheduling cycles"
+                ).replace(
+                    "is the peak month", "had the most matches"
+                ).replace(
+                    "is the trough", "had the fewest matches"
+                )
                 prose = _re.sub(r'\s+', ' ', prose).strip()
             if prose:
                 narrative_style = ParagraphStyle(
@@ -2389,6 +2402,24 @@ class PDFReportGenerator:
                     "impact": "Important",
                 },
             ])
+
+        if domain_id == "sports":
+            for rec in recommendations:
+                if isinstance(rec, dict):
+                    rec["action"] = rec.get("action", "").replace(
+                        "Pre-build inventory ahead of",
+                        "Peak match volume in"
+                    ).replace(
+                        "historically your strongest month",
+                        "historically the busiest season"
+                    ).replace(
+                        "Investigate the", "Analyse the"
+                    ).replace(
+                        "dip: run a post-mortem on promotions, "
+                        "stockouts, and demand signals",
+                        "dip: review scheduling, weather delays, "
+                        "and format changes"
+                    )
 
         # Nothing to show after all fallbacks — skip the page entirely
         if not recommendations:
@@ -3390,6 +3421,40 @@ class UnifiedReportGenerator(PDFReportGenerator):
                                 "imbalances that require strategic attention",
                                 "competitive patterns worth analysing")
                             .replace("transactions totalling", "matches totalling"))
+                        import re as _re_s
+                        description = _re_s.sub(r'\s+', ' ', description
+                            .replace(
+                                "Revenue follows a predictable seasonal pattern",
+                                "Match volume follows a seasonal pattern"
+                            ).replace(
+                                "Revenue is broadly flat outside the seasonal cycle",
+                                "Match count is broadly stable across seasons"
+                            ).replace(
+                                "the primary source of cash flow risk",
+                                "reflecting league scheduling and expansion phases"
+                            ).replace(
+                                "If inventory and staffing aren't pre-positioned",
+                                "Understanding peak seasons helps with"
+                            ).replace(
+                                "you'll leave money on the table",
+                                "tournament planning and resource allocation"
+                            ).replace(
+                                "requires careful cash-flow management to avoid "
+                                "overstaffing or excess stock",
+                                "typically sees fewer matches — normal for "
+                                "tournament scheduling"
+                            ).replace(
+                                "Revenue is stable but not growing",
+                                "Match volume is stable across seasons"
+                            ).replace(
+                                "Growth levers are needed — new segments, "
+                                "pricing, or market expansion",
+                                "League expansion and franchise additions "
+                                "drive match volume growth"
+                            )).strip()
+                        title = (title
+                            .replace("Revenue Trend:", "Match Volume:")
+                            .replace("Flat", "Stable"))
 
                     if domain_id == "hr":
                         title = (title
@@ -3732,6 +3797,10 @@ class UnifiedReportGenerator(PDFReportGenerator):
         # ── End Entertainment trend chart ─────────────────────────────────
 
         # ── Monthly Revenue Trend chart (from temporal_peaks insight) ──────
+        # Skip revenue trend for sports — use Matches per Season instead
+        if domain_id == "sports":
+            temporal_insight = None
+            chart_path = None
         _TEMPORAL_RULES = {"temporal_peaks", "time_series", "temporal", "revenue_trend", "seasonality_pattern"}
         temporal_insight = next(
             (i for i in (insights or [])
@@ -3815,7 +3884,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 _last_chart_completed_pair = False
         
         # ✅ FALLBACK: Generate time series from raw data if temporal_insight produced no chart
-        if df is not None and len(df) > 0 and not (temporal_insight and chart_path and os.path.exists(chart_path)):
+        if domain_id != "sports" and df is not None and len(df) > 0 and not (temporal_insight and chart_path and os.path.exists(chart_path)):
             try:
                 import polars as pl
                 from datetime import datetime as _dt
