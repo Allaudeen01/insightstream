@@ -8339,38 +8339,73 @@ class SmartChartRecommender:
 
         # ── 7. Top N Categorical count (bar) ────────────────────────────────
         # Shows record COUNT per category, NOT the metric.
-        if cat:
+        def _is_truly_categorical(series, max_unique: int = 20) -> bool:
+            """True only if column is genuine text labels, not numbers stored as strings."""
+            import pandas as _pd_inner
+            if series.dtype in ["int64", "float64"]:
+                return False
             try:
-                counts = pdf[cat].value_counts().reset_index().head(10)
-                counts.columns = [cat, "count"]
-                
-                # Zero-variance suppression
-                if not is_chart_informative(counts["count"].tolist()):
-                    print(f"[CHART SUPPRESSED] Volume by {cat} — all values flat")
-                else:
-                    colors = ["#6B5CE7" if i == 0 else "#CBD5E1" for i in range(len(counts))]
-                    fig = px.bar(
-                        counts, x=cat, y="count",
-                        title=f"Records per {cat}",
-                        text_auto=True
-                    )
-                    fig.update_traces(marker_color=colors)
-                    fig.update_layout(template="plotly_dark",
-                                      coloraxis_showscale=False, showlegend=False,
-                                      yaxis_title="Records")
-                    add("count_by_cat", {
-                        "chart_id": "count_by_cat",
-                        "chart_type": "bar",
-                        "title": f"Records per {cat}",
-                        "description": f"Number of records in each {cat}",
-                        "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
-                        "columns_used": [cat],
-                        "priority_score": 70,
-                        "insight_reason": "Volume distribution by category",
-                        "interest_level": "recommended"
-                    })
+                cleaned = (series.dropna()
+                                 .astype(str)
+                                 .str.replace(",", "", regex=False)
+                                 .str.replace(" ", "", regex=False)
+                                 .str.strip())
+                numeric_count = _pd_inner.to_numeric(cleaned, errors="coerce").notna().sum()
+                if numeric_count / max(len(cleaned), 1) > 0.8:
+                    return False
             except Exception:
                 pass
+            if series.nunique() > max_unique:
+                return False
+            return True
+
+        _HEALTH_NUMERIC_COLS = [
+            "serious", "critical", "icu", "hospitalized",
+            "tests", "population", "cases/", "deaths/",
+            "/1m", "per_million", "serious,",
+        ]
+
+        if cat:
+            _col_lower = str(cat).lower().replace("\n", "")
+            _is_health_numeric = any(k in _col_lower for k in _HEALTH_NUMERIC_COLS)
+            _is_categorical = _is_truly_categorical(pdf[cat])
+
+            if _is_health_numeric:
+                print(f"[VIZ] Skipping health numeric column: {cat}")
+            elif not _is_categorical:
+                print(f"[VIZ] Skipping non-categorical: {cat}")
+            else:
+                try:
+                    counts = pdf[cat].value_counts().reset_index().head(10)
+                    counts.columns = [cat, "count"]
+
+                    # Zero-variance suppression
+                    if not is_chart_informative(counts["count"].tolist()):
+                        print(f"[CHART SUPPRESSED] Volume by {cat} — all values flat")
+                    else:
+                        colors = ["#6B5CE7" if i == 0 else "#CBD5E1" for i in range(len(counts))]
+                        fig = px.bar(
+                            counts, x=cat, y="count",
+                            title=f"Records per {cat}",
+                            text_auto=True
+                        )
+                        fig.update_traces(marker_color=colors)
+                        fig.update_layout(template="plotly_dark",
+                                          coloraxis_showscale=False, showlegend=False,
+                                          yaxis_title="Records")
+                        add("count_by_cat", {
+                            "chart_id": "count_by_cat",
+                            "chart_type": "bar",
+                            "title": f"Records per {cat}",
+                            "description": f"Number of records in each {cat}",
+                            "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                            "columns_used": [cat],
+                            "priority_score": 70,
+                            "insight_reason": "Volume distribution by category",
+                            "interest_level": "recommended"
+                        })
+                except Exception:
+                    pass
 
         # ── 8. Price distribution (histogram) ─────────────────────────────
         if price_col:
