@@ -2186,7 +2186,8 @@ class PDFReportGenerator:
             sentences = _re.split(r'(?<=[\.!?])\s+', desc.replace('\n\n', '. '))
             short_desc = ' '.join(sentences[:3])
 
-            if domain_id == "sports":
+            _d = getattr(self, '_current_domain_id', 'general')
+            if _d == "sports":
                 short_desc = short_desc.replace(
                     "Revenue follows a predictable seasonal pattern",
                     "Match volume follows a seasonal pattern"
@@ -3019,6 +3020,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                           df: Optional[pd.DataFrame | pl.DataFrame] = None,
                           domain_id: str = "general") -> str:
         """Construct a structured multi-page PDF with domain-aware visuals and narratives."""
+        self._current_domain_id = domain_id  # Store for nested use
         if df is not None and hasattr(df, "to_pandas"):
             df = df.to_pandas()
 
@@ -3871,7 +3873,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 pct_gap=_cd.get("pct_gap", 0),
             )
             # Sports uses Matches per Season instead — skip Monthly Revenue Trend
-            if domain_id != "sports" and chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
+            _cur_domain = getattr(self, '_current_domain_id', 'general')
+            if _cur_domain != "sports" and chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
                 chart_elements = []
                 chart_elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
                 chart_elements.append(HRFlowable(width="100%", thickness=1,
