@@ -7909,7 +7909,7 @@ class SmartChartRecommender:
             return any(k in cl for k in ["sales", "amount", "revenue", "income"])
 
         # ── 1. Revenue by Category (horizontal bar) ────────────────────────
-        if cat and price_col:
+        if cat and price_col and domain_id not in ["health"]:
             try:
                 # Guard: don't use an identifier column as price
                 if price_col in profile.identifiers:
@@ -8050,7 +8050,7 @@ class SmartChartRecommender:
                 pass
 
         # ── 2. Return Rate by Category (bar with reference line) ──────────
-        if cat and ret_col:
+        if cat and ret_col and domain_id not in ["health"]:
             try:
                 pdf_tmp = pdf.copy()
                 def _rrate(s):
@@ -8235,7 +8235,7 @@ class SmartChartRecommender:
                 pass
 
         # ── 6. Geographic Revenue (bar) ────────────────────────────────────
-        if geo_col and geo_col != cat and price_col:
+        if geo_col and geo_col != cat and price_col and domain_id not in ["health"]:
             try:
                 pdf_tmp = pdf.copy()
                 # Use human readable name instead of __rev__
@@ -8615,6 +8615,146 @@ class SmartChartRecommender:
         if len(charts) < 4 and num_cols and profile.categoricals:
             self._add_fallback_charts(pdf, profile, num_cols, charts,
                                       chart_ids_used, max_charts)
+
+        # ── 11. Health-domain specific charts ──────────────────────────────
+        if domain_id == "health":
+            try:
+                def _find_h_col(candidates):
+                    for name in candidates:
+                        for col in pdf.columns:
+                            col_clean = str(col).lower().replace("\n", "").replace(",", "").replace(" ", "_")
+                            if name.replace(" ", "_") in col_clean:
+                                return col
+                    return None
+
+                _confirmed_col = _find_h_col(["total_cases", "confirmed", "cases", "infected", "positive"])
+                _deaths_col    = _find_h_col(["total_deaths", "deaths", "fatalities", "deceased"])
+                _recovered_col = _find_h_col(["total_recovered", "recovered", "discharged", "cured"])
+                _active_col    = _find_h_col(["active_cases", "active", "current"])
+                _country_col   = _find_h_col(["country", "region", "state", "province", "location"])
+
+                # Chart A — Top 10 Countries/Regions by Confirmed Cases
+                if _country_col and _confirmed_col:
+                    try:
+                        _agg = (
+                            pdf.groupby(_country_col)[_confirmed_col]
+                            .sum()
+                            .reset_index()
+                            .sort_values(_confirmed_col, ascending=False)
+                            .head(10)
+                        )
+                        if len(_agg) >= 2 and is_chart_informative(_agg[_confirmed_col].tolist()):
+                            _agg = _agg.sort_values(_confirmed_col, ascending=True)
+                            _label_c = str(_confirmed_col).replace("\n", " ").replace(",", "")
+                            _label_r = str(_country_col).replace("\n", " ").replace(",", "")
+                            fig_a = px.bar(
+                                _agg,
+                                x=_confirmed_col,
+                                y=_country_col,
+                                orientation="h",
+                                title=f"Top 10 {_label_r}s by Confirmed Cases",
+                                text_auto=".2s",
+                                color_discrete_sequence=["#3B82F6"],
+                            )
+                            fig_a.update_layout(template="plotly_dark", yaxis_title=_label_r, xaxis_title="Confirmed Cases")
+                            add("health_cases_by_country", {
+                                "chart_id": "health_cases_by_country",
+                                "chart_type": "bar",
+                                "title": f"Top 10 {_label_r}s by Confirmed Cases",
+                                "description": f"Countries/regions with the highest confirmed case counts",
+                                "plotly_json": json.loads(fig_a.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                                "columns_used": [_country_col, _confirmed_col],
+                                "priority_score": 95,
+                                "insight_reason": "Case burden by geography",
+                                "interest_level": "high"
+                            })
+                    except Exception as _e:
+                        print(f"[health Chart A] failed: {_e}")
+
+                # Chart B — Top 10 Countries/Regions by Deaths
+                if _country_col and _deaths_col:
+                    try:
+                        _agg_d = (
+                            pdf.groupby(_country_col)[_deaths_col]
+                            .sum()
+                            .reset_index()
+                            .sort_values(_deaths_col, ascending=False)
+                            .head(10)
+                        )
+                        if len(_agg_d) >= 2 and is_chart_informative(_agg_d[_deaths_col].tolist()):
+                            _agg_d = _agg_d.sort_values(_deaths_col, ascending=True)
+                            _label_d = str(_deaths_col).replace("\n", " ").replace(",", "")
+                            _label_r2 = str(_country_col).replace("\n", " ").replace(",", "")
+                            fig_b = px.bar(
+                                _agg_d,
+                                x=_deaths_col,
+                                y=_country_col,
+                                orientation="h",
+                                title=f"Top 10 {_label_r2}s by Deaths",
+                                text_auto=".2s",
+                                color_discrete_sequence=["#EF4444"],
+                            )
+                            fig_b.update_layout(template="plotly_dark", yaxis_title=_label_r2, xaxis_title="Deaths")
+                            add("health_deaths_by_country", {
+                                "chart_id": "health_deaths_by_country",
+                                "chart_type": "bar",
+                                "title": f"Top 10 {_label_r2}s by Deaths",
+                                "description": f"Countries/regions with the highest death tolls",
+                                "plotly_json": json.loads(fig_b.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                                "columns_used": [_country_col, _deaths_col],
+                                "priority_score": 93,
+                                "insight_reason": "Mortality burden by geography",
+                                "interest_level": "high"
+                            })
+                    except Exception as _e:
+                        print(f"[health Chart B] failed: {_e}")
+
+                # Chart C — Global Case Outcome Summary (stacked bar)
+                if _confirmed_col and (_recovered_col or _deaths_col or _active_col):
+                    try:
+                        _outcome_data = {}
+                        if _recovered_col and _recovered_col in pdf.columns:
+                            _outcome_data["Recovered"] = float(pdf[_recovered_col].sum())
+                        if _deaths_col and _deaths_col in pdf.columns:
+                            _outcome_data["Deaths"] = float(pdf[_deaths_col].sum())
+                        if _active_col and _active_col in pdf.columns:
+                            _outcome_data["Active"] = float(pdf[_active_col].sum())
+                        if len(_outcome_data) >= 2 and is_chart_informative(list(_outcome_data.values())):
+                            import pandas as _pd_c
+                            _out_df = _pd_c.DataFrame({
+                                "Outcome": list(_outcome_data.keys()),
+                                "Count": list(_outcome_data.values()),
+                            })
+                            _color_map = {
+                                "Recovered": "#22C55E",
+                                "Deaths": "#EF4444",
+                                "Active": "#F59E0B",
+                            }
+                            fig_c = px.bar(
+                                _out_df,
+                                x="Outcome",
+                                y="Count",
+                                title="Global Case Outcome Summary",
+                                color="Outcome",
+                                color_discrete_map=_color_map,
+                                text_auto=".2s",
+                            )
+                            fig_c.update_layout(template="plotly_dark", showlegend=False)
+                            add("health_outcome_summary", {
+                                "chart_id": "health_outcome_summary",
+                                "chart_type": "bar",
+                                "title": "Global Case Outcome Summary",
+                                "description": "Breakdown of global cases into Recovered, Deaths, and Active",
+                                "plotly_json": json.loads(fig_c.update_layout(**CHART_LAYOUT_BASE).to_json()),
+                                "columns_used": [c for c in [_recovered_col, _deaths_col, _active_col] if c],
+                                "priority_score": 91,
+                                "insight_reason": "High-level outcome distribution across all cases",
+                                "interest_level": "high"
+                            })
+                    except Exception as _e:
+                        print(f"[health Chart C] failed: {_e}")
+            except Exception as _he:
+                print(f"[health charts] outer error: {_he}")
 
         charts.sort(key=lambda c: c.get("priority_score", 50), reverse=True)
         return charts[:max_charts]
