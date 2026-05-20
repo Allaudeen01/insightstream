@@ -19,8 +19,8 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-MODEL_NAME     = "gemini-1.5-flash-latest"
-FALLBACK_MODEL = "gemini-1.5-pro-latest"
+MODEL_NAME     = "gemini-2.5-flash"
+FALLBACK_MODEL = "gemini-2.0-flash-lite"
 MAX_RETRIES    = 3
 RETRY_DELAY    = 2  # seconds between retries
 
