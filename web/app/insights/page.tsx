@@ -91,6 +91,7 @@ export default function InsightsPage() {
     // Branding inputs (used by export)
     const [projectName, setProjectName] = useState("");
     const [reportTitle, setReportTitle] = useState("InsightStream analysis report");
+    const [sessionFilename, setSessionFilename] = useState("");
 
     // Export state
     const [pinnedCharts, setPinnedCharts] = useState<string[]>([]);
@@ -113,6 +114,7 @@ export default function InsightsPage() {
 
         const name = (cached?.filename || cached?.original_filename || String(sid)).split(".")[0];
         setProjectName(name);
+        setSessionFilename(cached?.filename || cached?.original_filename || "");
         fetchData(String(sid), cached && String(cached.session_id) === String(sid) ? cached : null);
     }, [router]);
 
@@ -492,7 +494,10 @@ export default function InsightsPage() {
                             {activeTab === "chat" && (
                                 data?.session_id ? (
                                     <div className="h-[600px]">
-                                        <ChatPanel sessionId={Number(data.session_id)} />
+                                        <ChatPanel
+                                            sessionId={Number(data.session_id)}
+                                            filename={sessionFilename || projectName || "your dataset"}
+                                        />
                                     </div>
                                 ) : (
                                     <div className="flex items-center justify-center h-64 text-zinc-400 text-sm">

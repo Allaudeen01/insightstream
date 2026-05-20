@@ -11,6 +11,7 @@ interface Message {
 
 interface Props {
   sessionId: number;
+  filename?: string;
 }
 
 const SUGGESTED = [
@@ -20,7 +21,7 @@ const SUGGESTED = [
   "Why is September revenue always lower?",
 ];
 
-export default function ChatPanel({ sessionId }: Props) {
+export default function ChatPanel({ sessionId, filename }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -138,9 +139,11 @@ export default function ChatPanel({ sessionId }: Props) {
           <span className="text-sm font-semibold text-gray-800">
             Ask InsightStream AI
           </span>
-          <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
-            Gemini 2.0 Flash
-          </span>
+          {filename && (
+            <span className="text-xs text-gray-500 truncate max-w-[180px]" title={filename}>
+              {filename}
+            </span>
+          )}
         </div>
         <button
           onClick={loadHistory}
