@@ -3762,25 +3762,19 @@ class BusinessRuleEngine:
 
             return insights
 
-        # EXACT match first for winner — must not match toss_winner
-        winner_col = None
-        for col in df.columns:
-            if col.lower().strip() == "winner":
-                winner_col = col
-                break
+        # Build a normalized → actual-column lookup for case/space-insensitive matching
+        col_map = {c.lower().replace(" ", "_"): c for c in df.columns}
+
+        # winner_col — exact normalized match first, then substring fallback (skip toss cols)
+        winner_col = col_map.get("winner")
         if not winner_col:
-            # Substring fallback — exclude any col containing "toss"
-            for col in df.columns:
-                if "winner" in col.lower() and "toss" not in col.lower():
-                    winner_col = col
+            for norm, actual in col_map.items():
+                if "winner" in norm and "toss" not in norm:
+                    winner_col = actual
                     break
 
-        # toss_winner — exact match only
-        toss_col = None
-        for col in df.columns:
-            if col.lower().strip() in ["toss_winner", "toss"]:
-                toss_col = col
-                break
+        # toss_col — exact normalized match
+        toss_col = col_map.get("toss_winner") or col_map.get("toss")
 
         team1_col  = _find_col(["team1", "home_team", "team_1"])
         team2_col  = _find_col(["team2", "away_team", "team_2"])
@@ -8340,6 +8334,12 @@ class SmartChartRecommender:
                             line=dict(color="#ef4444", width=2.5),
                             mode="lines+markers"
                         ))
+                        _pareto_col_label = best_cat_col.replace("_", " ").title()
+                        _pareto_title = (
+                            "Match Volume Distribution"
+                            if domain_id == "sports"
+                            else f"{_pareto_col_label} Revenue Contribution"
+                        )
                         fig_pareto.update_layout(
                             yaxis2=dict(
                                 title="Cumulative %", overlaying="y",
@@ -8348,12 +8348,12 @@ class SmartChartRecommender:
                             ),
                             template="plotly_dark",
                             legend=dict(orientation="h"),
-                            title=f"Pareto: {best_cat_col} Revenue Contribution"
+                            title=f"Pareto: {_pareto_title}"
                         )
                         add("pareto_revenue", {
                             "chart_id": "pareto_revenue",
                             "chart_type": "pareto",
-                            "title": f"Pareto: {best_cat_col} Revenue Contribution",
+                            "title": f"Pareto: {_pareto_title}",
                             "description": "80/20 analysis — which categories drive 80% of revenue",
                             "plotly_json": json.loads(fig_pareto.update_layout(**CHART_LAYOUT_BASE).to_json()),
                             "columns_used": [best_cat_col, price_col],
@@ -9214,12 +9214,14 @@ class SmartChartRecommender:
                 if not is_chart_informative(values, min_variance_pct=5.0):
                     print(f"[CHART SUPPRESSED] Fallback {num} by {cat} — variance too low")
                     continue
+                _num_label = str(num).replace("_", " ").title()
+                _cat_label = str(cat).replace("_", " ").title()
                 fig = px.bar(
                     grp,
                     x=num,
                     y=cat,
                     orientation="h",
-                    title=f"Median {num} by {cat}",
+                    title=f"Median {_num_label} by {_cat_label}",
                     text_auto=".1f",
                     color=num,
                     color_continuous_scale="Blues",
@@ -9240,16 +9242,14 @@ class SmartChartRecommender:
                         .replace(',',' ').replace(' ','_').replace('/','_')
                         .replace('\\','_').replace('.','_')).strip('_')
                     return c or "col"
-                _num_clean = str(num).replace("\n", " ").replace(",", "")
-                _cat_clean_fb = str(cat).replace("\n", " ").replace(",", "")
                 cid = f"fallback_bar_{_sid(num)}_{_sid(cat)}"
                 if cid not in chart_ids_used:
                     chart_ids_used.add(cid)
                     charts.append({
                         "chart_id": cid,
                         "chart_type": "bar",
-                        "title": f"{_num_clean} by {_cat_clean_fb}",
-                        "description": f"Median {_num_clean} comparison (robust to outliers)",
+                        "title": f"{_num_label} by {_cat_label}",
+                        "description": f"Median {_num_label} comparison (robust to outliers)",
                         "plotly_json": json.loads(
                             fig.update_layout(**CHART_LAYOUT_BASE).to_json()
                         ),
