@@ -1827,10 +1827,31 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_discount_impact, "discount_impact", df, domain))
         all_insights.extend(safe_rule_call(self._rule_demographic_split, "demographic_split", df, domain))
 
-        if any("attrition" in c.lower() for c in df.columns):
+        _HR_ATTRITION_SIGNALS = [
+            "attrition", "termd", "terminated", "turnover",
+            "resigned", "employment_status", "empstatus",
+            "left_company", "active_status", "term_reason",
+            "termreason", "dateoftermination", "date_of_termination",
+            "separation", "departure",
+        ]
+        _has_attrition_col = any(
+            any(signal in c.lower() for signal in _HR_ATTRITION_SIGNALS)
+            for c in df.columns
+        )
+        if _has_attrition_col:
+            log.info("[HR] Attrition signal found — running _rule_hr_attrition")
             results = self._rule_hr_attrition(df, profile)
             if results:
                 all_insights.extend(results)
+
+        _HR_SATISFACTION_SIGNALS = [
+            "satisfaction", "empsatisfaction", "engagement",
+            "engagementsurvey", "morale", "happiness",
+        ]
+        _has_satisfaction = any(
+            any(s in c.lower() for s in _HR_SATISFACTION_SIGNALS)
+            for c in df.columns
+        )
 
         # Fire content library rule for entertainment datasets
         _CONTENT_TYPES_EXEC = {"movie", "tv show", "series", "episode",
@@ -2579,7 +2600,13 @@ class BusinessRuleEngine:
 
             try:
                 # HR domain: show headcount distribution, not income sums
-                _is_hr = any("attrition" in c.lower() for c in df.columns)
+                _is_hr = any(
+                    any(sig in c.lower() for sig in [
+                        "attrition", "termd", "terminated", "turnover",
+                        "resigned", "employment_status", "empstatus",
+                    ])
+                    for c in df.columns
+                )
                 if _is_hr:
                     grouped_hr = (
                         df.group_by(seg_col)
