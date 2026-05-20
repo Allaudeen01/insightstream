@@ -89,7 +89,6 @@ async def analyze(
         await db.commit()
 
         results = run_insight_engine(df)
-        print("=== RESULTS KEYS ===", list(results.keys()))
 
         # Mock PDF generation for now, wire it properly later
         report_path = f"/tmp/Report_{session_record.id}.pdf"

@@ -3699,7 +3699,6 @@ def generate_visualizations(
     Auto-generate advanced interactive charts based on dataset characteristics.
     Returns Plotly JSON for frontend rendering with react-plotly.js.
     """
-    print("ENTERED generate_visualizations")
     try:
         resp = _internal_gen_viz(
             session_id=session_id,
@@ -3734,7 +3733,6 @@ def _internal_gen_viz(
     focus: Optional[str] = None,
     exclude_types: Optional[List[str]] = None
 ):
-    print("ENTERED _internal_gen_viz")
     # Helper for type filtering
     def is_chart_allowed(ctype):
         if exclude_types and ctype in exclude_types: return False
