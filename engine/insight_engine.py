@@ -8562,8 +8562,8 @@ class SmartChartRecommender:
                     add("revenue_by_cat", {
                         "chart_id": "revenue_by_cat",
                         "chart_type": "bar",
-                        "title": f"{target_label} by {cat}",
-                        "description": f"Total {target_label} breakdown across {cat} segments",
+                        "title": f"{target_label} by {_fc(cat)}",
+                        "description": f"Total {target_label} breakdown across {_fc(cat)} segments",
                         "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                         "columns_used": [cat, price_col] + ([qty_col] if qty_col else []),
                         "priority_score": 90,
@@ -8663,7 +8663,7 @@ class SmartChartRecommender:
                 else:
                     fig = px.bar(
                         rates, x=cat, y="Return Rate (%)",
-                        title=get_smart_title(f"Return Rate by {cat}", cat, "Return Rate"),
+                        title=f"Return Rate by {_fc(cat)}",
                         color="Return Rate (%)", color_continuous_scale="RdYlGn_r",
                         text_auto=".1f"
                     )
@@ -8676,7 +8676,7 @@ class SmartChartRecommender:
                 add("return_rate_by_cat", {
                     "chart_id": "return_rate_by_cat",
                     "chart_type": "bar",
-                    "title": get_smart_title(f"Return Rate by {cat}", cat, "Return Rate"),
+                    "title": f"Return Rate by {_fc(cat)}",
                     "description": "Categories above the dashed line have above-average return rates",
                     "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     "columns_used": [cat, ret_col],
@@ -8699,7 +8699,7 @@ class SmartChartRecommender:
                 counts.columns = [pay_col, "count"]
                 fig = px.pie(
                     counts, names=pay_col, values="count",
-                    title=f"{pay_col} Distribution",
+                    title=f"{_fc(pay_col)} Distribution",
                     hole=0.45,
                     color_discrete_sequence=px.colors.qualitative.Set2
                 )
@@ -8708,7 +8708,7 @@ class SmartChartRecommender:
                 add("payment_dist", {
                     "chart_id": "payment_dist",
                     "chart_type": "pie",
-                    "title": f"{pay_col} Distribution",
+                    "title": f"{_fc(pay_col)} Distribution",
                     "description": "Share of transactions by payment or channel type",
                     "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     "columns_used": [pay_col],
@@ -8728,7 +8728,7 @@ class SmartChartRecommender:
                 fig = px.box(
                     pdf_tmp, x="Returned", y=del_col,
                     color="Returned",
-                    title=f"{del_col} for Returned vs Not Returned Orders",
+                    title=f"{_fc(del_col)} for Returned vs Not Returned Orders",
                     color_discrete_map={"Yes": "#ef4444", "No": "#10b981"}
                 )
                 fig.update_layout(template="plotly_dark", showlegend=False,
@@ -8762,7 +8762,7 @@ class SmartChartRecommender:
                 monthly = pdf_tmp.groupby("month")["__rev__"].sum().reset_index()
                 monthly = monthly.sort_values("month")
                 if len(monthly) >= 2:
-                    t = get_smart_title("Monthly Revenue Trend", "Time", "Revenue")
+                    t = "Monthly Revenue Trend"
                     fig = px.line(
                         monthly, x="month", y="__rev__",
                         title=t,
@@ -8947,8 +8947,8 @@ class SmartChartRecommender:
                             add("geo_cat_revenue", {
                                 "chart_id": "geo_cat_revenue",
                                 "chart_type": "grouped_bar",
-                                "title": f"Which {cat_col} performs best in each {region_col}?",
-                                "description": f"Geographical revenue distribution across both {region_col} and {cat_col}",
+                                "title": f"Which {_fc(cat_col)} performs best in each {_fc(region_col)}?",
+                                "description": f"Geographical revenue distribution across both {_fc(region_col)} and {_fc(cat_col)}",
                                 "plotly_json": json.loads(fig.update_layout(**geo_layout).to_json()),
                                 "columns_used": [region_col, cat_col, revenue_col],
                                 "priority_score": 82,
@@ -8996,8 +8996,8 @@ class SmartChartRecommender:
                                 add("geo_heatmap", {
                                     "chart_id": "geo_heatmap",
                                     "chart_type": "heatmap",
-                                    "title": f"Revenue Heatmap: {region_col} × {cat_col}",
-                                    "description": f"Revenue intensity across all {region_col}–{cat_col} combinations",
+                                    "title": f"Revenue Heatmap: {_fc(region_col)} × {_fc(cat_col)}",
+                                    "description": f"Revenue intensity across all {_fc(region_col)}–{_fc(cat_col)} combinations",
                                     "plotly_json": json.loads(fig_heat.update_layout(**{
                                         **CHART_LAYOUT_BASE,
                                         "yaxis": {
@@ -9024,8 +9024,8 @@ class SmartChartRecommender:
                         add("geo_revenue", {
                             "chart_id": "geo_revenue",
                             "chart_type": "bar",
-                            "title": f"Which {geo_col} generates the most Revenue?",
-                            "description": f"Geographical revenue distribution across {geo_col}",
+                            "title": f"Which {_fc(geo_col)} generates the most Revenue?",
+                            "description": f"Geographical revenue distribution across {_fc(geo_col)}",
                         "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                         "columns_used": [geo_col, price_col],
                         "priority_score": 82,
@@ -9099,7 +9099,7 @@ class SmartChartRecommender:
                         print(f"[CHART SUPPRESSED] Volume by {cat} — all values flat")
                     else:
                         colors = ["#6B5CE7" if i == 0 else "#CBD5E1" for i in range(len(counts))]
-                        _cat_clean = str(cat).replace("\n", " ").replace(",", "")
+                        _cat_clean = _fc(cat)
                         fig = px.bar(
                             counts, x=cat, y="count",
                             title=f"Records per {_cat_clean}",
@@ -9134,7 +9134,7 @@ class SmartChartRecommender:
                     pdf.dropna(subset=[price_col]),
                     x=price_col,
                     color=color_col,
-                    title=f"{price_col} Distribution",
+                    title=f"{_fc(price_col)} Distribution",
                     nbins=30,
                     opacity=0.8,
                 )
@@ -9165,8 +9165,8 @@ class SmartChartRecommender:
                 add("price_dist", {
                     "chart_id": "price_dist",
                     "chart_type": "histogram",
-                    "title": f"{price_col} Distribution",
-                    "description": f"Spread and shape of {price_col} values",
+                    "title": f"{_fc(price_col)} Distribution",
+                    "description": f"Spread and shape of {_fc(price_col)} values",
                     "plotly_json": json.loads(fig.update_layout(**CHART_LAYOUT_BASE).to_json()),
                     "columns_used": [price_col] + ([cat] if color_col else []),
                     "priority_score": 65,
@@ -9452,7 +9452,7 @@ class SmartChartRecommender:
                         str(cat_col).lower()
                         .replace('\n', '_').replace(',', '_')
                         .replace(' ', '_')).strip('_'))
-                    _cat_col_clean = str(cat_col).replace("\n", " ").replace(",", "")
+                    _cat_col_clean = _fc(cat_col)
                     chart_id = f"count_by_{_cat_col_safe}"
                     if chart_id not in chart_ids_used:
                         charts.append({
