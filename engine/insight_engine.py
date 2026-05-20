@@ -1827,17 +1827,7 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_discount_impact, "discount_impact", df, domain))
         all_insights.extend(safe_rule_call(self._rule_demographic_split, "demographic_split", df, domain))
 
-        # DEBUG: HR column detection
-        _hr_debug_cols = [c for c in df.columns
-                          if any(s in c.lower() for s in
-                          ["attrition", "termd", "employment",
-                           "satisfaction", "term", "salary",
-                           "department", "position"])]
-        print(f"[HR DEBUG] HR-related columns found: {_hr_debug_cols}")
-        print(f"[HR DEBUG] All columns: {list(df.columns)[:15]}")
-        print(f"[HR DEBUG] Domain: {domain}")
-
-        _HR_ATTRITION_SIGNALS = [
+_HR_ATTRITION_SIGNALS = [
             "attrition", "termd", "terminated", "turnover",
             "resigned", "employment_status", "empstatus",
             "left_company", "active_status", "term_reason",
