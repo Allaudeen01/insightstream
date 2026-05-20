@@ -2419,12 +2419,17 @@ class PDFReportGenerator:
                         .replace("Nurture Research & Development leadership position",
                                  "Sustain Research & Development retention programmes"))
 
-            # FIX 2: inject satisfaction recommendation if not already present
-            _has_sat = any(
+            # Only add satisfaction rec if satisfaction insight actually fired
+            _has_sat_insight = any(
+                "satisfaction" in str(i.get("title", "")).lower() or
+                "satisfaction" in str(i.get("description", "")).lower()
+                for i in (insights or [])
+            )
+            _has_sat_in_recs = any(
                 "satisfaction" in str(_r.get("action", "")).lower()
                 for _r in recommendations if isinstance(_r, dict)
             )
-            if not _has_sat:
+            if _has_sat_insight and not _has_sat_in_recs:
                 recommendations.insert(0, {
                     "priority": 1,
                     "action": (

@@ -3017,7 +3017,12 @@ class BusinessRuleEngine:
         """Fires when dataset has Attrition + Department + MonthlyIncome columns."""
         insights = []
 
-        attr_col   = next((c for c in df.columns if "attrition"  in c.lower()), None)
+        attr_col   = next((c for c in df.columns if any(k in c.lower() for k in [
+            "attrition", "turnover", "resigned",
+            "termd", "terminated", "left_company",
+            "employment_status", "empstatus",
+            "active", "status",
+        ]) and df[c].n_unique() <= 10), None)
         dept_col   = next((c for c in df.columns if "department" in c.lower()), None)
         income_col = next((c for c in df.columns
                            if any(k in c.lower() for k in
@@ -3030,8 +3035,10 @@ class BusinessRuleEngine:
             pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
 
             total = len(pdf)
-            left  = pdf[attr_col].astype(str).str.strip().str.lower()
-            left_count    = (left == "yes").sum()
+            _yes_vals = {"yes", "1", "true", "terminated",
+                         "term", "inactive", "left", "resigned"}
+            left = pdf[attr_col].astype(str).str.lower().str.strip()
+            left_count = left.isin(_yes_vals).sum()
             attrition_rate = left_count / total * 100
 
             insights.append(BusinessInsight(
@@ -3062,7 +3069,7 @@ class BusinessRuleEngine:
             if dept_col:
                 dept_attr = (
                     pdf.groupby(dept_col)[attr_col]
-                    .apply(lambda x: (x.astype(str).str.lower() == "yes").mean() * 100)
+                    .apply(lambda x: x.astype(str).str.lower().str.strip().isin(_yes_vals).mean() * 100)
                     .sort_values(ascending=False)
                 )
                 if len(dept_attr) >= 2:
