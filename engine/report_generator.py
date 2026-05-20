@@ -2439,42 +2439,21 @@ class PDFReportGenerator:
                 })
 
         if domain_id == "sports" and len(recommendations) < 3:
-            _df_s = df if df is not None else None
-            _cols_rec = list(_df_s.columns if _df_s is not None else [])
-            _cols_rec_norm = {c.lower().replace(" ", "_"): c for c in _cols_rec}
+            # All values pre-computed in insight_engine.py via self._sports_meta
+            _sm_r = getattr(self, "_sports_meta", {})
 
-            # Toss rec — compute actual win rate or use generic advice
-            _toss_col_r = (
-                _cols_rec_norm.get("toss_winner")
-                or _cols_rec_norm.get("toss")
-            )
-            _winner_col_r = (
-                _cols_rec_norm.get("winner")
-                or _cols_rec_norm.get("winning_team")
-                or next(
-                    (c for c in _cols_rec
-                     if "winner" in c.lower() and "toss" not in c.lower()),
-                    None,
+            # Toss rec
+            _toss_rate_r = _sm_r.get("toss_win_rate")
+            if _toss_rate_r is not None:
+                _toss_action = (
+                    f"Toss winners win {_toss_rate_r:.0f}% of matches — "
+                    f"{'prioritise winning the toss and choose strategically based on pitch conditions.' if _toss_rate_r > 55 else 'toss has minimal impact. Focus resources on squad selection and pitch reading rather than toss strategy.'}"
                 )
-            )
-            if _toss_col_r and _winner_col_r and _df_s is not None:
-                try:
-                    _tw_r = (_df_s[_toss_col_r] == _df_s[_winner_col_r]).mean() * 100
-                    _toss_action = (
-                        f"Toss winners win {_tw_r:.0f}% of matches — "
-                        f"{'prioritise winning the toss and choose strategically based on pitch conditions.' if _tw_r > 55 else 'toss has minimal impact. Focus resources on squad selection and pitch reading rather than toss strategy.'}"
-                    )
-                except Exception:
-                    _toss_action = (
-                        "Toss has minimal predictive value. Focus resources "
-                        "on squad selection and pitch reading."
-                    )
             else:
                 _toss_action = (
                     "Toss has minimal predictive value. Focus resources "
                     "on squad selection and pitch reading."
                 )
-
             recommendations.append({
                 "priority": len(recommendations) + 1,
                 "action": _toss_action,
@@ -2483,60 +2462,40 @@ class PDFReportGenerator:
                 "impact": "Important",
             })
 
-            # Venue rec — dynamic top venue, skip if no venue column
-            _venue_col_r = next(
-                (c for c in _cols_rec
-                 if any(k in c.lower() for k in
-                        ["venue", "stadium", "ground", "city", "location"])),
-                None,
-            )
-            if _venue_col_r and _df_s is not None:
-                try:
-                    _top_v = _df_s[_venue_col_r].value_counts()
-                    _top_v_name = _top_v.index[0]
-                    _top_v_pct = _top_v.iloc[0] / len(_df_s) * 100
-                    _venue_action = (
-                        f"{_top_v_name} hosts {_top_v_pct:.0f}% of all matches — "
+            # Venue rec — only if top_venue was computed
+            _top_venue_r   = _sm_r.get("top_venue")
+            _top_venue_pct = _sm_r.get("top_venue_pct")
+            if _top_venue_r:
+                _pct_str = f"{_top_venue_pct:.0f}%" if _top_venue_pct else "a significant share"
+                recommendations.append({
+                    "priority": len(recommendations) + 1,
+                    "action": (
+                        f"{_top_venue_r} hosts {_pct_str} of all matches — "
                         f"analyse home team win rates at top venues to identify "
                         f"home advantage patterns and schedule implications."
-                    )
-                    recommendations.append({
-                        "priority": len(recommendations) + 1,
-                        "action": _venue_action,
-                        "timeframe": "Pre-season planning",
-                        "owner": "Tournament organizers",
-                        "impact": "Important",
-                    })
-                except Exception:
-                    pass
+                    ),
+                    "timeframe": "Pre-season planning",
+                    "owner": "Tournament organizers",
+                    "impact": "Important",
+                })
 
-            # Player of Match rec — skip entirely if column absent
-            _pom_col_r = next(
-                (c for c in _cols_rec
-                 if any(k in c.lower() for k in
-                        ["player_of_match", "man_of_match", "pom",
-                         "best_player", "mvp"])),
-                None,
-            )
-            if _pom_col_r and _df_s is not None:
-                try:
-                    _pom_counts = _df_s[_pom_col_r].value_counts().head(3)
-                    _pom_str = ", ".join(
-                        f"{p} ({n})" for p, n in _pom_counts.items()
-                    )
-                    recommendations.append({
-                        "priority": len(recommendations) + 1,
-                        "action": (
-                            f"Top match-winners: {_pom_str}. "
-                            f"Analyse their match conditions to understand "
-                            f"what triggers peak performances."
-                        ),
-                        "timeframe": "Next quarter",
-                        "owner": "Coaching staff",
-                        "impact": "Important",
-                    })
-                except Exception:
-                    pass
+            # Player of Match rec — skip entirely if no top_players in meta
+            _top_players_r = _sm_r.get("top_players")
+            if _top_players_r:
+                _pom_str = ", ".join(
+                    f"{p} ({n})" for p, n in _top_players_r.items()
+                )
+                recommendations.append({
+                    "priority": len(recommendations) + 1,
+                    "action": (
+                        f"Top match-winners: {_pom_str}. "
+                        f"Analyse their match conditions to understand "
+                        f"what triggers peak performances."
+                    ),
+                    "timeframe": "Next quarter",
+                    "owner": "Coaching staff",
+                    "impact": "Important",
+                })
 
         if domain_id == "entertainment" and len(recommendations) < 3:
             recommendations.extend([
@@ -3215,9 +3174,11 @@ class UnifiedReportGenerator(PDFReportGenerator):
                           session_id: str = "default",
                           df: Optional[pd.DataFrame | pl.DataFrame] = None,
                           domain_id: str = "general",
-                          currency_override: Optional[str] = None) -> str:
+                          currency_override: Optional[str] = None,
+                          sports_meta: Optional[dict] = None) -> str:
         """Construct a structured multi-page PDF with domain-aware visuals and narratives."""
         self._current_domain_id = domain_id  # Store for nested use
+        self._sports_meta = sports_meta or {}  # Available to all section builders
         if df is not None and hasattr(df, "to_pandas"):
             df = df.to_pandas()
 
@@ -3512,85 +3473,34 @@ class UnifiedReportGenerator(PDFReportGenerator):
             or "No single numeric driver" in ai_summary
             or not ai_summary.strip()
         ):
-            _total_m = len(df) if df is not None else 0
-            _season_col_s = next(
-                (c for c in (df.columns if df is not None else [])
-                 if c.lower() in ["season", "year", "edition"]), None
-            )
-            _n_seasons = (
-                df[_season_col_s].nunique()
-                if _season_col_s is not None and df is not None
-                else "multiple"
-            )
-            _cols_s = list(df.columns if df is not None else [])
-            _cols_s_norm = {c.lower().replace(" ", "_"): c for c in _cols_s}
+            # All values pre-computed in insight_engine.py and stored in self._sports_meta
+            _sm = self._sports_meta
 
-            _winner_col_s = (
-                _cols_s_norm.get("winner")
-                or _cols_s_norm.get("winning_team")
-                or next(
-                    (c for c in _cols_s
-                     if "winner" in c.lower() and "toss" not in c.lower()),
-                    None,
-                )
-            )
-            _top_team = (
-                df[_winner_col_s].value_counts().index[0]
-                if _winner_col_s is not None and df is not None
-                else "the leading team"
+            _total_m = kpis.get("Total Matches", kpis.get("total_matches", "?"))
+            _n_seasons = kpis.get("Seasons", kpis.get("seasons", "multiple"))
+            _top_team  = kpis.get("Top Team", kpis.get("top_team", "the leading team"))
+
+            _toss_rate = _sm.get("toss_win_rate")
+            _toss_sentence = (
+                f"Toss winners win {_toss_rate:.0f}% of matches — "
+                f"{'a significant edge' if _toss_rate > 55 else 'minimal predictive value'}."
+                if _toss_rate is not None
+                else "Toss has minimal predictive value."
             )
 
-            # Venue — check "venue", "stadium", "ground", "city"
-            _venue_col_s = next(
-                (c for c in _cols_s
-                 if any(k in c.lower() for k in
-                        ["venue", "stadium", "ground", "city", "location"])),
-                None,
-            )
-            _top_venue = (
-                df[_venue_col_s].value_counts().index[0]
-                if _venue_col_s is not None and df is not None
-                else None
-            )
-
-            # Player of Match — omit sentence if column absent
-            _pom_col_s = next(
-                (c for c in _cols_s
-                 if any(k in c.lower() for k in
-                        ["player_of_match", "man_of_match", "pom",
-                         "best_player", "mvp"])),
-                None,
-            )
-            _top_pom = (
-                df[_pom_col_s].value_counts().index[0]
-                if _pom_col_s is not None and df is not None
-                else None
-            )
-
-            # Toss win rate
-            _toss_col_s = _cols_s_norm.get("toss_winner") or _cols_s_norm.get("toss")
-            _toss_sentence = "Toss has minimal predictive value."
-            if _toss_col_s and _winner_col_s and df is not None:
-                try:
-                    _tw = (df[_toss_col_s] == df[_winner_col_s]).mean() * 100
-                    _toss_sentence = (
-                        f"Toss winners win {_tw:.0f}% of matches — "
-                        f"{'a significant edge' if _tw > 55 else 'minimal predictive value'}."
-                    )
-                except Exception:
-                    pass
-
+            _top_venue = _sm.get("top_venue")
             _venue_sentence = (
-                f"{_top_venue} is the most-used venue."
-                if _top_venue else ""
+                f"{_top_venue} is the most-used venue." if _top_venue else ""
             )
-            _pom_sentence = (
-                f"{_top_pom} leads Player of Match awards."
-                if _top_pom else ""
-            )
+
+            _top_players = _sm.get("top_players")
+            _pom_sentence = ""
+            if _top_players:
+                _top_pom = next(iter(_top_players))
+                _pom_sentence = f"{_top_pom} leads Player of Match awards."
 
             ai_summary = " ".join(filter(bool, [
-                f"This tournament dataset spans {_total_m:,} matches "
+                f"This tournament dataset spans {_total_m} matches "
                 f"across {_n_seasons} seasons.",
                 f"{_top_team} is the dominant team by win count.",
                 _toss_sentence,

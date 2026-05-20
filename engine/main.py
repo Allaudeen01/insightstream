@@ -862,9 +862,11 @@ async def export_dashboard_pdf(
         insight_result = _cache.get(session_id, "insight_result")
         structured_insights = []
         structured_recs = []
+        sports_meta = {}
         if insight_result and isinstance(insight_result, dict):
             structured_insights = insight_result.get("strategic_brief", [])
             raw_recs = insight_result.get("recommendations", [])
+            sports_meta = insight_result.get("sports_meta", {}) or {}
             # Guard: skip strings that snuck in — only pass dicts to the generator
             structured_recs = [
                 {**r, "impact": _norm_impact(r.get("impact", "minor"))}
@@ -895,7 +897,8 @@ async def export_dashboard_pdf(
             session_id=session_id,
             df=df,
             domain_id=domain_id,
-            currency_override=_currency_code  # ← Pass currency from session
+            currency_override=_currency_code,
+            sports_meta=sports_meta,
         )
         logger.info(f"✅ [SUCCESS] PDF generated at: {out_path}")
 

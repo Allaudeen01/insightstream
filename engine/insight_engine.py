@@ -9547,6 +9547,58 @@ def run_insight_engine(
         rec_engine = RecommendationEngine(domain=domain_id)
         final_recs = rec_engine.generate(compressed_insights, max_count=5)
 
+        # Compute sports metadata so report_generator.py can read it
+        # without accessing df directly.
+        _sports_meta: dict = {}
+        if domain_id == "sports":
+            try:
+                _sm_pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
+                _sm_col = {c.lower().replace(" ", "_"): c
+                           for c in _sm_pdf.columns}
+
+                # Top venue
+                _sm_venue_col = next(
+                    (_sm_col[k] for k in
+                     ["venue", "stadium", "ground", "city", "location"]
+                     if k in _sm_col), None
+                )
+                if _sm_venue_col:
+                    _sm_vc = _sm_pdf[_sm_venue_col].value_counts()
+                    _sports_meta["top_venue"] = str(_sm_vc.index[0])
+                    _sports_meta["top_venue_pct"] = round(
+                        _sm_vc.iloc[0] / len(_sm_pdf) * 100, 1
+                    )
+
+                # Toss win rate
+                _sm_toss = _sm_col.get("toss_winner") or _sm_col.get("toss")
+                _sm_winner = (
+                    _sm_col.get("winner")
+                    or _sm_col.get("winning_team")
+                    or next(
+                        (v for k, v in _sm_col.items()
+                         if "winner" in k and "toss" not in k), None
+                    )
+                )
+                if _sm_toss and _sm_winner:
+                    _tw = (
+                        _sm_pdf[_sm_toss] == _sm_pdf[_sm_winner]
+                    ).mean() * 100
+                    _sports_meta["toss_win_rate"] = round(float(_tw), 1)
+
+                # Top players (Player of Match)
+                _sm_pom = next(
+                    (_sm_col[k] for k in
+                     ["player_of_match", "man_of_match", "pom",
+                      "best_player", "mvp"]
+                     if k in _sm_col), None
+                )
+                if _sm_pom:
+                    _sports_meta["top_players"] = (
+                        _sm_pdf[_sm_pom].value_counts().head(3).to_dict()
+                    )
+            except Exception as _sme:
+                log.warning(f"[sports_meta] {_sme}")
+
         result = {
             "domain": domain_info,
             "target": driver_info.get("target"),
@@ -9567,7 +9619,8 @@ def run_insight_engine(
             "strategic_brief": final_insight_dicts,
             "recommendations": final_recs,
             "executive_summary": exec_summary,
-            "warnings": warnings
+            "warnings": warnings,
+            "sports_meta": _sports_meta,
         }
         
         # TIER 1.1: Add column coverage report
