@@ -8558,7 +8558,7 @@ class SmartChartRecommender:
                     
                     fig.update_layout(template="plotly_dark",
                                       coloraxis_showscale=False, showlegend=False,
-                                      xaxis_title=target_label)
+                                      xaxis_title=target_label, yaxis_title=_fc(cat))
                     add("revenue_by_cat", {
                         "chart_id": "revenue_by_cat",
                         "chart_type": "bar",
@@ -8670,7 +8670,8 @@ class SmartChartRecommender:
                                   line_color="#94a3b8",
                                   annotation_text=f"Avg {global_rate:.1f}%")
                 fig.update_layout(template="plotly_dark",
-                                  coloraxis_showscale=False, showlegend=False)
+                                  coloraxis_showscale=False, showlegend=False,
+                                  xaxis_title=_fc(cat))
                 add("return_rate_by_cat", {
                     "chart_id": "return_rate_by_cat",
                     "chart_type": "bar",
@@ -8729,7 +8730,8 @@ class SmartChartRecommender:
                     title=f"{del_col} for Returned vs Not Returned Orders",
                     color_discrete_map={"Yes": "#ef4444", "No": "#10b981"}
                 )
-                fig.update_layout(template="plotly_dark", showlegend=False)
+                fig.update_layout(template="plotly_dark", showlegend=False,
+                                  yaxis_title=_fc(del_col))
                 add("delivery_vs_return", {
                     "chart_id": "delivery_vs_return",
                     "chart_type": "box",
@@ -9016,7 +9018,8 @@ class SmartChartRecommender:
                             text_auto=".2s"
                         )
                         fig.update_layout(template="plotly_dark",
-                                          coloraxis_showscale=False, showlegend=False)
+                                          coloraxis_showscale=False, showlegend=False,
+                                          xaxis_title=_fc(geo_col))
                         add("geo_revenue", {
                             "chart_id": "geo_revenue",
                             "chart_type": "bar",
@@ -9104,7 +9107,7 @@ class SmartChartRecommender:
                         fig.update_traces(marker_color=colors)
                         fig.update_layout(template="plotly_dark",
                                           coloraxis_showscale=False, showlegend=False,
-                                          yaxis_title="Records")
+                                          xaxis_title=_fc(cat), yaxis_title="Records")
                         _cid_cat = f"count_by_{_sanitize_id(cat)}"
                         add(_cid_cat, {
                             "chart_id": _cid_cat,
@@ -9154,6 +9157,7 @@ class SmartChartRecommender:
                     template="plotly_dark",
                     barmode="overlay" if color_col else "relative",
                     height=320,
+                    xaxis_title=_fc(price_col),
                 )
                 if not color_col:
                     fig.update_traces(marker_color="#6366f1")
@@ -9439,8 +9443,9 @@ class SmartChartRecommender:
                         text_auto=True,
                         color_discrete_sequence=["#3b82f6"]
                     )
-                    fig.update_layout(template="plotly_dark")
-                    
+                    fig.update_layout(template="plotly_dark",
+                                      xaxis_title=_fc(cat_col))
+
                     import re as _re_fb
                     _cat_col_safe = (_re_fb.sub(r'_+', '_',
                         str(cat_col).lower()
@@ -9505,6 +9510,8 @@ class SmartChartRecommender:
                 fig.update_layout(
                     template="plotly_dark",
                     coloraxis_showscale=False,
+                    xaxis_title=_fc(num),
+                    yaxis_title=_fc(cat),
                     xaxis=dict(
                         range=[0, grp[num].max() * 1.15],
                         tickformat=".2s",
