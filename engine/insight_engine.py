@@ -7281,6 +7281,73 @@ class StrategicBriefBuilder:
         self.corr_matrix = corr_matrix
         self.high_impact_count = high_impact_count  # P0 FIX (Bug 0.5): Accept pre-computed count
 
+    def _build_sports_brief(self) -> str:
+        """Sports-specific executive summary — computed directly from df."""
+        try:
+            pdf = self.df.to_pandas() if hasattr(self.df, "to_pandas") else self.df
+            col_map = {c.lower().replace(" ", "_"): c for c in pdf.columns}
+            total = len(pdf)
+
+            # Seasons
+            season_col = next(
+                (col_map[k] for k in ["season", "year", "edition"] if k in col_map),
+                None,
+            )
+            n_seasons = pdf[season_col].nunique() if season_col else "multiple"
+
+            # Top team
+            winner_col = (
+                col_map.get("winner")
+                or col_map.get("winning_team")
+                or next(
+                    (v for k, v in col_map.items()
+                     if "winner" in k and "toss" not in k), None
+                )
+            )
+            if winner_col:
+                wc = pdf[winner_col].value_counts()
+                top_team = str(wc.index[0])
+                top_team_wins = int(wc.iloc[0])
+            else:
+                top_team = "The leading team"
+                top_team_wins = None
+
+            # Toss win rate
+            toss_col = col_map.get("toss_winner") or col_map.get("toss")
+            toss_sentence = "Toss has minimal predictive value."
+            if toss_col and winner_col:
+                tw = (pdf[toss_col] == pdf[winner_col]).mean() * 100
+                toss_sentence = (
+                    f"Toss winners win {tw:.0f}% of matches — "
+                    f"{'a significant strategic edge' if tw > 55 else 'minimal predictive value'}."
+                )
+
+            # Venue
+            venue_col = next(
+                (col_map[k] for k in
+                 ["venue", "stadium", "ground", "city", "location"]
+                 if k in col_map), None,
+            )
+            venue_sentence = ""
+            if venue_col:
+                vc = pdf[venue_col].value_counts()
+                venue_sentence = f"{vc.index[0]} is the most-used venue."
+
+            wins_note = f" ({top_team_wins} wins)" if top_team_wins else ""
+            return " ".join(filter(bool, [
+                f"This tournament dataset spans {total:,} matches "
+                f"across {n_seasons} seasons.",
+                f"{top_team}{wins_note} is the dominant team by win count.",
+                toss_sentence,
+                venue_sentence,
+            ]))
+        except Exception as _e:
+            log.warning(f"[sports_brief] {_e}")
+            return (
+                f"This tournament dataset spans {self.df.height:,} matches. "
+                f"Analysis covers team win rates, toss impact, and venue distribution."
+            )
+
     def build(self) -> str:
         """
         FIX 5: Enhanced executive summary with specific numbers and tighter prose.
@@ -7289,6 +7356,9 @@ class StrategicBriefBuilder:
         - Names top category with percentage
         - More actionable language
         """
+        if self.domain == "sports":
+            return self._build_sports_brief()
+
         domain_label = self.DOMAIN_LABELS.get(self.domain, "General Business")
         n_records = self.df.height
 
