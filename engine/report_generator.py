@@ -1802,6 +1802,7 @@ class PDFReportGenerator:
         peak_month: str = "",
         trough_month: str = "",
         pct_gap: float = 0,
+        domain: str = "general",
     ) -> Optional[str]:
         """Generate a monthly revenue line chart. Returns PNG path or None."""
         if not monthly_data or len(monthly_data) < 2:
@@ -1938,7 +1939,8 @@ class PDFReportGenerator:
                     framealpha=0.3, edgecolor="none"
                 )
 
-            ax.set_ylabel("Revenue", fontsize=10)
+            _ylabel_map = {"sports": "Matches", "hr": "Headcount", "health": "Cases"}
+            ax.set_ylabel(_ylabel_map.get(domain, "Revenue"), fontsize=10)
             ax.yaxis.set_major_formatter(mticker.FuncFormatter(smart_fmt))
             ax.grid(axis="y", alpha=0.3, linestyle="--")
             ax.spines["top"].set_visible(False)
@@ -4189,15 +4191,15 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     _cd["pct_gap"] = float(_sm.group(1))
                     print(f"[temporal_chart] Parsed swing from ai_summary: {_cd['pct_gap']}%")
             
+            _cur_domain = getattr(self, '_current_domain_id', 'general')
             chart_path = self._chart_monthly_revenue(
                 monthly_data,
                 peak_month=_cd.get("peak_month", ""),
                 trough_month=_cd.get("trough_month", ""),
                 pct_gap=_cd.get("pct_gap", 0),
+                domain=_cur_domain,
             )
-            # Sports uses Matches per Season instead — skip Monthly Revenue Trend
-            _cur_domain = getattr(self, '_current_domain_id', 'general')
-            if _cur_domain != "sports" and chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
+            if _cur_domain in ["sales", "ecommerce"] and chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
                 chart_elements = []
                 chart_elements.append(Paragraph("Monthly Revenue Trend", self.S["Section"]))
                 chart_elements.append(HRFlowable(width="100%", thickness=1,
@@ -4229,7 +4231,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 _last_chart_completed_pair = False
 
         # ✅ FALLBACK: Generate time series from raw data if temporal_insight produced no chart
-        if domain_id != "sports" and df is not None and len(df) > 0 and not (temporal_insight and chart_path and os.path.exists(chart_path)):
+        if domain_id in ["sales", "ecommerce"] and df is not None and len(df) > 0 and not (temporal_insight and chart_path and os.path.exists(chart_path)):
             try:
                 import polars as pl
                 from datetime import datetime as _dt
@@ -4305,6 +4307,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                             peak_month=peak_month,
                             trough_month=trough_month,
                             pct_gap=pct_gap,
+                            domain=domain_id,
                         )
                         
                         if chart_path and os.path.exists(chart_path) and os.path.getsize(chart_path) > 0:
