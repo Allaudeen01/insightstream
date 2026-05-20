@@ -282,6 +282,22 @@ class C:
     DATE_KEYWORDS     = ["date", "time", "month", "year", "period", "day", "week", "dt", "joiningdt", "birthdt"]
     LABEL_KEYWORDS    = ["name", "label", "title", "description", "product", "item", "sku"]
 
+
+def friendly_col(col: str) -> str:
+    """Convert a raw column name to a human-readable label."""
+    return col.replace("_", " ").title()
+
+
+def _friendly_title(title: str) -> str:
+    """Replace underscore_words inside a title string with Title Case equivalents."""
+    import re as _re
+    return _re.sub(
+        r'\b([a-z]\w*(?:_\w+)+)\b',
+        lambda m: m.group(0).replace("_", " ").title(),
+        title,
+    )
+
+
 TEMPLATE_CONFIGS = {
     "modern": {
         "brand_dark": "#1A1A2E",
@@ -827,11 +843,11 @@ class ChartGenerator:
         num_col = cm.numeric or "Value"
         
         self.titles = {
-            'distribution': f"Distribution of {num_col}",
-            'category_sales': f"{num_col} by {cat_col}",
-            'region_sales': f"Total {num_col} by {cm.region or 'Region'}",
+            'distribution': f"Distribution of {friendly_col(num_col)}",
+            'category_sales': f"{friendly_col(num_col)} by {friendly_col(cat_col)}",
+            'region_sales': f"Total {friendly_col(num_col)} by {friendly_col(cm.region or 'Region')}",
             'correlation': "Feature Correlation Heatmap",
-            'distribution_title': f"Which {cat_col} has the most records?",
+            'distribution_title': f"Which {friendly_col(cat_col)} has the most records?",
         }
         
         return {
@@ -916,9 +932,9 @@ class ChartGenerator:
         with self._safe_fig(fname) as (fig, ax):
             bp = sns.barplot(x=data.index.astype(str), y=data.values,
                              palette=C.BRAND_PALETTE[:len(data)], ax=ax)
-            ax.set_title(f"Total {cm.numeric} by {cm.category}",
+            ax.set_title(f"Total {friendly_col(cm.numeric)} by {friendly_col(cm.category)}",
                          fontsize=13, fontweight="bold", pad=10)
-            ax.set_xlabel(cm.category); ax.set_ylabel(cm.numeric)
+            ax.set_xlabel(friendly_col(cm.category)); ax.set_ylabel(friendly_col(cm.numeric))
             ax.yaxis.set_major_formatter(
                 mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
             # Average reference line
@@ -960,9 +976,9 @@ class ChartGenerator:
                            .sum().unstack(cm.category).fillna(0))
                 pivot.plot(kind="bar", ax=ax,
                            color=C.BRAND_PALETTE[:pivot.shape[1]], width=0.75)
-                ax.set_title(f"{cm.numeric} by {cm.region} & {cm.category}",
+                ax.set_title(f"{friendly_col(cm.numeric)} by {friendly_col(cm.region)} & {friendly_col(cm.category)}",
                              fontsize=13, fontweight="bold", pad=10)
-                ax.legend(title=cm.category, bbox_to_anchor=(1.01, 1),
+                ax.legend(title=friendly_col(cm.category), bbox_to_anchor=(1.01, 1),
                           loc="upper left", fontsize=8)
             else:
                 data = df.groupby(cm.region)[cm.numeric].sum().sort_values(ascending=False)
@@ -973,9 +989,9 @@ class ChartGenerator:
                 ax.axhline(avg_val, color=C.COLOR_NEUTRAL, linestyle="--", linewidth=1.2,
                            label=f"Avg: {avg_val:,.0f}")
                 ax.legend(fontsize=8)
-                ax.set_title(f"Total {cm.numeric} by {cm.region}",
+                ax.set_title(f"Total {friendly_col(cm.numeric)} by {friendly_col(cm.region)}",
                              fontsize=13, fontweight="bold", pad=10)
-            ax.set_xlabel(cm.region); ax.set_ylabel(cm.numeric)
+            ax.set_xlabel(friendly_col(cm.region)); ax.set_ylabel(friendly_col(cm.numeric))
             ax.yaxis.set_major_formatter(
                 mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
             plt.xticks(rotation=20, ha="right")
@@ -998,8 +1014,8 @@ class ChartGenerator:
                        linewidth=1.5, label=f"Mean: {col_data.mean():,.0f}")
             ax.axvline(col_data.median(), color="orange", linestyle="--",
                        linewidth=1.5, label=f"Median: {col_data.median():,.0f}")
-            ax.set_title(f"Distribution of {cm.numeric}", fontsize=13, fontweight="bold")
-            ax.set_xlabel(cm.numeric); ax.set_ylabel("Frequency")
+            ax.set_title(f"Distribution of {friendly_col(cm.numeric)}", fontsize=13, fontweight="bold")
+            ax.set_xlabel(friendly_col(cm.numeric)); ax.set_ylabel("Frequency")
             ax.legend(fontsize=9)
         return self._verify(fname)
 
@@ -1032,7 +1048,7 @@ class ChartGenerator:
         sns.set_style(C.SNS_STYLE)
         with self._safe_fig(fname) as (fig, ax):
             ax.barh(counts.index.astype(str), counts.values, color=palette[::-1])
-            ax.set_title(f"Order Volume by {cm.category}", fontsize=13, fontweight="bold")
+            ax.set_title(f"Order Volume by {friendly_col(cm.category)}", fontsize=13, fontweight="bold")
             ax.set_xlabel("Order Count")
             for i, (idx, v) in enumerate(counts.items()):
                 ax.text(v + counts.max() * 0.01,
@@ -2004,17 +2020,20 @@ class PDFReportGenerator:
                fontSize=8, textColor=colors.white, alignment=TA_CENTER))
                for k in kpis]
         val = [Paragraph(_rupee_wrap(v), kpi_val_style) for v in kpis.values()]
-        tbl = Table([hdr, val], colWidths=[col_w] * len(kpis))
+        tbl = Table([hdr, val], colWidths=[col_w] * len(kpis), splitByRow=0)
         tbl.setStyle(TableStyle([
             ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(cfg["purple"])),
             ("BACKGROUND",    (0, 1), (-1, 1),  colors.HexColor(cfg["brand_light"])),
             ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(C.RULE_GREY)),
             ("TOPPADDING",    (0, 0), (-1, -1), 12),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+            ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
             ("FONTNAME",      (0, 1), (-1, 1),  'DejaVuSans'),
             ("FONTNAME",      (1, 0), (-1, -1), 'DejaVuSans'),
         ]))
-        return tbl
+        from reportlab.platypus import KeepTogether
+        return KeepTogether(tbl)
 
     def _build_section_6_deep_insights(
         self,
@@ -2740,7 +2759,7 @@ class PDFReportGenerator:
         if region_col and target_metric in df.columns:
             region_chart = cg.bar_chart(
                 df, region_col, target_metric,
-                title=f"Median {target_metric} by {region_col}",
+                title=f"Median {friendly_col(target_metric)} by {friendly_col(region_col)}",
                 filename="region_target_median.png"
             )
             if region_chart:
@@ -2786,7 +2805,7 @@ class PDFReportGenerator:
         # 4. Regional Table (New)
         if md_table:
             from xml.sax.saxutils import escape as _xe_tm
-            elements.append(Paragraph(f"Regional {_xe_tm(str(target_metric))} Distribution", self.S["Section"]))
+            elements.append(Paragraph(f"Regional {_xe_tm(friendly_col(str(target_metric)))} Distribution", self.S["Section"]))
             # Convert MD table to a ReportLab Table
             lines = md_table.split("\n")
             table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
@@ -2814,9 +2833,9 @@ class PDFReportGenerator:
         elements.append(Spacer(1, 10))
 
         chart_list = [
-            ("region_target", f"Strategic Distribution: {target_metric}"),
-            ("category",      f"Total {target_metric} by Category"),
-            ("distribution",  f"Distribution Analysis: {target_metric}"),
+            ("region_target", f"Strategic Distribution: {friendly_col(target_metric)}"),
+            ("category",      f"Total {friendly_col(target_metric)} by Category"),
+            ("distribution",  f"Distribution Analysis: {friendly_col(target_metric)}"),
             ("correlation",   "Inter-Variable Correlation Matrix"),
         ]
         
@@ -3593,8 +3612,8 @@ class UnifiedReportGenerator(PDFReportGenerator):
                     )
                     if chart_path:
                         self.embed_chart_safely(elements, chart_path,
-                                                f"{target_metric} by Region",
-                                                f"Median {target_metric} across each regional segment. Use this to identify under- and over-performing regions.")
+                                                f"{friendly_col(target_metric)} by Region",
+                                                f"Median {friendly_col(target_metric)} across each regional segment. Use this to identify under- and over-performing regions.")
 
                     # Add Markdown Table
                     try:
@@ -3614,7 +3633,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         md_table = ""
                     if md_table:
                         elements.append(Spacer(1, 20))
-                        elements.append(Paragraph(_xe_title(f"Regional {target_metric} Statistics"), self.S["ChartTitle"]))
+                        elements.append(Paragraph(_xe_title(f"Regional {friendly_col(target_metric)} Statistics"), self.S["ChartTitle"]))
                         lines = md_table.split("\n")
                         table_data = [line.strip("|").split("|") for line in lines if "---" not in line]
                         table_data = [[cell.strip() for cell in row] for row in table_data]
@@ -3852,7 +3871,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
         seen_chart_titles: set = set()
 
         for i, chart in enumerate(charts):
-            chart_title = chart.get("title", f"Chart {i+1}")
+            chart_title = _friendly_title(chart.get("title", f"Chart {i+1}"))
             chart_id    = chart.get("id", f"chart_{i}")
             has_b64     = bool(chart.get("image_base64", ""))
             has_plotly  = bool(chart.get("plotly_json") or chart.get("plotly_data"))
