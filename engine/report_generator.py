@@ -2438,7 +2438,7 @@ class PDFReportGenerator:
                     "impact": "Critical",
                 })
 
-        if domain_id == "sports" and len(recommendations) < 3:
+        if domain_id == "sports" and len(recommendations) < 5:
             # All values pre-computed in insight_engine.py via self._sports_meta
             _sm_r = getattr(self, "_sports_meta", {})
 
@@ -2496,6 +2496,36 @@ class PDFReportGenerator:
                     "owner": "Coaching staff",
                     "impact": "Important",
                 })
+
+            # Top team dominance rec
+            _top_team_r  = _sm_r.get("top_team")
+            _top_team_w  = _sm_r.get("top_team_wins")
+            if _top_team_r:
+                _wins_note = f" ({_top_team_w} wins)" if _top_team_w else ""
+                recommendations.append({
+                    "priority": len(recommendations) + 1,
+                    "action": (
+                        f"{_top_team_r}{_wins_note} is the dominant team by win count. "
+                        f"Study their squad composition, rotation policy, and match "
+                        f"strategies to identify transferable competitive advantages."
+                    ),
+                    "timeframe": "Pre-season",
+                    "owner": "Coaching staff",
+                    "impact": "Important",
+                })
+
+            # Season trend / competitive balance rec (always added for sports)
+            recommendations.append({
+                "priority": len(recommendations) + 1,
+                "action": (
+                    "Track season-over-season win distribution to monitor competitive balance. "
+                    "Concentration of wins in 1-2 teams signals a dominance era; high spread "
+                    "signals a balanced league — each requires different strategic planning."
+                ),
+                "timeframe": "Annual review",
+                "owner": "Tournament organizers",
+                "impact": "Important",
+            })
 
         if domain_id == "entertainment" and len(recommendations) < 3:
             recommendations.extend([
@@ -3476,9 +3506,9 @@ class UnifiedReportGenerator(PDFReportGenerator):
             # All values pre-computed in insight_engine.py and stored in self._sports_meta
             _sm = self._sports_meta
 
-            _total_m = kpis.get("Total Matches", kpis.get("total_matches", "?"))
+            _total_m   = kpis.get("Total Matches", kpis.get("total_matches", "?"))
             _n_seasons = kpis.get("Seasons", kpis.get("seasons", "multiple"))
-            _top_team  = kpis.get("Top Team", kpis.get("top_team", "the leading team"))
+            _top_team  = _sm.get("top_team", "the leading team")
 
             _toss_rate = _sm.get("toss_win_rate")
             _toss_sentence = (

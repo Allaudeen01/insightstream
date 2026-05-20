@@ -8222,6 +8222,9 @@ class SmartChartRecommender:
             if actual_metric:
                 target_label = actual_metric
 
+        # Title-case raw column names used as chart labels (e.g. "result_margin" → "Result Margin")
+        target_label = target_label.replace("_", " ").title()
+
         def add(chart_id: str, spec: dict) -> None:
             if chart_id not in chart_ids_used and len(charts) < max_charts:
                 chart_ids_used.add(chart_id)
@@ -8387,7 +8390,11 @@ class SmartChartRecommender:
                             "chart_id": "pareto_revenue",
                             "chart_type": "pareto",
                             "title": f"Pareto: {_pareto_title}",
-                            "description": "80/20 analysis — which categories drive 80% of revenue",
+                            "description": (
+                                "80/20 analysis — which categories drive 80% of match volume"
+                                if domain_id == "sports"
+                                else "80/20 analysis — which categories drive 80% of revenue"
+                            ),
                             "plotly_json": json.loads(fig_pareto.update_layout(**CHART_LAYOUT_BASE).to_json()),
                             "columns_used": [best_cat_col, price_col],
                             "priority_score": 92,
@@ -9579,6 +9586,13 @@ def run_insight_engine(
                          if "winner" in k and "toss" not in k), None
                     )
                 )
+                # Top team by win count
+                if _sm_winner:
+                    _sm_wc = _sm_pdf[_sm_winner].value_counts()
+                    if len(_sm_wc) > 0:
+                        _sports_meta["top_team"] = str(_sm_wc.index[0])
+                        _sports_meta["top_team_wins"] = int(_sm_wc.iloc[0])
+
                 if _sm_toss and _sm_winner:
                     _tw = (
                         _sm_pdf[_sm_toss] == _sm_pdf[_sm_winner]
