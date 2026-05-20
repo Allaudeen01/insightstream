@@ -184,10 +184,31 @@ class DomainDetector:
 
         # ── Sports Domain Detection ───────────────────────
         sports_signals = 0
-        _cols_lower_s = [c.lower().replace(" ", "_")
-                         for c in df.columns]
+        _cols_norm_s = {c.lower().replace(" ", "_"): c for c in df.columns}
+        _cols_lower_s = list(_cols_norm_s.keys())
 
-        # Team columns
+        # Combination A (IPL-style): team1 + winner + toss_winner
+        _combo_a = (
+            "team1" in _cols_lower_s
+            and "winner" in _cols_lower_s
+            and "toss_winner" in _cols_lower_s
+        )
+        # Combination B (PSL-style): team_1 + team_2 + winner
+        _combo_b = (
+            "team_1" in _cols_lower_s
+            and "team_2" in _cols_lower_s
+            and "winner" in _cols_lower_s
+        )
+        # Combination C (generic football/cricket): home_team + away_team
+        _combo_c = (
+            "home_team" in _cols_lower_s
+            and "away_team" in _cols_lower_s
+        )
+
+        if _combo_a or _combo_b or _combo_c:
+            sports_signals += 5
+
+        # Team columns (broader signals)
         _team_signals = ["team1", "team2", "home_team",
                          "away_team", "team", "club", "side",
                          "driver", "constructor", "player", "athlete",
@@ -214,9 +235,9 @@ class DomainDetector:
 
         if sports_signals >= 4:
             scores["sports"] = min(0.9, sports_signals * 0.15)
-            print(f"[DOMAIN] Sports detected "
-                  f"(signals={sports_signals}, "
-                  f"score={scores['sports']:.2f})")
+            log.info(f"[DOMAIN] Sports detected "
+                     f"(signals={sports_signals}, "
+                     f"score={scores['sports']:.2f})")
 
         # ── Health Domain Detection ───────────────────────
         health_signals = 0
@@ -1891,11 +1912,20 @@ class BusinessRuleEngine:
                     all_insights.extend(results)
                     log.info(f"[content_library] Generated {len(results)} insights")
 
-        # Fire sports rule when team columns detected
-        _has_teams = any(
-            any(k in c.lower() for k in ["team1", "team2",
-                "home_team", "away_team"])
-            for c in df.columns
+        # Fire sports rule — OR of three normalized column combinations
+        _sports_cols_norm = {c.lower().replace(" ", "_") for c in df.columns}
+        _has_teams = (
+            # Combination A: IPL-style
+            ("team1" in _sports_cols_norm
+             and "winner" in _sports_cols_norm
+             and "toss_winner" in _sports_cols_norm)
+            # Combination B: PSL-style
+            or ("team_1" in _sports_cols_norm
+                and "team_2" in _sports_cols_norm
+                and "winner" in _sports_cols_norm)
+            # Combination C: generic football/cricket
+            or ("home_team" in _sports_cols_norm
+                and "away_team" in _sports_cols_norm)
         )
         if _has_teams:
             results = self._rule_sports_analysis(df, profile)
@@ -3496,9 +3526,9 @@ class BusinessRuleEngine:
             return None
 
         # Detect delivery-level (ball-by-ball) vs match-level dataset
-        _cols_lower = [c.lower() for c in df.columns]
+        _cols_norm = {c.lower().replace(" ", "_") for c in df.columns}
         _is_delivery_data = any(
-            c in _cols_lower
+            c in _cols_norm
             for c in ["extras_type", "dismissal_kind",
                       "delivery", "ball", "over", "bowler"]
         )
@@ -3766,7 +3796,10 @@ class BusinessRuleEngine:
         col_map = {c.lower().replace(" ", "_"): c for c in df.columns}
 
         # winner_col — exact normalized match first, then substring fallback (skip toss cols)
-        winner_col = col_map.get("winner")
+        winner_col = (
+            col_map.get("winner")
+            or col_map.get("winning_team")
+        )
         if not winner_col:
             for norm, actual in col_map.items():
                 if "winner" in norm and "toss" not in norm:
