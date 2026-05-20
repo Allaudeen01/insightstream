@@ -1778,8 +1778,23 @@ class BusinessRuleEngine:
         all_insights: list[BusinessInsight] = []
         warnings: list[str] = []
         pdf = df.to_pandas()
-        
+
         print(f"[DEBUG] date_col={profile.date_col}, temporals={profile.temporals}")
+
+        # ── Gemini column semantics (runs once per analysis) ──────────────────
+        _gemini_semantics = {}
+        _col_overrides = {}
+        try:
+            from gemini_column_semantics import (
+                analyze_column_semantics,
+                apply_semantics_to_engine,
+            )
+            _gemini_semantics = analyze_column_semantics(pdf)
+            _col_overrides = apply_semantics_to_engine(pdf, _gemini_semantics)
+            print(f"[Gemini] Semantics: {_col_overrides}")
+        except Exception as _ge:
+            print(f"[Gemini] Semantics skipped: {_ge}")
+        # ─────────────────────────────────────────────────────────────────────
 
         # Helper function to safely call rules
         def safe_rule_call(rule_func, rule_name, *args, **kwargs):
@@ -1827,7 +1842,7 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_discount_impact, "discount_impact", df, domain))
         all_insights.extend(safe_rule_call(self._rule_demographic_split, "demographic_split", df, domain))
 
-_HR_ATTRITION_SIGNALS = [
+        _HR_ATTRITION_SIGNALS = [
             "attrition", "termd", "terminated", "turnover",
             "resigned", "employment_status", "empstatus",
             "left_company", "active_status", "term_reason",
@@ -1838,6 +1853,10 @@ _HR_ATTRITION_SIGNALS = [
             any(signal in c.lower() for signal in _HR_ATTRITION_SIGNALS)
             for c in df.columns
         )
+        # Gemini override takes priority over rule-based detection
+        if _col_overrides.get("attrition_col"):
+            _has_attrition_col = True
+            print(f"[Gemini] Attrition col: {_col_overrides['attrition_col']}")
         if _has_attrition_col:
             log.info("[HR] Attrition signal found — running _rule_hr_attrition")
             results = self._rule_hr_attrition(df, profile)
@@ -1852,6 +1871,9 @@ _HR_ATTRITION_SIGNALS = [
             any(s in c.lower() for s in _HR_SATISFACTION_SIGNALS)
             for c in df.columns
         )
+        if _col_overrides.get("satisfaction_col"):
+            _has_satisfaction = True
+            print(f"[Gemini] Satisfaction col: {_col_overrides['satisfaction_col']}")
 
         # Fire content library rule for entertainment datasets
         _CONTENT_TYPES_EXEC = {"movie", "tv show", "series", "episode",

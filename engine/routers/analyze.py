@@ -68,7 +68,13 @@ async def analyze(
             _set_currency_symbol(sym, explicit=True)
             print(f"[CURRENCY] User override: {currency} → {sym}")
         else:
-            print(f"[CURRENCY] Auto-detecting...")
+            try:
+                from gemini_column_semantics import detect_currency_gemini
+                detected_sym = detect_currency_gemini(df, list(df.columns))
+                _set_currency_symbol(detected_sym)
+                print(f"[Gemini Currency] Auto-detected: {detected_sym}")
+            except Exception as _ce:
+                print(f"[Gemini Currency] Failed: {_ce} — using rule-based")
 
         session_record.row_count = len(df)
         session_record.column_count = len(df.columns)
