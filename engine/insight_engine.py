@@ -8593,10 +8593,11 @@ class SmartChartRecommender:
                         grp_sorted["cumulative_pct"] = (
                             grp_sorted[rev_col].cumsum() / grp_sorted[rev_col].sum() * 100
                         )
+                        _pareto_bar_name = "Match Volume" if domain_id == "sports" else "Revenue"
                         fig_pareto = go.Figure()
                         fig_pareto.add_trace(go.Bar(
                             x=grp_sorted[best_cat_col], y=grp_sorted[rev_col],
-                            name="Revenue", marker_color="#6366f1",
+                            name=_pareto_bar_name, marker_color="#6366f1",
                             text=[f"{v/1e6:.1f}M" for v in grp_sorted[rev_col]],
                             textposition="outside"
                         ))
