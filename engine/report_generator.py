@@ -2087,6 +2087,34 @@ class PDFReportGenerator:
                     "is the trough", "had the fewest matches"
                 )
                 prose = _re.sub(r'\s+', ' ', prose).strip()
+
+            # Fix currency in opener if symbol mismatch
+            _sym = getattr(self, '_currency_symbol', '₹')
+            if _sym != '₹' and prose:
+                import re as _re
+                def _reformat_inr(m):
+                    raw = m.group(0)
+                    num_str = raw.replace('₹', '').replace(',', '').strip()
+                    try:
+                        if num_str.endswith(' Cr'):
+                            val = float(num_str[:-3]) * 1e7
+                        elif num_str.endswith(' L'):
+                            val = float(num_str[:-2]) * 1e5
+                        elif num_str.endswith('K'):
+                            val = float(num_str[:-1]) * 1e3
+                        elif num_str.endswith('M'):
+                            val = float(num_str[:-1]) * 1e6
+                        else:
+                            val = float(num_str)
+                        return _fmt_currency(val, _sym)
+                    except Exception:
+                        return raw
+                prose = _re.sub(
+                    r'₹[\d,\.]+(?:\s*(?:Cr|L|K|M|B))?',
+                    _reformat_inr,
+                    prose
+                )
+
             if prose:
                 narrative_style = ParagraphStyle(
                     'NarrativeStyle',
