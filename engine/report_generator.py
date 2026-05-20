@@ -2439,44 +2439,104 @@ class PDFReportGenerator:
                 })
 
         if domain_id == "sports" and len(recommendations) < 3:
-            recommendations.extend([
-                {
-                    "priority": len(recommendations) + 1,
-                    "action": (
-                        "Toss wins predict match wins only 51% of the "
-                        "time — toss has minimal impact. Focus resources "
-                        "on squad selection and pitch reading rather "
-                        "than toss strategy."
-                    ),
-                    "timeframe": "Before next season",
-                    "owner": "Team management",
-                    "impact": "Important",
-                },
-                {
-                    "priority": len(recommendations) + 2,
-                    "action": (
-                        "Eden Gardens hosts 7% of all matches — "
-                        "analyse home team win rates at top venues "
-                        "to identify home advantage patterns and "
-                        "schedule implications."
-                    ),
-                    "timeframe": "Pre-season planning",
-                    "owner": "Tournament organizers",
-                    "impact": "Important",
-                },
-                {
-                    "priority": len(recommendations) + 3,
-                    "action": (
-                        "AB de Villiers (25 awards), CH Gayle (22), "
-                        "RG Sharma (19) are the highest-impact players. "
-                        "Analyse their match conditions to understand "
-                        "what triggers peak performances."
-                    ),
-                    "timeframe": "Next quarter",
-                    "owner": "Coaching staff",
-                    "impact": "Important",
-                },
-            ])
+            _df_s = df if df is not None else None
+            _cols_rec = list(_df_s.columns if _df_s is not None else [])
+            _cols_rec_norm = {c.lower().replace(" ", "_"): c for c in _cols_rec}
+
+            # Toss rec — compute actual win rate or use generic advice
+            _toss_col_r = (
+                _cols_rec_norm.get("toss_winner")
+                or _cols_rec_norm.get("toss")
+            )
+            _winner_col_r = (
+                _cols_rec_norm.get("winner")
+                or _cols_rec_norm.get("winning_team")
+                or next(
+                    (c for c in _cols_rec
+                     if "winner" in c.lower() and "toss" not in c.lower()),
+                    None,
+                )
+            )
+            if _toss_col_r and _winner_col_r and _df_s is not None:
+                try:
+                    _tw_r = (_df_s[_toss_col_r] == _df_s[_winner_col_r]).mean() * 100
+                    _toss_action = (
+                        f"Toss winners win {_tw_r:.0f}% of matches — "
+                        f"{'prioritise winning the toss and choose strategically based on pitch conditions.' if _tw_r > 55 else 'toss has minimal impact. Focus resources on squad selection and pitch reading rather than toss strategy.'}"
+                    )
+                except Exception:
+                    _toss_action = (
+                        "Toss has minimal predictive value. Focus resources "
+                        "on squad selection and pitch reading."
+                    )
+            else:
+                _toss_action = (
+                    "Toss has minimal predictive value. Focus resources "
+                    "on squad selection and pitch reading."
+                )
+
+            recommendations.append({
+                "priority": len(recommendations) + 1,
+                "action": _toss_action,
+                "timeframe": "Before next season",
+                "owner": "Team management",
+                "impact": "Important",
+            })
+
+            # Venue rec — dynamic top venue, skip if no venue column
+            _venue_col_r = next(
+                (c for c in _cols_rec
+                 if any(k in c.lower() for k in
+                        ["venue", "stadium", "ground", "city", "location"])),
+                None,
+            )
+            if _venue_col_r and _df_s is not None:
+                try:
+                    _top_v = _df_s[_venue_col_r].value_counts()
+                    _top_v_name = _top_v.index[0]
+                    _top_v_pct = _top_v.iloc[0] / len(_df_s) * 100
+                    _venue_action = (
+                        f"{_top_v_name} hosts {_top_v_pct:.0f}% of all matches — "
+                        f"analyse home team win rates at top venues to identify "
+                        f"home advantage patterns and schedule implications."
+                    )
+                    recommendations.append({
+                        "priority": len(recommendations) + 1,
+                        "action": _venue_action,
+                        "timeframe": "Pre-season planning",
+                        "owner": "Tournament organizers",
+                        "impact": "Important",
+                    })
+                except Exception:
+                    pass
+
+            # Player of Match rec — skip entirely if column absent
+            _pom_col_r = next(
+                (c for c in _cols_rec
+                 if any(k in c.lower() for k in
+                        ["player_of_match", "man_of_match", "pom",
+                         "best_player", "mvp"])),
+                None,
+            )
+            if _pom_col_r and _df_s is not None:
+                try:
+                    _pom_counts = _df_s[_pom_col_r].value_counts().head(3)
+                    _pom_str = ", ".join(
+                        f"{p} ({n})" for p, n in _pom_counts.items()
+                    )
+                    recommendations.append({
+                        "priority": len(recommendations) + 1,
+                        "action": (
+                            f"Top match-winners: {_pom_str}. "
+                            f"Analyse their match conditions to understand "
+                            f"what triggers peak performances."
+                        ),
+                        "timeframe": "Next quarter",
+                        "owner": "Coaching staff",
+                        "impact": "Important",
+                    })
+                except Exception:
+                    pass
 
         if domain_id == "entertainment" and len(recommendations) < 3:
             recommendations.extend([
@@ -3462,23 +3522,81 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 if _season_col_s is not None and df is not None
                 else "multiple"
             )
-            _winner_col_s = next(
-                (c for c in (df.columns if df is not None else [])
-                 if c.lower() == "winner"), None
+            _cols_s = list(df.columns if df is not None else [])
+            _cols_s_norm = {c.lower().replace(" ", "_"): c for c in _cols_s}
+
+            _winner_col_s = (
+                _cols_s_norm.get("winner")
+                or _cols_s_norm.get("winning_team")
+                or next(
+                    (c for c in _cols_s
+                     if "winner" in c.lower() and "toss" not in c.lower()),
+                    None,
+                )
             )
             _top_team = (
                 df[_winner_col_s].value_counts().index[0]
                 if _winner_col_s is not None and df is not None
                 else "the leading team"
             )
-            ai_summary = (
-                f"This tournament dataset spans {_total_m:,} matches "
-                f"across {_n_seasons} seasons. {_top_team} is the "
-                f"dominant team by win count. Toss win rate sits near "
-                f"50% — indicating toss has minimal predictive value. "
-                f"Eden Gardens is the most-used venue. AB de Villiers "
-                f"leads all-time Player of Match awards."
+
+            # Venue — check "venue", "stadium", "ground", "city"
+            _venue_col_s = next(
+                (c for c in _cols_s
+                 if any(k in c.lower() for k in
+                        ["venue", "stadium", "ground", "city", "location"])),
+                None,
             )
+            _top_venue = (
+                df[_venue_col_s].value_counts().index[0]
+                if _venue_col_s is not None and df is not None
+                else None
+            )
+
+            # Player of Match — omit sentence if column absent
+            _pom_col_s = next(
+                (c for c in _cols_s
+                 if any(k in c.lower() for k in
+                        ["player_of_match", "man_of_match", "pom",
+                         "best_player", "mvp"])),
+                None,
+            )
+            _top_pom = (
+                df[_pom_col_s].value_counts().index[0]
+                if _pom_col_s is not None and df is not None
+                else None
+            )
+
+            # Toss win rate
+            _toss_col_s = _cols_s_norm.get("toss_winner") or _cols_s_norm.get("toss")
+            _toss_sentence = "Toss has minimal predictive value."
+            if _toss_col_s and _winner_col_s and df is not None:
+                try:
+                    _tw = (df[_toss_col_s] == df[_winner_col_s]).mean() * 100
+                    _toss_sentence = (
+                        f"Toss winners win {_tw:.0f}% of matches — "
+                        f"{'a significant edge' if _tw > 55 else 'minimal predictive value'}."
+                    )
+                except Exception:
+                    pass
+
+            _venue_sentence = (
+                f"{_top_venue} is the most-used venue."
+                if _top_venue else ""
+            )
+            _pom_sentence = (
+                f"{_top_pom} leads Player of Match awards."
+                if _top_pom else ""
+            )
+
+            ai_summary = " ".join(filter(bool, [
+                f"This tournament dataset spans {_total_m:,} matches "
+                f"across {_n_seasons} seasons.",
+                f"{_top_team} is the dominant team by win count.",
+                _toss_sentence,
+                _venue_sentence,
+                _pom_sentence,
+            ]))
 
         if domain_id == "health" and (
             "General Business" in ai_summary
