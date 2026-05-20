@@ -317,7 +317,12 @@ IDENTIFIER_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-REVENUE_KEYWORDS  = {"revenue", "sales", "income", "turnover", "gmv", "gross"}
+REVENUE_KEYWORDS  = {
+    "revenue", "sales", "income", "turnover", "gmv", "gross",
+    "weekly_sales", "daily_sales", "monthly_sales",
+    "gross_sales", "net_sales", "total_sales",
+    "arr", "mrr",
+}
 PRICE_KEYWORDS    = {"price", "cost", "amount", "value", "fee", "charge", "rate", "spend"}
 QTY_KEYWORDS      = {"quantity", "qty", "units", "count", "volume", "items", "pieces"}
 RETURN_KEYWORDS   = {"return", "returned", "refund", "refunded", "chargeback", "cancelled"}
@@ -7906,7 +7911,12 @@ class SmartChartRecommender:
             if not col_name:
                 return False
             cl = col_name.lower()
-            return any(k in cl for k in ["sales", "amount", "revenue", "income"])
+            return any(k in cl for k in [
+                "sales", "revenue", "income", "turnover", "gmv", "gross",
+                "weekly_sales", "daily_sales", "monthly_sales",
+                "gross_sales", "net_sales", "total_sales",
+                "arr", "mrr", "amount",
+            ])
 
         # ── 1. Revenue by Category (horizontal bar) ────────────────────────
         if cat and price_col and domain_id not in ["health"]:
