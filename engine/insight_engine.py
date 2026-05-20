@@ -4222,6 +4222,157 @@ class BusinessRuleEngine:
                 except Exception as _pe:
                     log.warning(f"[sports_player] {_pe}")
 
+            # 6. Win method from Margin column (PSL-style: "8 wickets", "45 runs")
+            if margin_col:
+                try:
+                    _margin_vals = (
+                        pdf[margin_col].dropna()
+                        .astype(str).str.lower().str.strip()
+                    )
+                    _by_wickets = int(
+                        _margin_vals.str.contains(
+                            r"\d+\s*wicket", regex=True
+                        ).sum()
+                    )
+                    _by_runs = int(
+                        _margin_vals.str.contains(
+                            r"\d+\s*run", regex=True
+                        ).sum()
+                    )
+                    _valid = _by_wickets + _by_runs
+
+                    if _valid > 0:
+                        _chase_pct  = _by_wickets / _valid * 100
+                        _defend_pct = _by_runs   / _valid * 100
+                        _chase_dom  = _by_wickets > _by_runs
+
+                        # Parse margin numbers for avg winning margin
+                        _margin_nums = (
+                            _margin_vals.str.extract(r"(\d+)", expand=False)
+                            .dropna()
+                            .astype(float)
+                        )
+                        _avg_margin = round(_margin_nums.mean(), 1) if len(_margin_nums) else None
+                        _avg_note = (
+                            f" Average winning margin: {_avg_margin:.0f} "
+                            f"{'wickets' if _chase_dom else 'runs'}."
+                            if _avg_margin else ""
+                        )
+
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"Chasing Advantage: "
+                                f"{_chase_pct:.0f}% of matches won batting second"
+                                if _chase_dom else
+                                f"Defending Advantage: "
+                                f"{_defend_pct:.0f}% of matches won batting first"
+                            ),
+                            description=(
+                                f"Margin analysis of {_valid:,} completed matches: "
+                                f"{_by_wickets:,} won by wickets (chasing, "
+                                f"{_chase_pct:.0f}%) vs "
+                                f"{_by_runs:,} won by runs (defending, "
+                                f"{_defend_pct:.0f}%).{_avg_note} "
+                                f"{'Chasing teams win more often — batting second is the statistically stronger strategy in this tournament.' if _chase_dom else 'Defending teams win more — posting big totals and defending is the stronger strategy.'}"
+                            ),
+                            why_it_matters=(
+                                "Win method distribution from margin data "
+                                "directly informs toss strategy — whether "
+                                "to bat or field first on winning the toss."
+                            ),
+                            evidence=(
+                                f"Wicket wins: {_by_wickets} ({_chase_pct:.0f}%) | "
+                                f"Run wins: {_by_runs} ({_defend_pct:.0f}%)"
+                            ),
+                            impact="🔴 Critical" if abs(_chase_pct - 50) > 10 else "🟠 Important",
+                            recommendation=(
+                                f"{'Choose to chase when winning the toss — wicket wins dominate this dataset.' if _chase_dom else 'Bat first when winning the toss — run wins confirm defending totals is the winning strategy.'}"
+                            ),
+                            rule_type="sports_win_method",
+                            score=8.5,
+                            chart_data={
+                                "won_by_wickets": _by_wickets,
+                                "won_by_runs": _by_runs,
+                                "chase_pct": round(_chase_pct, 1),
+                                "defend_pct": round(_defend_pct, 1),
+                            },
+                        ))
+                except Exception as _wme:
+                    log.warning(f"[sports_win_method] {_wme}")
+
+            # 7. Season competitiveness — win rate std deviation across teams
+            if team1_col and team2_col and winner_col and season_col:
+                try:
+                    _all_teams = pd.concat([
+                        pdf[team1_col], pdf[team2_col]
+                    ]).dropna().unique().tolist()
+
+                    _team_rates = []
+                    for _t in _all_teams:
+                        _played = int(
+                            (pdf[team1_col] == _t).sum()
+                            + (pdf[team2_col] == _t).sum()
+                        )
+                        _wins = int((pdf[winner_col] == _t).sum())
+                        if _played >= 5:
+                            _team_rates.append(_wins / _played)
+
+                    if len(_team_rates) >= 4:
+                        import numpy as _np
+                        _std  = float(_np.std(_team_rates))
+                        _mean = float(_np.mean(_team_rates))
+                        _era  = "dominant era" if _std > 0.08 else "competitive league"
+                        _top5_str = ", ".join(
+                            f"{s['team']} ({s['wins']}W/{s['played']}M, {s['rate']*100:.0f}%)"
+                            for s in sorted(
+                                [
+                                    {"team": t, "wins": int((pdf[winner_col] == t).sum()),
+                                     "played": int((pdf[team1_col] == t).sum() + (pdf[team2_col] == t).sum()),
+                                     "rate": r}
+                                    for t, r in zip(_all_teams[:len(_team_rates)], _team_rates)
+                                ],
+                                key=lambda x: x["rate"], reverse=True
+                            )[:5]
+                        )
+
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"League Balance: {'Dominant Era' if _std > 0.08 else 'Competitive League'} "
+                                f"(Win Rate Std Dev {_std:.2f})"
+                            ),
+                            description=(
+                                f"Win rate standard deviation across {len(_team_rates)} teams: "
+                                f"{_std:.3f} — classified as a {_era}. "
+                                f"Mean win rate: {_mean*100:.0f}%. "
+                                f"{'High variance indicates 1-2 teams dominate the field. ' if _std > 0.08 else 'Low variance indicates closely matched competition across teams. '}"
+                                f"Top 5 by win rate: {_top5_str}."
+                            ),
+                            why_it_matters=(
+                                "Competitive balance shapes fan engagement, "
+                                "broadcast value, and strategic team investment. "
+                                "High std dev signals structural dominance requiring "
+                                "league intervention or squad rebuilding."
+                            ),
+                            evidence=(
+                                f"Std dev: {_std:.3f} | "
+                                f"{'Dominant era (>0.08)' if _std > 0.08 else 'Balanced league (≤0.08)'}"
+                            ),
+                            impact="🟠 Important",
+                            recommendation=(
+                                f"{'Investigate salary cap or player draft policies to rebalance competition. Study dominant teams for structural advantages.' if _std > 0.08 else 'League competition is healthy — focus on maintaining balance through fair scheduling and squad depth.'}"
+                            ),
+                            rule_type="sports_league_balance",
+                            score=7.5,
+                            chart_data={
+                                "win_rate_std": round(_std, 3),
+                                "win_rate_mean": round(_mean, 3),
+                                "is_dominant_era": _std > 0.08,
+                                "team_count": len(_team_rates),
+                            },
+                        ))
+                except Exception as _sbe:
+                    log.warning(f"[sports_league_balance] {_sbe}")
+
         except Exception as e:
             log.warning(f"[sports_analysis] Failed: {e}")
 
