@@ -1779,8 +1779,6 @@ class BusinessRuleEngine:
         warnings: list[str] = []
         pdf = df.to_pandas()
 
-        print(f"[DEBUG] date_col={profile.date_col}, temporals={profile.temporals}")
-
         # ── Gemini column semantics (runs once per analysis) ──────────────────
         _gemini_semantics = {}
         _col_overrides = {}
@@ -7171,14 +7169,11 @@ class StrategicBriefBuilder:
     def _find_temporal_finding(self) -> str:
         for ins in self.insights:
             rule = ins.get("rule_type", "") if isinstance(ins, dict) else getattr(ins, "rule_type", "")
-            print(f"[TEMPORAL DEBUG] checking insight: rule={rule}, type={type(ins)}")
             if rule == "temporal_peaks":
                 chart_data = ins.get("chart_data", {}) if isinstance(ins, dict) else getattr(ins, "chart_data", {})
-                print(f"[TEMPORAL DEBUG] chart_data={chart_data}")
                 peak = chart_data.get("peak_month", "") if chart_data else ""
                 trough = chart_data.get("trough_month", "") if chart_data else ""
                 gap = chart_data.get("pct_gap", 0) if chart_data else 0
-                print(f"[TEMPORAL DEBUG] peak={peak}, trough={trough}, gap={gap}")
                 if peak and trough:
                     return (
                         f"Revenue shows clear seasonality: {peak} is the peak month "
