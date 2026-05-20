@@ -141,6 +141,17 @@ export default function InsightsPage() {
                     throw new Error(`Session fetch failed: ${res.status}`);
                 }
                 const sessionData = await res.json();
+                console.log("Session data:", sessionData);
+
+                // Extract filename from API response for direct-URL navigation
+                const apiFilename = sessionData.original_filename
+                    || sessionData.filename
+                    || "";
+                if (apiFilename) {
+                    setSessionFilename(apiFilename);
+                    setProjectName(apiFilename.split(".")[0]);
+                }
+
                 const mapped: InsightsData = {
                     session_id: String(sessionData.id),
                     executive_summary: "",
@@ -496,7 +507,11 @@ export default function InsightsPage() {
                                     <div className="h-[600px]">
                                         <ChatPanel
                                             sessionId={Number(data.session_id)}
-                                            filename={sessionFilename || projectName || "your dataset"}
+                                            filename={
+                                                sessionFilename
+                                                || (projectName && isNaN(Number(projectName)) ? projectName : "")
+                                                || "your dataset"
+                                            }
                                         />
                                     </div>
                                 ) : (
