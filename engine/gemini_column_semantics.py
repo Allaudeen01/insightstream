@@ -112,7 +112,7 @@ Columns: {json.dumps(columns)}
 Sample data: {sample_str}
 
 Classify each column into exactly one type:
-attrition, satisfaction, salary, department, job_role,
+attrition, satisfaction, salary, performance, department, job_role,
 revenue, quantity, price, category, customer_id, region,
 cases, deaths, recovered, country, team, date, id, text,
 boolean, numeric_other, other
@@ -123,6 +123,8 @@ Rules:
 - Weekly_Sales, Revenue, Amount, Sales → revenue
 - CustomerID, EmpID, InvoiceNo → id
 - Date columns → date
+- Salary, MonthlySalary, AnnualSalary, Wage, Pay, Compensation → salary
+- PerformanceScore, PerfScore, Rating, PerformanceRating → performance
 
 Return ONLY valid JSON:
 {{"column_name": "semantic_type"}}"""
