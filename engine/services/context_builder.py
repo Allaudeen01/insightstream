@@ -55,13 +55,12 @@ def build_system_prompt(session: AnalysisSession) -> str:
 
 
 def build_message_history(messages: list, max_messages: int = 20) -> list:
-    """Convert DB messages to Gemini API format."""
+    """Convert DB messages to Groq/OpenAI API format."""
     recent = messages[-max_messages:]
-    result = []
-    for msg in recent:
-        role = "model" if msg.role == "assistant" else "user"
-        result.append({
-            "role": role,
-            "parts": [{"text": msg.content}]
-        })
-    return result
+    return [
+        {
+            "role": "assistant" if msg.role == "assistant" else "user",
+            "content": msg.content,
+        }
+        for msg in recent
+    ]

@@ -1,5 +1,7 @@
 import json
-import google.generativeai as genai
+import os
+import asyncio
+from groq import Groq
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -8,16 +10,7 @@ from config import settings
 from models import AnalysisSession, ChatMessage
 from services.context_builder import build_system_prompt, build_message_history
 
-
-def get_gemini_model(system_prompt: str):
-    """Initialise Gemini model. Returns None if API key not set."""
-    if not settings.GEMINI_API_KEY:
-        return None
-    genai.configure(api_key=settings.GEMINI_API_KEY)
-    return genai.GenerativeModel(
-        model_name=settings.GEMINI_MODEL,
-        system_instruction=system_prompt,
-    )
+_groq_client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
 
 
 async def get_session_for_chat(
@@ -83,40 +76,38 @@ async def stream_response(
         yield f"data: {json.dumps({'type': 'error', 'content': 'Analysis not complete yet'})}\n\n"
         return
 
-    if not settings.GEMINI_API_KEY:
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Gemini API key not configured. Add GEMINI_API_KEY to .env'})}\n\n"
+    if not os.getenv("GROQ_API_KEY", ""):
+        yield f"data: {json.dumps({'type': 'error', 'content': 'GROQ_API_KEY not configured. Add it to .env'})}\n\n"
         return
-
-    print(f"[CHAT DEBUG] API key present: {bool(settings.GEMINI_API_KEY)}")
-    print(f"[CHAT DEBUG] Model: {settings.GEMINI_MODEL}")
-    print(f"[CHAT DEBUG] Session status: {session.status if session else 'NOT FOUND'}")
 
     await save_message(db, session_id, user_id, "user", user_message)
 
     system_prompt = build_system_prompt(session)
     history = build_message_history(
-        session.chat_messages[:-1],  # exclude the message just saved
+        session.chat_messages[:-1],
         max_messages=settings.CHAT_MAX_HISTORY_MESSAGES,
     )
 
-    model = get_gemini_model(system_prompt)
-    chat = model.start_chat(history=history)
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
 
     full_response = ""
     try:
-        response = await chat.send_message_async(
-            user_message,
-            stream=True,
-        )
+        def _call_groq():
+            completion = _groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=500,
+            )
+            return completion.choices[0].message.content
 
-        async for chunk in response:
-            if chunk.text:
-                full_response += chunk.text
-                yield f"data: {json.dumps({'type': 'text', 'content': chunk.text})}\n\n"
+        answer = await asyncio.to_thread(_call_groq)
+        full_response = answer
+        yield f"data: {json.dumps({'type': 'text', 'content': answer})}\n\n"
 
-        if full_response:
-            await save_message(db, session_id, user_id, "assistant", full_response)
-
+        await save_message(db, session_id, user_id, "assistant", full_response)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     except Exception as e:
