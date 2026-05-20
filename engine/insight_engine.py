@@ -8748,7 +8748,7 @@ class SmartChartRecommender:
                 pass
 
         # ── 5. Revenue over Time (line) ────────────────────────────────────
-        if date_col and price_col:
+        if domain_id in ["sales", "ecommerce"] and date_col and price_col:
             try:
                 pdf_tmp = pdf.copy()
                 # Added dayfirst=True to fix future dates bug

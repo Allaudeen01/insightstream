@@ -29,6 +29,10 @@ let ResponsiveGrid: any = null;
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 // ----- Static chart explanations keyed by lowercase title substring -----
+// NOTE: Only include entries that are domain-neutral or verified correct for the
+// matched dataset. Do NOT add entries for charts that only appear in specific
+// domains (e.g. "monthly revenue trend" must NOT appear here — it would show
+// fabricated sales insights on sports/HR/health datasets).
 const CHART_EXPLANATIONS: Record<string, string> = {
     "pareto": "Revenue is spread across all 7 products with no dominant segment. This means no single product failure puts revenue at risk — but also means no standout performer to double down on.",
     "revenue by product": "All segments contribute 14–16% of revenue, indicating near-perfect diversification. The 1.1x dominance ratio (Tablet) is well below the 2x threshold that signals concentration risk.",
@@ -36,7 +40,6 @@ const CHART_EXPLANATIONS: Record<string, string> = {
     "records per product": "Transaction volume is uniformly distributed (233–280 orders per product). Products with high volume but lower revenue have lower average unit prices — candidates for upsell.",
     "unitprice": "Prices are uniformly distributed from ₹0–₹800 with a median of ₹392. No price clustering suggests products are not competing with each other on price — each occupies a distinct price tier.",
     "unit price distribution": "Prices are uniformly distributed from ₹0–₹800 with a median of ₹392. No price clustering suggests products are not competing with each other on price — each occupies a distinct price tier.",
-    "monthly revenue trend": "Revenue peaks every May and troughs every September — a consistent 38% swing. Pre-positioning inventory 4–6 weeks before May is the single highest-ROI operational decision.",
 };
 
 // ----- Plotly light theme used across the dashboard -----
