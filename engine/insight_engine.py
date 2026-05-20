@@ -3443,7 +3443,7 @@ class BusinessRuleEngine:
                                 f"{_peak_add_year} ({_peak_add_count:,} titles)"
                             ),
                             description=(
-                                f"Netflix added the most content in "
+                                f"Content additions peaked in "
                                 f"{_peak_add_year} ({_peak_add_count:,} titles). "
                                 f"{_recent_added:,} titles ({_recent_pct:.0f}%) "
                                 f"were added in 2019 or later. "
