@@ -1988,52 +1988,63 @@ class PDFReportGenerator:
         return out
 
     def _kpi_table(self, kpis: dict) -> Table:
-        # CHANGE 4 — Runtime font verification
-        from reportlab.pdfbase import pdfmetrics as _pm
-        registered = list(_pm._fonts.keys())
-        print(f"[FONT_VERIFY] Registered fonts at KPI build time: {registered}")
-        print(f"[FONT_VERIFY] PDF_FONT_REGULAR = '{PDF_FONT_REGULAR}'")
-        print(f"[FONT_VERIFY] PDF_FONT_BOLD = '{PDF_FONT_BOLD}'")
+        from xml.sax.saxutils import escape as _xe_kpi
+        from reportlab.platypus import KeepTogether
 
         kpis = self._normalize_kpis(kpis)
         if not kpis:
             kpis = {"Status": "No KPI data"}
-        col_w = (C.PAGE_W - 2 * C.MARGIN) / max(len(kpis), 1)
-        cfg = self.config
 
-        # Hardcode DejaVuSans — PDF_FONT_REGULAR may resolve to Helvetica if
-        # font registration fails silently; ₹ glyph only exists in DejaVuSans.
-        def _rupee_wrap(s: str) -> str:
-            from xml.sax.saxutils import escape as _xe
-            return f'<font name="DejaVuSans">{_xe(str(s))}</font>'
+        n      = len(kpis)
+        col_w  = (C.PAGE_W - 2 * C.MARGIN) / n
+        cfg    = self.config
 
-        kpi_val_style = ParagraphStyle(
-            'KPIVal',
-            fontName='DejaVuSans',
-            fontSize=16,
+        lbl_style = ParagraphStyle(
+            'KPILbl', fontName=PDF_FONT_BOLD,
+            fontSize=8, textColor=colors.white,
             alignment=TA_CENTER,
+        )
+        val_style = ParagraphStyle(
+            'KPIVal', fontName='DejaVuSans',
+            fontSize=16, leading=20,
             textColor=colors.HexColor('#1e293b'),
-            leading=20,
+            alignment=TA_CENTER,
         )
 
-        hdr = [Paragraph(k, ParagraphStyle("kh2", fontName=PDF_FONT_BOLD,
-               fontSize=8, textColor=colors.white, alignment=TA_CENTER))
-               for k in kpis]
-        val = [Paragraph(_rupee_wrap(v), kpi_val_style) for v in kpis.values()]
-        tbl = Table([hdr, val], colWidths=[col_w] * len(kpis), splitByRow=0)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(cfg["purple"])),
-            ("BACKGROUND",    (0, 1), (-1, 1),  colors.HexColor(cfg["brand_light"])),
-            ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(C.RULE_GREY)),
-            ("TOPPADDING",    (0, 0), (-1, -1), 12),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
-            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        def _rupee_wrap(s: str) -> str:
+            return f'<font name="DejaVuSans">{_xe_kpi(str(s))}</font>'
+
+        # Build one inner 2-row table per KPI so label+value share a cell
+        # and can never be separated across pages.
+        inner_style = TableStyle([
+            ("BACKGROUND",    (0, 0), (0, 0), colors.HexColor(cfg["purple"])),
+            ("BACKGROUND",    (0, 1), (0, 1), colors.HexColor(cfg["brand_light"])),
+            ("TOPPADDING",    (0, 0), (0, 0), 10),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 10),
+            ("TOPPADDING",    (0, 1), (0, 1), 10),
+            ("BOTTOMPADDING", (0, 1), (0, 1), 10),
             ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
-            ("FONTNAME",      (0, 1), (-1, 1),  'DejaVuSans'),
-            ("FONTNAME",      (1, 0), (-1, -1), 'DejaVuSans'),
+            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ])
+
+        cells = []
+        for k, v in kpis.items():
+            lbl_para = Paragraph(_xe_kpi(k), lbl_style)
+            val_para = Paragraph(_rupee_wrap(v), val_style)
+            inner = Table([[lbl_para], [val_para]], colWidths=[col_w])
+            inner.setStyle(inner_style)
+            cells.append(inner)
+
+        outer = Table([cells], colWidths=[col_w] * n)
+        outer.setStyle(TableStyle([
+            ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(C.RULE_GREY)),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+            ("TOPPADDING",    (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
         ]))
-        from reportlab.platypus import KeepTogether
-        return KeepTogether([tbl])
+        return KeepTogether([outer])
 
     def _build_section_6_deep_insights(
         self,
