@@ -3495,6 +3495,273 @@ class BusinessRuleEngine:
                         return col
             return None
 
+        # Detect delivery-level (ball-by-ball) vs match-level dataset
+        _cols_lower = [c.lower() for c in df.columns]
+        _is_delivery_data = any(
+            c in _cols_lower
+            for c in ["extras_type", "dismissal_kind",
+                      "delivery", "ball", "over", "bowler"]
+        )
+
+        if _is_delivery_data:
+            try:
+                pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
+
+                runs_col     = _find_col(["runs_off_bat", "batsman_runs",
+                                          "total_runs", "runs"])
+                over_col     = _find_col(["over"])
+                batsman_col  = _find_col(["batter", "batsman", "striker"])
+                bowler_col   = _find_col(["bowler"])
+                dismissal_col = _find_col(["dismissal_kind", "wicket_type",
+                                           "how_out"])
+
+                # 1. Run rate by phase (powerplay / middle / death)
+                if over_col and runs_col:
+                    try:
+                        _op = pdf[[over_col, runs_col]].dropna().copy()
+                        _op[over_col] = pd.to_numeric(
+                            _op[over_col], errors="coerce")
+                        _op[runs_col] = pd.to_numeric(
+                            _op[runs_col], errors="coerce")
+                        _op = _op.dropna()
+
+                        def _phase(o):
+                            if o <= 5:   return "Powerplay (0-5)"
+                            elif o <= 14: return "Middle (6-14)"
+                            else:         return "Death (15-19)"
+
+                        _op["phase"] = _op[over_col].apply(_phase)
+                        _ps = _op.groupby("phase")[runs_col].agg(
+                            ["sum", "count"]).reset_index()
+                        _ps["rr"] = (_ps["sum"] / _ps["count"] * 6).round(2)
+                        _phase_dict = dict(zip(_ps["phase"], _ps["rr"]))
+
+                        _per_over = _op.groupby(over_col)[runs_col].sum()
+                        _peak_over = int(_per_over.idxmax())
+                        _peak_runs = int(_per_over.max())
+                        _death_rr  = _phase_dict.get("Death (15-19)", 0)
+                        _pp_rr     = _phase_dict.get("Powerplay (0-5)", 0)
+                        _phase_str = " | ".join(
+                            f"{ph}: {rr:.2f}"
+                            for ph, rr in sorted(_phase_dict.items()))
+
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"Run Rate by Phase: Death overs "
+                                f"peak at {_death_rr:.2f} RPB"
+                            ),
+                            description=(
+                                f"Ball-by-ball analysis across "
+                                f"{len(pdf):,} deliveries. "
+                                f"Phase run rates (runs/ball): {_phase_str}. "
+                                f"Most productive single over: "
+                                f"Over {_peak_over} ({_peak_runs} runs total)."
+                            ),
+                            why_it_matters=(
+                                "Phase-wise run rates reveal batting strategy "
+                                "and scoring patterns across match stages."
+                            ),
+                            evidence=(
+                                f"Powerplay: {_pp_rr:.2f} RPB | "
+                                f"Death: {_death_rr:.2f} RPB"
+                            ),
+                            impact="🔴 Critical",
+                            recommendation=(
+                                "Focus death-over specialists in the XI. "
+                                "Protect wickets in overs 1-3 to maximise "
+                                "powerplay platform."
+                            ),
+                            rule_type="sports_run_rate",
+                            score=9.0,
+                            chart_data={
+                                "phase_run_rates": _phase_dict,
+                                "per_over_runs": _per_over.head(20).to_dict(),
+                                "peak_over": _peak_over,
+                            },
+                        ))
+                    except Exception as _ore:
+                        log.warning(f"[sports_delivery_over] {_ore}")
+
+                # 2. Top batsmen by total runs
+                if batsman_col and runs_col:
+                    try:
+                        _bp = pdf[[batsman_col, runs_col]].dropna().copy()
+                        _bp[runs_col] = pd.to_numeric(
+                            _bp[runs_col], errors="coerce")
+                        _bp = _bp.dropna()
+                        _bat_runs  = _bp.groupby(
+                            batsman_col)[runs_col].sum().sort_values(
+                            ascending=False)
+                        _bat_balls = _bp.groupby(batsman_col).size()
+                        _top10 = _bat_runs.head(10)
+                        _top_bat   = _top10.index[0]
+                        _top_runs  = int(_top10.iloc[0])
+                        _top_balls = int(_bat_balls.get(_top_bat, 1))
+                        _top_sr    = round(
+                            _top_runs / max(_top_balls, 1) * 100, 1)
+
+                        _top5_str = ", ".join(
+                            f"{b} ({int(r)} runs, "
+                            f"SR {round(r/max(int(_bat_balls.get(b,1)),1)*100,0):.0f})"
+                            for b, r in _top10.head(5).items()
+                        )
+                        insights.append(BusinessInsight(
+                            title=(
+                                f"Top Batsman: {_top_bat} "
+                                f"({_top_runs} runs, SR {_top_sr})"
+                            ),
+                            description=(
+                                f"{_top_bat} leads with {_top_runs} runs "
+                                f"from {_top_balls} balls "
+                                f"(strike rate {_top_sr}). "
+                                f"Top 5: {_top5_str}."
+                            ),
+                            why_it_matters=(
+                                "Runs and strike rate identify match-winners "
+                                "and batting depth across the dataset."
+                            ),
+                            evidence=(
+                                f"Top: {_top_bat} — "
+                                f"{_top_runs} runs, SR {_top_sr}"
+                            ),
+                            impact="🔴 Critical",
+                            recommendation=(
+                                f"Build lineup around {_top_bat}'s role. "
+                                f"Protect their wicket in powerplay to "
+                                f"maximise death-over impact."
+                            ),
+                            rule_type="sports_batsman_performance",
+                            score=9.0,
+                            chart_data={
+                                "top_batsmen": _top10.to_dict()
+                            },
+                        ))
+                    except Exception as _bre:
+                        log.warning(f"[sports_delivery_batsman] {_bre}")
+
+                # 3. Wicket types distribution
+                if dismissal_col:
+                    try:
+                        _dis = (
+                            pdf[dismissal_col].dropna()
+                            .astype(str).str.strip()
+                        )
+                        _dis = _dis[_dis.str.lower().isin(
+                            ["nan", "", "none"]) == False]  # noqa: E712
+                        _dis_counts  = _dis.value_counts()
+                        _total_wkts  = int(_dis_counts.sum())
+
+                        if _total_wkts > 0:
+                            _top_dis   = _dis_counts.index[0]
+                            _top_dis_n = int(_dis_counts.iloc[0])
+                            _top_pct   = _top_dis_n / _total_wkts * 100
+                            _dis_str   = ", ".join(
+                                f"{d} ({n}, {n/_total_wkts*100:.0f}%)"
+                                for d, n in _dis_counts.head(5).items()
+                            )
+                            insights.append(BusinessInsight(
+                                title=(
+                                    f"Dismissal Types: "
+                                    f"{_top_dis.title()} leads "
+                                    f"({_top_pct:.0f}%)"
+                                ),
+                                description=(
+                                    f"{_total_wkts:,} wickets analysed. "
+                                    f"Most common: {_top_dis} "
+                                    f"({_top_dis_n}, {_top_pct:.0f}%). "
+                                    f"Top 5: {_dis_str}."
+                                ),
+                                why_it_matters=(
+                                    "Wicket type distribution reveals "
+                                    "batsman vulnerabilities and which "
+                                    "bowling strategies are most effective."
+                                ),
+                                evidence=(
+                                    f"Top dismissal: {_top_dis} — "
+                                    f"{_top_pct:.0f}% of wickets"
+                                ),
+                                impact="🟠 Important",
+                                recommendation=(
+                                    "Tailor bowling plans to exploit the "
+                                    f"dominant {_top_dis} dismissal type. "
+                                    f"{'Set close-in catching fields.' if 'caught' in _top_dis.lower() else 'Attack the stumps directly.'}"
+                                ),
+                                rule_type="sports_dismissal_types",
+                                score=7.5,
+                                chart_data={
+                                    "dismissal_counts": (
+                                        _dis_counts.head(10).to_dict()
+                                    )
+                                },
+                            ))
+                    except Exception as _dre:
+                        log.warning(f"[sports_delivery_dismissal] {_dre}")
+
+                # 4. Economy rate by bowler (min 2 overs bowled)
+                if bowler_col and runs_col:
+                    try:
+                        _bwp = pdf[[bowler_col, runs_col]].dropna().copy()
+                        _bwp[runs_col] = pd.to_numeric(
+                            _bwp[runs_col], errors="coerce")
+                        _bwp = _bwp.dropna()
+                        _b_runs  = _bwp.groupby(bowler_col)[runs_col].sum()
+                        _b_balls = _bwp.groupby(bowler_col).size()
+                        _qual    = _b_balls[_b_balls >= 12].index
+                        _b_econ  = (
+                            (_b_runs[_qual] / _b_balls[_qual]) * 6
+                        ).sort_values().dropna()
+
+                        if len(_b_econ) >= 2:
+                            _best  = _b_econ.index[0]
+                            _be    = round(float(_b_econ.iloc[0]), 2)
+                            _worst = _b_econ.index[-1]
+                            _we    = round(float(_b_econ.iloc[-1]), 2)
+                            _t5_str = ", ".join(
+                                f"{b} ({e:.2f})"
+                                for b, e in _b_econ.head(5).items()
+                            )
+                            insights.append(BusinessInsight(
+                                title=(
+                                    f"Economy Leaders: {_best} "
+                                    f"({_be:.2f} RPO)"
+                                ),
+                                description=(
+                                    f"{_best} is the most economical "
+                                    f"({_be:.2f} runs/over). "
+                                    f"Most expensive: {_worst} "
+                                    f"({_we:.2f} RPO). "
+                                    f"Top 5 economical: {_t5_str}."
+                                ),
+                                why_it_matters=(
+                                    "Economy rate identifies bowlers who "
+                                    "restrict scoring — critical for death "
+                                    "overs and powerplay containment."
+                                ),
+                                evidence=(
+                                    f"Best: {_best} ({_be:.2f}) | "
+                                    f"Worst: {_worst} ({_we:.2f})"
+                                ),
+                                impact="🟠 Important",
+                                recommendation=(
+                                    f"Bowl {_best} in high-pressure overs. "
+                                    f"Limit {_worst}'s death-phase exposure."
+                                ),
+                                rule_type="sports_bowler_economy",
+                                score=8.0,
+                                chart_data={
+                                    "bowler_economy": (
+                                        _b_econ.head(10).to_dict()
+                                    )
+                                },
+                            ))
+                    except Exception as _boer:
+                        log.warning(f"[sports_delivery_economy] {_boer}")
+
+            except Exception as _de:
+                log.warning(f"[sports_delivery] {_de}")
+
+            return insights
+
         # EXACT match first for winner — must not match toss_winner
         winner_col = None
         for col in df.columns:
@@ -3514,8 +3781,6 @@ class BusinessRuleEngine:
             if col.lower().strip() in ["toss_winner", "toss"]:
                 toss_col = col
                 break
-
-        print(f"[SPORTS] winner_col={winner_col}, toss_col={toss_col}")
 
         team1_col  = _find_col(["team1", "home_team", "team_1"])
         team2_col  = _find_col(["team2", "away_team", "team_2"])
@@ -3545,9 +3810,8 @@ class BusinessRuleEngine:
             if toss_col:
                 _norm_df[toss_col] = _norm_df[toss_col].replace(_TEAM_ALIASES)
             df = _norm_df
-            print(f"[SPORTS] Team aliases applied")
         except Exception as _na:
-            print(f"[SPORTS] Alias normalization skipped: {_na}")
+            log.warning(f"[sports_alias] {_na}")
 
         try:
             pdf = df.to_pandas() if hasattr(df, "to_pandas") \
@@ -3835,7 +4099,6 @@ class BusinessRuleEngine:
             # 4b. Result type from 'result' column (e.g. "runs"/"wickets"/"tie"/"no result")
             _result_col = _find_col(["result", "result_type",
                                      "win_by", "outcome"])
-            print(f"[SPORTS] result_col={_result_col}")
             if _result_col:
                 try:
                     _result_vals = (
@@ -3847,10 +4110,6 @@ class BusinessRuleEngine:
                     _ties      = int((_result_vals == "tie").sum())
                     _no_result = int((_result_vals == "no result").sum())
                     _other     = _ties + _no_result
-
-                    print(f"[SPORTS] Results — runs:{_won_runs}, "
-                          f"wickets:{_won_wkts}, ties:{_ties}, "
-                          f"no result:{_no_result}")
 
                     if _won_runs + _won_wkts > 0:
                         _chase_dominant = _won_wkts > _won_runs
@@ -3899,9 +4158,7 @@ class BusinessRuleEngine:
                             },
                         ))
                 except Exception as _rte:
-                    print(f"[SPORTS RESULT ERROR] {_rte}")
-                    import traceback
-                    traceback.print_exc()
+                    log.warning(f"[sports_result] {_rte}")
 
             # 5. Player of Match frequency
             if pom_col:
