@@ -2115,6 +2115,26 @@ class PDFReportGenerator:
                     prose
                 )
 
+            # Reverse: reformat $ values when INR is selected
+            if _sym == '₹' and prose:
+                import re as _re2
+                def _reformat_usd(m):
+                    raw = m.group(0)
+                    num_str = raw.replace('$', '').replace(',', '').strip()
+                    try:
+                        if num_str.endswith('B'):
+                            val = float(num_str[:-1]) * 1e9
+                        elif num_str.endswith('M'):
+                            val = float(num_str[:-1]) * 1e6
+                        elif num_str.endswith('K'):
+                            val = float(num_str[:-1]) * 1e3
+                        else:
+                            val = float(num_str)
+                        return _fmt_currency(val, '₹')
+                    except Exception:
+                        return raw
+                prose = _re2.sub(r'\$[\d,\.]+(?:[MKB])?', _reformat_usd, prose)
+
             if prose:
                 narrative_style = ParagraphStyle(
                     'NarrativeStyle',
@@ -3152,8 +3172,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
             self._currency_symbol = _CURRENCY_MAP.get(currency_override, "₹")
             print(f"[CURRENCY] Using override: {currency_override} → {self._currency_symbol}")
         else:
-            self._currency_symbol = _detect_currency_symbol(df) if df is not None else "₹"
-            print(f"[CURRENCY] Detected symbol: {self._currency_symbol}")
+            # Prefer insight_engine's symbol if it was explicitly set by the user
+            try:
+                import insight_engine as _ie
+                if _ie._CURRENCY_EXPLICIT:
+                    self._currency_symbol = _ie._CURRENCY_SYMBOL
+                    print(f"[CURRENCY] Inherited explicit symbol: {self._currency_symbol}")
+                else:
+                    self._currency_symbol = _detect_currency_symbol(df) if df is not None else "₹"
+                    print(f"[CURRENCY] Detected symbol: {self._currency_symbol}")
+            except Exception:
+                self._currency_symbol = _detect_currency_symbol(df) if df is not None else "₹"
+                print(f"[CURRENCY] Detected symbol (fallback): {self._currency_symbol}")
 
         self.config = TEMPLATE_CONFIGS.get(template, TEMPLATE_CONFIGS["modern"])
         self._setup_styles()
