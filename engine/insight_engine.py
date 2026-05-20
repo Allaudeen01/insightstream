@@ -4246,18 +4246,28 @@ class BusinessRuleEngine:
                         _defend_pct = _by_runs   / _valid * 100
                         _chase_dom  = _by_wickets > _by_runs
 
-                        # Parse margin numbers for avg winning margin
-                        _margin_nums = (
-                            _margin_vals.str.extract(r"(\d+)", expand=False)
-                            .dropna()
-                            .astype(float)
-                        )
-                        _avg_margin = round(_margin_nums.mean(), 1) if len(_margin_nums) else None
-                        _avg_note = (
-                            f" Average winning margin: {_avg_margin:.0f} "
-                            f"{'wickets' if _chase_dom else 'runs'}."
-                            if _avg_margin else ""
-                        )
+                        # Split margins by type before averaging
+                        _runs_mask    = _margin_vals.str.contains(r"\d+\s*run",    regex=True)
+                        _wickets_mask = _margin_vals.str.contains(r"\d+\s*wicket", regex=True)
+
+                        def _extract_mean(mask):
+                            nums = (
+                                _margin_vals[mask]
+                                .str.extract(r"(\d+)", expand=False)
+                                .dropna()
+                                .astype(float)
+                            )
+                            return float(nums.mean()) if len(nums) else None
+
+                        _avg_runs    = _extract_mean(_runs_mask)
+                        _avg_wickets = _extract_mean(_wickets_mask)
+
+                        _avg_parts = []
+                        if _avg_runs    is not None:
+                            _avg_parts.append(f"Average margin when defending: {_avg_runs:.0f} runs.")
+                        if _avg_wickets is not None:
+                            _avg_parts.append(f"Average margin when chasing: {_avg_wickets:.1f} wickets.")
+                        _avg_note = (" " + " ".join(_avg_parts)) if _avg_parts else ""
 
                         insights.append(BusinessInsight(
                             title=(
