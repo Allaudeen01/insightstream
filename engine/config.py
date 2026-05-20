@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.0-flash"
+    GROQ_API_KEY: str = ""
     CHAT_MAX_HISTORY_MESSAGES: int = 20
 
     class Config:
