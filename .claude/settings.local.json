@@ -33,7 +33,12 @@
       "Bash(curl -s http://localhost:8000/)",
       "Bash(taskkill /f /im python.exe)",
       "Bash(taskkill /f /im uvicorn.exe)",
-      "Bash(echo \"Server starting in background, PID: $!\")"
+      "Bash(echo \"Server starting in background, PID: $!\")",
+      "Bash(pip install *)",
+      "Bash(awk 'NR>=235 && NR<=260')",
+      "PowerShell($matches = Select-String -Path \"C:\\\\Users\\\\ALI\\\\Downloads\\\\insightstream_-ai-data-analyst\\\\engine\\\\insight_engine.py\" -Pattern \"^\\\\s+\\(try:|except\\)\"; $matches | Where-Object { $_.LineNumber -ge 6620 -and $_.LineNumber -le 6760 } | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line.Trim\\(\\)\\)\" })",
+      "Bash(awk -F: '$2+0 >= 7815 && $2+0 <= 7840')",
+      "Bash(awk -F: '$2+0 >= 7750 && $2+0 <= 8600')"
     ]
   }
 }
