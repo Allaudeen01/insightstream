@@ -1156,9 +1156,26 @@ class InsightNarrator:
         sentences: list[str] = []
 
         _sym = getattr(self, '_currency_symbol', '₹')
-        total_rev = self._find_revenue(metrics) or _fmt_currency(
-            self._kv(metrics, "Total Revenue"), _sym
-        )
+
+        # Get raw total_rev string
+        _raw_rev = self._find_revenue(metrics) or \
+                   self._kv(metrics, "Total Revenue") or ""
+
+        # If symbol mismatch — strip old symbol and reformat
+        if _raw_rev and _sym != '₹' and '₹' in str(_raw_rev):
+            import re as _re
+            # Extract numeric value (handles "₹97.48 L", "₹9.75M", etc.)
+            _clean = str(_raw_rev).replace('₹', '').replace(',', '') \
+                                  .replace(' Cr', 'e7').replace(' L', 'e5') \
+                                  .replace('M', 'e6').replace('K', 'e3') \
+                                  .strip()
+            try:
+                _numeric = float(_clean)
+                total_rev = _fmt_currency(_numeric, _sym)
+            except (ValueError, TypeError):
+                total_rev = _raw_rev  # fallback to original
+        else:
+            total_rev = _raw_rev
         records   = self._kv(metrics, "Records")
         try:
             records = f"{int(str(records).replace(',', '')):,}"
