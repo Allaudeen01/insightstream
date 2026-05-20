@@ -1929,7 +1929,6 @@ class PDFReportGenerator:
             return {}
         _CURRENCY_SANITIZE = [
             (r'\mathbb{1}', '₹'), ('\\mathbb{1}', '₹'), ('\mathbb{1}', '₹'),
-            ('£', '₹'), ('¥', '₹'),
         ]
         def _sanitize(s: str) -> str:
             for bad, good in _CURRENCY_SANITIZE:
@@ -2186,7 +2185,7 @@ class PDFReportGenerator:
             # XML-escape title to prevent &, <, > from breaking ReportLab's XML parser
             from xml.sax.saxutils import escape as _xe_card
             title = title.replace(r'\mathbb{1}', '₹').replace('\\mathbb{1}', '₹')
-            title = title.replace('£', '₹').replace('¥', '₹')
+            # Currency symbols preserved — no forced INR conversion
             safe_card_title = _xe_card(title)
             badge_style = ParagraphStyle(
                 f'Badge_{i}', fontSize=8, fontName=PDF_FONT_BOLD,
