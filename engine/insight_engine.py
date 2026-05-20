@@ -5105,7 +5105,6 @@ class BusinessRuleEngine:
     @log_rule
     def _rule_rating_analysis(self, df: pl.DataFrame, profile: DataProfile) -> list[BusinessInsight]:
         """Analyze star-rating / score columns for satisfaction signals."""
-        print(f"[RATING DEBUG] profile.categoricals = {profile.categoricals}")
         insights = []
         rating_cols = [
             c for c in profile.categoricals
@@ -5134,10 +5133,6 @@ class BusinessRuleEngine:
 
                 # Only fire if actual low rate meaningfully exceeds expectation
                 excess_low_rate = pct_low - expected_low_rate
-
-                print(f"[RATING DEBUG] scale_min={scale_min}, scale_max={scale_max}, "
-                      f"midpoint={scale_midpoint}, actual_mean={actual_mean:.2f}, "
-                      f"excess_low={excess_low_rate:.1f}pp")
 
                 if not mean_below_midpoint and excess_low_rate < 10:
                     log.info(
@@ -7861,7 +7856,6 @@ class SmartChartRecommender:
                        for k in ["#", "index", "row", "id", "rank",
                                   "unnamed", "1m", "per_"])
         ]
-        print(f"[VIZ] Numeric cols after preprocess: {_post_numeric_cols}")
 
         # Rebuild num_cols to include any newly converted columns
         _orig_num_cols = [c for c in profile.numericals
@@ -7890,7 +7884,7 @@ class SmartChartRecommender:
             if not _best_num and _post_numeric_cols:
                 _best_num = _post_numeric_cols[0]
             if _best_num:
-                print(f"[VIZ] price_col overridden → {_best_num}")
+                pass
 
         # Find best categorical col if profile has none
         _cat_override = profile.category_col
@@ -7904,7 +7898,6 @@ class SmartChartRecommender:
             ]
             if _geo_cols:
                 _cat_override = _geo_cols[0]
-                print(f"[VIZ] cat overridden → {_cat_override}")
         # ── End ColumnMap override ────────────────────────────────────────
 
         def _sanitize_id(raw: str) -> str:
@@ -8070,7 +8063,6 @@ class SmartChartRecommender:
                                     best_top1_pct = top1_pct
                                     best_cat_col = col
 
-                        print(f"[PARETO] Selected column: {best_cat_col} (top-1 share: {best_top1_pct:.1%})")
 
                         # Use the best categorical column for Pareto
                         grp_pareto = pdf_tmp.groupby(best_cat_col)[rev_col].sum().reset_index()
@@ -8557,9 +8549,9 @@ class SmartChartRecommender:
             _is_categorical = _is_truly_categorical(pdf[cat])
 
             if _is_health_numeric:
-                print(f"[VIZ] Skipping health numeric column: {cat}")
+                pass
             elif not _is_categorical:
-                print(f"[VIZ] Skipping non-categorical: {cat}")
+                pass
             else:
                 try:
                     counts = pdf[cat].value_counts().reset_index().head(10)
@@ -9216,9 +9208,6 @@ def run_insight_engine(
         synthesizer = DecisionIntelligenceSynthesizer()
         compressed_insights = synthesizer.synthesize(insights, driver_info, domain_id=domain_id)
 
-        # Verification print — confirms which insights reach the PDF renderer
-        print(f"\n[PRE-PDF INSIGHTS] {len(compressed_insights)} insights selected for report:")
-        print([getattr(i, 'title', '?') for i in compressed_insights])
         _priority_check = {"cohort_retention", "clv_estimate", "seasonal_forecast", "rfm_segmentation"}
         _present = {getattr(i, 'rule_type', '') for i in compressed_insights}
         _missing = _priority_check - _present
@@ -9299,8 +9288,6 @@ def run_insight_engine(
         
         # Assertion Guard (Step 5)
         assert isinstance(result["strategic_brief"], list), "strategic_brief MUST be a list"
-        print("DEBUG STRATEGIC BRIEF:", len(result["strategic_brief"]), "items found.")
-        
         return result
         
     except Exception as e:
