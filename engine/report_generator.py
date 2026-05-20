@@ -1155,7 +1155,10 @@ class InsightNarrator:
         domain_label = self._DOMAIN_LABELS.get(domain, domain.replace("_", " ").lower()) if domain else "business"
         sentences: list[str] = []
 
-        total_rev = self._find_revenue(metrics) or self._kv(metrics, "Total Revenue")
+        _sym = getattr(self, '_currency_symbol', '₹')
+        total_rev = self._find_revenue(metrics) or _fmt_currency(
+            self._kv(metrics, "Total Revenue"), _sym
+        )
         records   = self._kv(metrics, "Records")
         try:
             records = f"{int(str(records).replace(',', '')):,}"
