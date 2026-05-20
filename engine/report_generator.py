@@ -1146,7 +1146,6 @@ class InsightNarrator:
         Return a 2-4 sentence prose string connecting the top insights.
         Falls back gracefully if data is sparse.
         """
-        print(f"[NARRATOR ENTRY] insights={len(insights)}, df type={type(df)}, df is None={df is None}")
         if not insights:
             return ""
 
@@ -1296,8 +1295,6 @@ class InsightNarrator:
                     )
 
         # ── Sentence 3: seasonality — computed directly from df ──────────
-        print(f"[S3 DEBUG] df type={type(df)}, df is None={df is None}")
-        print(f"[S3 DEBUG] insights count={len(insights)}")
         import pandas as _pd
         s3 = ""
         try:
@@ -1351,7 +1348,6 @@ class InsightNarrator:
                                 f"demands proactive inventory and cash-flow planning."
                             )
                             break
-        print(f"[S3 DEBUG] s3 result='{s3[:80] if s3 else 'EMPTY'}'")
         if s3:
             sentences.append(s3)
 
@@ -2028,7 +2024,6 @@ class PDFReportGenerator:
         df=None,
     ) -> list:
         """Section 6: Deep Insights with WHAT / WHY / DECISION format."""
-        print(f"[SECTION6 ENTRY] insights={len(insights) if insights else 0}, df type={type(df)}, df is None={df is None}")
         elements = []
         if not insights:
             return elements
@@ -2786,7 +2781,6 @@ class PDFReportGenerator:
                 )
 
         # ✅ ADD MISSING SECTIONS 6 & 7
-        print(f"[BUILD METHOD] calling section 6, df type={type(df)}, df is None={df is None}")
         if isinstance(insights, list):
             elements.extend(self._build_section_6_deep_insights(
                 insights, metrics=kpis, domain=target_metric, df=df
@@ -4356,9 +4350,6 @@ class UnifiedReportGenerator(PDFReportGenerator):
         # ── End Sports trend chart ────────────────────────────────────────
 
         # ✅ ADD MISSING SECTIONS 6 & 7
-        print(f"[PRE-SECTION6] insights type={type(insights)}, len={len(insights) if insights else 0}, df is None={df is None}")
-        print(f"[build_from_assets] df passed to section 6: type={type(df)}, is None={df is None}")
-
         # Always start Deep Insights on a fresh page
         if insights:
             elements.append(PageBreak())

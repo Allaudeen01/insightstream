@@ -1789,7 +1789,6 @@ class BusinessRuleEngine:
             )
             _gemini_semantics = analyze_column_semantics(pdf)
             _col_overrides = apply_semantics_to_engine(pdf, _gemini_semantics)
-            print(f"[Gemini] Semantics: {_col_overrides}")
         except Exception as _ge:
             print(f"[Gemini] Semantics skipped: {_ge}")
         # ─────────────────────────────────────────────────────────────────────
@@ -1854,7 +1853,6 @@ class BusinessRuleEngine:
         # Gemini override takes priority over rule-based detection
         if _col_overrides.get("attrition_col"):
             _has_attrition_col = True
-            print(f"[Gemini] Attrition col: {_col_overrides['attrition_col']}")
         if _has_attrition_col:
             log.info("[HR] Attrition signal found — running _rule_hr_attrition")
             results = self._rule_hr_attrition(df, profile)
@@ -1871,7 +1869,6 @@ class BusinessRuleEngine:
         )
         if _col_overrides.get("satisfaction_col"):
             _has_satisfaction = True
-            print(f"[Gemini] Satisfaction col: {_col_overrides['satisfaction_col']}")
 
         # Fire content library rule for entertainment datasets
         _CONTENT_TYPES_EXEC = {"movie", "tv show", "series", "episode",
@@ -9179,14 +9176,6 @@ def run_insight_engine(
         classifier = ColumnClassifier()
         profile    = classifier.classify(df)
         
-        # DEBUG: Print column mapping
-        print("=== COLUMN MAPPING ===")
-        for attr in ["revenue_col", "price_col", "qty_col", "category_col", "geographic_col", "date_col", "return_col"]:
-            print(f"{attr}: {getattr(profile, attr, 'MISSING')}")
-        print(f"numericals: {profile.numericals}")
-        print(f"categoricals: {profile.categoricals}")
-        print(f"temporals: {profile.temporals}")
-        print("=" * 50)
         
         # TIER 1.1: Initialize column coverage tracker
         coverage = ColumnCoverageTracker(df, profile)
