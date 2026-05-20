@@ -106,6 +106,16 @@ class DomainDetector:
         if any("salesperson" in c or "sales_person" in c for c in actual_cols_lower):
             scores["sales"] = scores.get("sales", 0) + 0.5
 
+        # Time-series sales dataset (e.g. Walmart weekly sales)
+        _ts_sales_signals = 0
+        if any("weekly_sales" in c or "daily_sales" in c or "monthly_sales" in c
+               for c in actual_cols_lower):
+            _ts_sales_signals += 3
+        if any("store" in c or "location" in c for c in actual_cols_lower):
+            _ts_sales_signals += 1
+        if _ts_sales_signals >= 3:
+            scores["sales"] = max(scores.get("sales", 0), 0.5)
+
         # "order" + "discount" without "product" → ecommerce signal
         has_order   = any("order"    in c for c in actual_cols_lower)
         has_product = any("product"  in c for c in actual_cols_lower)
