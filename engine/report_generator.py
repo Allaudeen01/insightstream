@@ -1714,8 +1714,8 @@ class PDFReportGenerator:
                            title: str, insight: str) -> None:
         """Triple-guard chart embedding — never raises, never crashes the PDF build."""
         from xml.sax.saxutils import escape as _xe
-        safe_title = self._md_to_rl(str(title))
-        safe_insight = self._md_to_rl(str(insight))
+        safe_title = self._md_to_rl(_friendly_title(str(title)))
+        safe_insight = self._md_to_rl(_friendly_title(str(insight)))
 
         if not chart_path:
             elements.append(Paragraph(safe_title, self.S["ChartTitle"]))
@@ -1789,10 +1789,10 @@ class PDFReportGenerator:
             log.warning("[_add_chart_section] kaleido render returned None for: %s", title)
             return False
         from xml.sax.saxutils import escape as _xe_cs
-        elements.append(Paragraph(f"<b>{_xe_cs(str(title))}</b>", self.S["ChartTitle"]))
+        elements.append(Paragraph(f"<b>{_xe_cs(_friendly_title(str(title)))}</b>", self.S["ChartTitle"]))
         elements.append(Spacer(1, 0.1 * inch))
         elements.append(img)
-        elements.append(Paragraph(f"<i>{_xe_cs(str(caption))}</i>", self.S["Insight"]))
+        elements.append(Paragraph(f"<i>{_xe_cs(_friendly_title(str(caption)))}</i>", self.S["Insight"]))
         elements.append(Spacer(1, 0.3 * inch))
         return True
 
@@ -2033,7 +2033,7 @@ class PDFReportGenerator:
             ("FONTNAME",      (1, 0), (-1, -1), 'DejaVuSans'),
         ]))
         from reportlab.platypus import KeepTogether
-        return KeepTogether(tbl)
+        return KeepTogether([tbl])
 
     def _build_section_6_deep_insights(
         self,
@@ -2276,8 +2276,10 @@ class PDFReportGenerator:
             )
             title_cell  = Paragraph(f"{i:02d}. {safe_card_title}", title_style)
             badge_cell  = Paragraph(f"{badge_icon}{badge_label}", badge_style)
+            _badge_w    = 1.0 * inch
+            _title_w    = C.PAGE_W - 2 * C.MARGIN - _badge_w
             header_row  = Table([[title_cell, badge_cell]],
-                                colWidths=[4.5 * inch, 1.4 * inch])
+                                colWidths=[_title_w, _badge_w])
             header_row.setStyle(TableStyle([
                 ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
                 ('LEFTPADDING',   (0, 0), (-1, -1), 0),
