@@ -16,9 +16,9 @@ interface Props {
 
 const SUGGESTED = [
   "What's the most important action I should take this week?",
-  "Which customer segment should I focus on first?",
-  "What would happen to revenue if repeat rate improved to 25%?",
-  "Why is September revenue always lower?",
+  "Which department has the highest risk of more attrition?",
+  "What's driving the high attrition rate?",
+  "How does our attrition compare to industry benchmark?",
 ];
 
 export default function ChatPanel({ sessionId, filename }: Props) {
@@ -136,14 +136,12 @@ export default function ChatPanel({ sessionId, filename }: Props) {
       <div className="px-4 py-3 border-b bg-gray-50 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-sm font-semibold text-gray-800">
-            Ask InsightStream AI
-          </span>
-          {filename && (
-            <span className="text-xs text-gray-500 truncate max-w-[180px]" title={filename}>
-              {filename}
-            </span>
-          )}
+          <div>
+            <p className="text-sm font-semibold text-gray-800">Ask InsightStream AI</p>
+            {filename && (
+              <p className="text-xs text-gray-400">Analyzing: {filename}</p>
+            )}
+          </div>
         </div>
         <button
           onClick={loadHistory}
