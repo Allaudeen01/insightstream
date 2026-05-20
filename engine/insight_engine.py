@@ -8284,6 +8284,11 @@ class InsightNarrator:
         return narrative
 
 
+def _fc(col: str) -> str:
+    """Convert a raw column name to a human-readable axis/legend label."""
+    return col.replace("_", " ").title()
+
+
 def is_chart_informative(values: list[float], min_variance_pct: float = 1.0) -> bool:
     """
     Returns False if all values are within min_variance_pct% of each other.
@@ -8925,9 +8930,9 @@ class SmartChartRecommender:
                             "gridcolor": "rgba(255,255,255,0.05)",
                             "tickformat": ".2s",
                         }
-                        geo_layout["xaxis_title"] = region_col
+                        geo_layout["xaxis_title"] = _fc(region_col)
                         geo_layout["yaxis_title"] = "Revenue"
-                        geo_layout["legend_title"] = cat_col
+                        geo_layout["legend_title"] = _fc(cat_col)
 
                         fig.update_layout(template="plotly_dark")
 
@@ -8980,8 +8985,8 @@ class SmartChartRecommender:
                                 ))
                                 fig_heat.update_layout(
                                     template="plotly_dark",
-                                    xaxis_title=cat_col,
-                                    yaxis_title=region_col,
+                                    xaxis_title=_fc(cat_col),
+                                    yaxis_title=_fc(region_col),
                                     xaxis=dict(side="bottom"),
                                     margin=dict(l=80, r=80, t=20, b=60),
                                 )
@@ -9240,7 +9245,7 @@ class SmartChartRecommender:
                                 .replace("\n", " ").replace(",", "")
                                 .replace("  ", " ").strip()
                             )
-                            _region_label = "Country" if "country" in _country_display.lower() else _country_display
+                            _region_label = "Country" if "country" in _country_display.lower() else _fc(_country_display)
                             fig_a = px.bar(
                                 _agg,
                                 x=_confirmed_col,
@@ -9283,7 +9288,7 @@ class SmartChartRecommender:
                                 .replace("\n", " ").replace(",", "")
                                 .replace("  ", " ").strip()
                             )
-                            _region_label_b = "Country" if "country" in _country_display_b.lower() else _country_display_b
+                            _region_label_b = "Country" if "country" in _country_display_b.lower() else _fc(_country_display_b)
                             fig_b = px.bar(
                                 _agg_d,
                                 x=_deaths_col,
