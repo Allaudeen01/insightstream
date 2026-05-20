@@ -9086,11 +9086,15 @@ def run_insight_engine(
             df = pl.from_pandas(df)
 
         # Detect and set currency symbol for this analysis run
-        from report_generator import _detect_currency_symbol
-        _set_currency_symbol(_detect_currency_symbol(
-            df.to_pandas() if hasattr(df, 'to_pandas') else df
-        ))
-        print(f"[INSIGHT ENGINE CURRENCY] Symbol set to: {_CURRENCY_SYMBOL}")
+        # Skip auto-detection if the user explicitly chose a currency
+        if _CURRENCY_EXPLICIT:
+            print(f"[INSIGHT ENGINE CURRENCY] User override active — keeping: {_CURRENCY_SYMBOL}")
+        else:
+            from report_generator import _detect_currency_symbol
+            _set_currency_symbol(_detect_currency_symbol(
+                df.to_pandas() if hasattr(df, 'to_pandas') else df
+            ))
+            print(f"[INSIGHT ENGINE CURRENCY] Auto-detected: {_CURRENCY_SYMBOL}")
 
         # ── Sampling for large datasets (FIX 4: Tiered Logic) ──────────
         original_row_count = len(df)
@@ -9409,10 +9413,13 @@ def benchmark_compare(metric_name: str, computed_value: float, domain_id: str) -
 
 # Module-level symbol — set once per analysis run
 _CURRENCY_SYMBOL = "₹"
+_CURRENCY_EXPLICIT = False  # True when user explicitly chose a currency
 
-def _set_currency_symbol(symbol: str) -> None:
-    global _CURRENCY_SYMBOL
+def _set_currency_symbol(symbol: str, explicit: bool = False) -> None:
+    global _CURRENCY_SYMBOL, _CURRENCY_EXPLICIT
     _CURRENCY_SYMBOL = symbol
+    if explicit:
+        _CURRENCY_EXPLICIT = True
 
 def _fmt_currency(val: float) -> str:
     global _CURRENCY_SYMBOL

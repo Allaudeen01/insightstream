@@ -52,6 +52,11 @@ async def analyze(
         else:
             raise HTTPException(400, "Unsupported file type. Please upload CSV or Excel.")
 
+        # Reset explicit flag so auto-detect works when currency=="auto"
+        from insight_engine import _set_currency_symbol
+        import insight_engine as _ie
+        _ie._CURRENCY_EXPLICIT = False
+
         # Override currency if user specified
         if currency != "auto":
             _CURRENCY_MAP = {
@@ -60,10 +65,8 @@ async def analyze(
                 "JPY": "¥",
             }
             sym = _CURRENCY_MAP.get(currency, "₹")
-            # Import and set in both engines
-            from insight_engine import _set_currency_symbol
-            _set_currency_symbol(sym)
-            print(f"[CURRENCY] User selected: {currency} → {sym}")
+            _set_currency_symbol(sym, explicit=True)
+            print(f"[CURRENCY] User override: {currency} → {sym}")
         else:
             print(f"[CURRENCY] Auto-detecting...")
 
