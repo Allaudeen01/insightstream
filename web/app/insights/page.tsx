@@ -126,6 +126,9 @@ export default function InsightsPage() {
             // ── Insight data ─────────────────────────────────────────────────
             if (cachedSession) {
                 // Full engine output is already in localStorage — use it directly.
+                console.log("Cached session object:", cachedSession);
+                console.log("filename field:", cachedSession?.filename);
+                console.log("original_filename field:", cachedSession?.original_filename);
                 setData(cachedSession);
                 localStorage.setItem(`insights_${sid}`, JSON.stringify(cachedSession));
             } else {
