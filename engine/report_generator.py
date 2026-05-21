@@ -4090,26 +4090,33 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 else:
                     log.info("Regional page suppressed — variance %.1f%% < 10%%", _reg_variance_pct)
 
-        # 4. PAGE 4: STRATEGIC FINDINGS & NOTES (skipped entirely if nothing to show)
+        # 4. PAGE 4: STRATEGIC FINDINGS SUMMARY (1-line per insight — full text in Deep Insights)
         if insights or text_blocks:
             elements.append(PageBreak())
             elements.append(Paragraph("Strategic Findings &amp; Key Results", self.S["Section"]))
             elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(C.RULE_GREY)))
-            elements.append(Spacer(1, 20))
-
-            finding_title_style = ParagraphStyle(
-                'FindingTitle', fontSize=12, fontName=PDF_FONT_BOLD,
-                textColor=colors.HexColor('#1e293b'), spaceAfter=6, spaceBefore=8,
+            elements.append(Spacer(1, 8))
+            
+            # One-line summary intro
+            _summary_intro_style = ParagraphStyle(
+                'FindingIntro', fontSize=10, fontName='DejaVuSans',
+                textColor=colors.HexColor('#64748b'), leading=14, spaceAfter=14,
+                fontStyle='italic',
             )
-            finding_body_style = ParagraphStyle(
-                'FindingBody', fontSize=10, fontName='DejaVuSans',
-                textColor=colors.HexColor('#334155'), leading=16,
-                leftIndent=16, spaceAfter=6,
+            elements.append(Paragraph(
+                "Quick summary of all findings — see Deep Insights for full analysis.",
+                _summary_intro_style
+            ))
+            
+            # Compact 1-line title + impact badge style
+            finding_title_style = ParagraphStyle(
+                'FindingTitle', fontSize=11, fontName=PDF_FONT_BOLD,
+                textColor=colors.HexColor('#1e293b'), leading=15, spaceAfter=2,
             )
             finding_impact_style = ParagraphStyle(
-                'FindingImpact', fontSize=9, fontName=PDF_FONT_BOLD,
-                textColor=colors.HexColor('#dc2626'), spaceAfter=14,
-                leftIndent=16,
+                'FindingImpact', fontSize=8, fontName=PDF_FONT_BOLD,
+                textColor=colors.HexColor('#dc2626'), leading=10,
+                leftIndent=14, spaceAfter=10,
             )
 
             if insights:
@@ -4122,148 +4129,55 @@ class UnifiedReportGenerator(PDFReportGenerator):
                             ins.get("rule_type") or
                             "Strategic Finding"
                         )
-                        description = ins.get("description", "") or ins.get("body", "")
                         impact = (
                             ins.get("impact") or
                             ins.get("severity") or
                             ins.get("priority") or
                             ""
                         )
-                        recommendation = ins.get("recommendation", "")
                     else:
                         raw = str(ins).strip()
                         if raw.startswith('[') and ']' in raw:
                             title = raw[raw.index(']') + 1:].strip()
                         else:
                             title = raw.split('[')[0].strip()
-                        description = ""
                         impact = ""
-                        recommendation = ""
-
+                    
                     # Domain-aware label substitutions for non-business domains
                     if domain_id in ["hr", "entertainment", "sports", "health"]:
                         title = title.replace("Revenue Concentration", "Distribution")
-                        description = (description
-                            .replace("of total revenue", "of total headcount")
-                            .replace("revenue gap", "distribution gap")
-                            .replace("demand-side imbalance or execution gaps that compound over time",
-                                     "structural differences in workforce composition")
-                            .replace("warrants targeted intervention", "warrants further investigation"))
-
-                    if domain_id == "entertainment":
-                        title = title.replace("Revenue Concentration", "Distribution")
-                        description = (description
-                            .replace("of total revenue", "of total catalogue")
-                            .replace("revenue gap", "catalogue gap")
-                            .replace("business operation", "content library")
-                            .replace("strong top-line performance but structural imbalances",
-                                     "a diverse catalogue with clear content patterns")
-                            .replace("transactions totalling", "titles totalling"))
-
                     if domain_id == "sports":
-                        description = (description
-                            .replace("of total revenue", "of total matches")
-                            .replace("business operation", "tournament")
-                            .replace(
-                                "strong top-line performance but structural "
-                                "imbalances that require strategic attention",
-                                "competitive patterns worth analysing")
-                            .replace("transactions totalling", "matches totalling"))
-                        import re as _re_s
-                        description = _re_s.sub(r'\s+', ' ', description
-                            .replace(
-                                "Revenue follows a predictable seasonal pattern",
-                                "Match volume follows a seasonal pattern"
-                            ).replace(
-                                "Revenue is broadly flat outside the seasonal cycle",
-                                "Match count is broadly stable across seasons"
-                            ).replace(
-                                "the primary source of cash flow risk",
-                                "reflecting league scheduling and expansion phases"
-                            ).replace(
-                                "If inventory and staffing aren't pre-positioned",
-                                "Understanding peak seasons helps with"
-                            ).replace(
-                                "you'll leave money on the table",
-                                "tournament planning and resource allocation"
-                            ).replace(
-                                "requires careful cash-flow management to avoid "
-                                "overstaffing or excess stock",
-                                "typically sees fewer matches — normal for "
-                                "tournament scheduling"
-                            ).replace(
-                                "Revenue is stable but not growing",
-                                "Match volume is stable across seasons"
-                            ).replace(
-                                "Growth levers are needed — new segments, "
-                                "pricing, or market expansion",
-                                "League expansion and franchise additions "
-                                "drive match volume growth"
-                            )).strip()
                         title = (title
                             .replace("Revenue Trend:", "Match Volume:")
                             .replace("Flat", "Stable"))
-
-                    if domain_id == "health":
-                        description = (description
-                            .replace("of total revenue", "of total cases")
-                            .replace("business operation", "health dataset")
-                            .replace(
-                                "strong top-line performance but structural "
-                                "imbalances that require strategic attention",
-                                "epidemiological patterns requiring health "
-                                "system attention"
-                            )
-                            .replace("transactions totalling", "records covering"))
-
                     if domain_id == "hr":
-                        title = (title
-                            .replace("Emerging Market Leader", "Dominant Department"))
-                        description = (description
-                            .replace("of total headcount", "of total workforce")
-                            .replace("of total revenue", "of total workforce")
-                            .replace("revenue per unit", "income per employee")
-                            .replace("distribution gap", "headcount distribution gap")
-                            .replace("pricing strategy to both",
-                                     "HR strategy to both departments")
-                            .replace("for margin, grow", "for high-value roles, grow")
-                            .replace("for market share", "for headcount scale")
-                            .replace("product-market fit but requires monitoring to prevent "
-                                     "future dependency risk",
-                                     "workforce concentration — monitor for single-department "
-                                     "over-reliance risk")
-                            .replace("product-market fit", "workforce specialisation")
-                            .replace("portfolio resilience", "workforce resilience"))
-
+                        title = title.replace("Emerging Market Leader", "Dominant Department")
+                    
                     if title:
                         elements.append(Paragraph(f"{idx}. {_xe_title(str(title))}", finding_title_style))
-                    if description:
-                        # Smart truncation at sentence boundary (up to 900 chars)
-                        if len(description) <= 900:
-                            short_desc = description
-                        else:
-                            # Find last sentence boundary before 900 chars
-                            truncated = description[:900]
-                            # Look for last period, exclamation, or question mark
-                            last_period = max(
-                                truncated.rfind('. '),
-                                truncated.rfind('! '),
-                                truncated.rfind('? ')
-                            )
-                            if last_period > 600:  # Only use if we get at least 600 chars
-                                short_desc = description[:last_period + 1].rstrip()
-                            else:
-                                # Fallback to 900 char hard limit
-                                short_desc = truncated.rstrip()
-                            short_desc += "…"
-                        elements.append(Paragraph(self._md_to_rl(short_desc), finding_body_style))
                     if impact:
                         impact_clean = self._strip_emoji(impact)
-                        elements.append(Paragraph(f"Impact: {impact_clean.upper()}", finding_impact_style))
+                        # Color the badge by severity
+                        impact_lower = impact_clean.lower()
+                        if "critical" in impact_lower or "high" in impact_lower:
+                            _color = "#dc2626"  # red
+                        elif "important" in impact_lower or "medium" in impact_lower:
+                            _color = "#f59e0b"  # amber
+                        else:
+                            _color = "#10b981"  # green
+                        _impact_style_dyn = ParagraphStyle(
+                            f'FindingImpact_{idx}', fontSize=8, fontName=PDF_FONT_BOLD,
+                            textColor=colors.HexColor(_color), leading=10,
+                            leftIndent=14, spaceAfter=10,
+                        )
+                        elements.append(Paragraph(
+                            f"Impact: {impact_clean.upper()}",
+                            _impact_style_dyn
+                        ))
                     elif title:
-                        elements.append(Spacer(1, 10))
+                        elements.append(Spacer(1, 6))
 
-                elements.append(Spacer(1, 10))
+                elements.append(Spacer(1, 8))
 
             if text_blocks:
                 elements.append(Paragraph("Expert Annotations", self.S["ChartTitle"]))
