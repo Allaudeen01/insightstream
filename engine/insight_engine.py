@@ -3314,6 +3314,25 @@ class BusinessRuleEngine:
             pdf = df.to_pandas() if hasattr(df, "to_pandas") else df
             total = len(pdf)
 
+            # Helper: pluralize content type names correctly
+            def _pluralize(name: str) -> str:
+                """Pluralize content type, handling 'Series' correctly."""
+                lower = name.lower().strip()
+                if lower in ("series", "tv series"):
+                    return name  # already plural
+                if lower.endswith("s") or lower.endswith("sh"):
+                    return name + "es" if lower.endswith("sh") else name
+                return name + "s"
+
+            # Helper: format column names for display
+            def _friendly_col(col_name: str) -> str:
+                """Convert raw column names to display-friendly format."""
+                return (str(col_name)
+                        .replace("_", " ")
+                        .replace("  ", " ")
+                        .strip()
+                        .title())
+
             # 1. Content type split (generic: Movie/TV Show, Track/Album, Video/Short, etc.)
             type_counts = pdf[type_col].value_counts()
             if len(type_counts) >= 2:
@@ -3347,11 +3366,14 @@ class BusinessRuleEngine:
                     _context = f"{top_type} is the dominant content format at {top_pct:.0f}%."
                     _rec = f"Monitor the {top_type}/{second_type} ratio as catalogue scales."
 
+                _top_plural = _pluralize(top_type)
+                _second_plural = _pluralize(second_type)
+
                 insights.append(BusinessInsight(
-                    title=f"Content Mix: {top_pct:.0f}% {top_type}s, {second_pct:.0f}% {second_type}s",
+                    title=f"Content Mix: {top_pct:.0f}% {_top_plural}, {second_pct:.0f}% {_second_plural}",
                     description=(
-                        f"The library contains {type_counts.iloc[0]:,} {top_type}s "
-                        f"({top_pct:.0f}%) and {type_counts.iloc[1]:,} {second_type}s "
+                        f"The library contains {type_counts.iloc[0]:,} {_top_plural} "
+                        f"({top_pct:.0f}%) and {type_counts.iloc[1]:,} {_second_plural} "
                         f"({second_pct:.0f}%). {_context}"
                     ),
                     why_it_matters="Content mix determines platform identity and subscriber retention strategy.",
@@ -3505,6 +3527,84 @@ class BusinessRuleEngine:
                         ))
                 except Exception as _de:
                     log.warning(f"[content_growth] {_de}")
+
+            # 6. Family-friendly content ratio
+            if rating_col:
+                try:
+                    _family_ratings = ["g", "pg", "tv-g", "tv-pg", "tv-y", "tv-y7", "all ages", "u", "pg-13"]
+                    _all_ratings = pdf[rating_col].dropna().str.lower().str.strip()
+                    _family_count = int(_all_ratings.isin(_family_ratings).sum())
+                    _family_pct = _family_count / max(len(_all_ratings), 1) * 100
+                    _mature_ratings = ["tv-ma", "r", "nc-17", "18+", "a"]
+                    _mature_count = int(_all_ratings.isin(_mature_ratings).sum())
+                    _mature_pct = _mature_count / max(len(_all_ratings), 1) * 100
+                    
+                    if _family_pct > 0 or _mature_pct > 0:
+                        _tone = (
+                            "Family-friendly content is well-represented — broad audience appeal."
+                            if _family_pct > 30
+                            else "Catalogue skews mature — limited family-friendly options."
+                        )
+                        insights.append(BusinessInsight(
+                            title=f"Audience Suitability: {_family_pct:.0f}% Family-Friendly, {_mature_pct:.0f}% Mature",
+                            description=(
+                                f"{_family_count:,} titles ({_family_pct:.0f}%) carry family-friendly ratings "
+                                f"(G, PG, TV-G, TV-PG, TV-Y). "
+                                f"{_mature_count:,} titles ({_mature_pct:.0f}%) are rated for mature audiences "
+                                f"(TV-MA, R, NC-17). {_tone}"
+                            ),
+                            why_it_matters="Audience suitability mix determines addressable market size and parental trust.",
+                            evidence=f"Family: {_family_pct:.0f}% | Mature: {_mature_pct:.0f}%",
+                            impact="🟠 Important",
+                            recommendation=(
+                                f"{'Expand family content to capture the underserved kids/family segment.' if _family_pct < 30 else 'Maintain family-friendly balance while investing in premium mature originals.'}"
+                            ),
+                            rule_type="content_audience_suitability",
+                            score=6.5,
+                            chart_data={"family_pct": round(_family_pct, 1), "mature_pct": round(_mature_pct, 1)},
+                        ))
+                except Exception as _fr:
+                    log.warning(f"[content_family_rating] {_fr}")
+
+            # 7. Content recency (% added in last 3 years)
+            if year_col:
+                try:
+                    import datetime as _dtmod
+                    _current_year = _dtmod.date.today().year
+                    _cutoff_year = _current_year - 3
+                    _years = pdf[year_col].dropna().astype(int)
+                    _recent_3yr = int((_years >= _cutoff_year).sum())
+                    _recent_3yr_pct = _recent_3yr / max(len(_years), 1) * 100
+                    _oldest_year = int(_years.min())
+                    _newest_year = int(_years.max())
+                    _span = _newest_year - _oldest_year
+                    
+                    if _span > 3:
+                        _freshness = (
+                            "Catalogue is fresh and current — strong recent investment."
+                            if _recent_3yr_pct > 40
+                            else "Catalogue has significant legacy content — refresh may be needed."
+                        )
+                        insights.append(BusinessInsight(
+                            title=f"Catalogue Freshness: {_recent_3yr_pct:.0f}% from Last 3 Years",
+                            description=(
+                                f"{_recent_3yr:,} titles ({_recent_3yr_pct:.0f}%) were released in "
+                                f"{_cutoff_year}–{_newest_year}. "
+                                f"Catalogue spans {_span} years ({_oldest_year}–{_newest_year}). "
+                                f"{_freshness}"
+                            ),
+                            why_it_matters="Content freshness drives subscriber engagement and reduces churn from stale catalogues.",
+                            evidence=f"Last 3 years: {_recent_3yr_pct:.0f}% | Span: {_oldest_year}–{_newest_year}",
+                            impact="🟢 Minor",
+                            recommendation=(
+                                f"{'Maintain current acquisition pace — freshness is a competitive advantage.' if _recent_3yr_pct > 40 else f'Prioritise licensing titles from {_cutoff_year}+ to improve catalogue freshness score.'}"
+                            ),
+                            rule_type="content_freshness",
+                            score=6.0,
+                            chart_data={"recent_3yr_pct": round(_recent_3yr_pct, 1), "span": _span},
+                        ))
+                except Exception as _ry:
+                    log.warning(f"[content_freshness] {_ry}")
 
         except Exception as e:
             log.warning(f"[content_library_analysis] Failed: {e}")
