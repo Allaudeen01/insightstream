@@ -3622,25 +3622,41 @@ class BusinessRuleEngine:
                     _data_warning = ""
                     if _country_missing_pct > 30:
                         _data_warning = (
-                            f" Note: {_country_missing_pct:.0f}% of country data is missing — "
-                            f"geographic figures reflect available records only."
+                            f" Note: {_country_missing_pct:.0f}% of country values are missing — "
+                            f"figures reflect titles with country data only."
                         )
                     
                     country_series = pdf[country_col].dropna().str.split(",").explode().str.strip()
                     country_counts = country_series.value_counts().head(5)
                     top_country     = country_counts.index[0]
-                    top_country_pct = country_counts.iloc[0] / len(country_series) * 100
+                    
+                    # Compute correct percentages: of known records (not exploded series)
+                    _total_titles = len(pdf)
+                    _available_country = int(pdf[country_col].notna().sum())
+                    _top_country_count = int(country_counts.iloc[0])
+                    _top_pct_of_known = (
+                        _top_country_count / max(_available_country, 1) * 100
+                    )
+                    _top_pct_of_total = (
+                        _top_country_count / max(_total_titles, 1) * 100
+                    )
+                    
                     insights.append(BusinessInsight(
-                        title=f"Top Producer: {top_country} at {top_country_pct:.0f}% of Content",
+                        title=f"Top Producer: {top_country} at {_top_pct_of_known:.0f}% of Known Records",
                         description=(
-                            f"{top_country} produces {top_country_pct:.0f}% of all content "
-                            f"({country_counts.iloc[0]:,} titles). "
+                            f"{top_country} is the top producer among titles with country data "
+                            f"({_top_country_count:,} titles, {_top_pct_of_known:.0f}% of known records, "
+                            f"{_top_pct_of_total:.0f}% of total catalogue). "
                             f"Top 5 countries: {', '.join(f'{c} ({n:,})' for c, n in country_counts.items())}. "
                             f"Geographic concentration signals both market strength and localisation opportunity."
                             f"{_data_warning}"
                         ),
                         why_it_matters="Content origin shapes cultural relevance and international subscriber growth.",
-                        evidence=f"Top: {top_country} ({top_country_pct:.0f}%) | {len(country_counts)} countries in top 5",
+                        evidence=(
+                            f"Top: {top_country} ({_top_country_count:,} titles, "
+                            f"{_top_pct_of_known:.0f}% of known) | "
+                            f"{len(country_counts)} countries in top 5"
+                        ),
                         impact="🟠 Important",
                         recommendation=(
                             f"Invest in local content from underrepresented regions to drive international subscriber growth. "
@@ -3651,6 +3667,8 @@ class BusinessRuleEngine:
                         chart_data={
                             "country_counts": country_counts.to_dict(),
                             "missing_pct": round(_country_missing_pct, 1),
+                            "top_pct_of_known": round(_top_pct_of_known, 1),
+                            "top_pct_of_total": round(_top_pct_of_total, 1),
                         },
                     ))
                 except Exception as _ce:
@@ -3813,6 +3831,19 @@ class BusinessRuleEngine:
             if date_added_col:
                 try:
                     import pandas as _pd
+                    
+                    # Check missing data percentage
+                    _date_missing_pct = (
+                        pdf[date_added_col].isnull().sum() / max(len(pdf), 1) * 100
+                    )
+                    _high_missing = _date_missing_pct > 50
+                    _date_disclaimer = ""
+                    if _high_missing:
+                        _date_disclaimer = (
+                            f" ⚠️ {date_added_col} is missing for {_date_missing_pct:.0f}% "
+                            f"of titles — trend is indicative only."
+                        )
+                    
                     _dates = _pd.to_datetime(
                         pdf[date_added_col], errors="coerce"
                     ).dropna()
@@ -3833,6 +3864,7 @@ class BusinessRuleEngine:
                                 f"{_recent_added:,} titles ({_recent_pct:.0f}%) "
                                 f"were added in 2019 or later. "
                                 f"{'Rapid catalogue expansion has slowed — quality over quantity phase.' if _peak_add_year < 2021 else 'Catalogue is in active expansion mode.'}"
+                                f"{_date_disclaimer}"
                             ),
                             why_it_matters=(
                                 "Content addition pace reflects platform investment "
@@ -3842,20 +3874,26 @@ class BusinessRuleEngine:
                                 f"Peak year: {_peak_add_year} "
                                 f"({_peak_add_count:,} titles) | "
                                 f"2019+: {_recent_pct:.0f}%"
+                                + (f" | Missing: {_date_missing_pct:.0f}%" if _high_missing else "")
                             ),
-                            impact="🟠 Important",
+                            # Downgrade impact when data is unreliable
+                            impact="� Minor" if _high_missing else "�🟠 Important",
                             recommendation=(
+                                f"Improve {date_added_col} data capture before drawing strategic "
+                                f"conclusions. Current trend is indicative only."
+                                if _high_missing else
                                 f"Analyse whether the post-{_peak_add_year} slowdown "
                                 f"reflects budget constraints or a deliberate shift to "
                                 f"original content production. "
                                 f"Subscriber growth correlates with new additions."
                             ),
                             rule_type="content_growth_trend",
-                            score=7.0,
+                            score=5.5 if _high_missing else 7.0,
                             chart_data={
                                 "peak_year": _peak_add_year,
                                 "yearly_counts": _yearly.to_dict(),
                                 "recent_pct": round(_recent_pct, 1),
+                                "missing_pct": round(_date_missing_pct, 1),
                             },
                         ))
                 except Exception as _de:
