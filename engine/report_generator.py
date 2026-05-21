@@ -1846,10 +1846,17 @@ class PDFReportGenerator:
             peak_idx = revenues.index(max(revenues)) if revenues else None
             trough_idx = revenues.index(min(revenues)) if revenues else None
             annotate_indices = {0, len(labels)-1, peak_idx, trough_idx}
+            
+            # For count-based domains, use plain integer formatting for annotations
+            _count_domains_inline = {"sports", "hr", "health", "entertainment"}
+            
             for i, (label, rev) in enumerate(zip(labels, revenues)):
                 if i not in annotate_indices:
                     continue
-                val_str = smart_fmt(rev, None)
+                if domain in _count_domains_inline:
+                    val_str = f"{int(rev):,}"
+                else:
+                    val_str = smart_fmt(rev, None)
                 ax.annotate(val_str, (label, rev),
                             textcoords="offset points", xytext=(0, 12),
                             ha="center", fontsize=9, color="#1a1a2e", fontweight="bold")
@@ -1939,9 +1946,22 @@ class PDFReportGenerator:
                     framealpha=0.3, edgecolor="none"
                 )
 
-            _ylabel_map = {"sports": "Matches", "hr": "Headcount", "health": "Cases"}
+            _ylabel_map = {
+                "sports": "Matches",
+                "hr": "Headcount",
+                "health": "Cases",
+                "entertainment": "Titles Added",
+            }
             ax.set_ylabel(_ylabel_map.get(domain, "Revenue"), fontsize=10)
-            ax.yaxis.set_major_formatter(mticker.FuncFormatter(smart_fmt))
+            
+            # For non-revenue domains, use plain integer formatting
+            _count_domains = {"sports", "hr", "health", "entertainment"}
+            if domain in _count_domains:
+                def _count_fmt(x, _):
+                    return f"{int(x):,}"
+                ax.yaxis.set_major_formatter(mticker.FuncFormatter(_count_fmt))
+            else:
+                ax.yaxis.set_major_formatter(mticker.FuncFormatter(smart_fmt))
             ax.grid(axis="y", alpha=0.3, linestyle="--")
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -4118,6 +4138,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
                                 peak_month=_peak_yr,
                                 trough_month=_trough_yr,
                                 pct_gap=_swing,
+                                domain="entertainment",
                             )
                             if (_ent_chart_path and os.path.exists(_ent_chart_path)
                                     and os.path.getsize(_ent_chart_path) > 0):

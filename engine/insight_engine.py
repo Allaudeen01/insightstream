@@ -8593,12 +8593,25 @@ class SmartChartRecommender:
                         grp_sorted["cumulative_pct"] = (
                             grp_sorted[rev_col].cumsum() / grp_sorted[rev_col].sum() * 100
                         )
-                        _pareto_bar_name = "Match Volume" if domain_id == "sports" else "Revenue"
+                        # Domain-aware bar name
+                        if domain_id == "sports":
+                            _pareto_bar_name = "Match Volume"
+                        elif domain_id == "entertainment":
+                            _pareto_bar_name = "Content Volume"
+                        else:
+                            _pareto_bar_name = "Revenue"
+                        
+                        # Domain-aware text formatting
+                        if domain_id in ("sports", "entertainment"):
+                            _pareto_text = [f"{int(v):,}" for v in grp_sorted[rev_col]]
+                        else:
+                            _pareto_text = [f"{v/1e6:.1f}M" for v in grp_sorted[rev_col]]
+                        
                         fig_pareto = go.Figure()
                         fig_pareto.add_trace(go.Bar(
                             x=grp_sorted[best_cat_col], y=grp_sorted[rev_col],
                             name=_pareto_bar_name, marker_color="#6366f1",
-                            text=[f"{v/1e6:.1f}M" for v in grp_sorted[rev_col]],
+                            text=_pareto_text,
                             textposition="outside"
                         ))
                         fig_pareto.add_trace(go.Scatter(
@@ -8608,11 +8621,13 @@ class SmartChartRecommender:
                             mode="lines+markers"
                         ))
                         _pareto_col_label = best_cat_col.replace("_", " ").title()
-                        _pareto_title = (
-                            "Match Volume Distribution"
-                            if domain_id == "sports"
-                            else f"{_pareto_col_label} Revenue Contribution"
-                        )
+                        # Domain-aware title
+                        if domain_id == "sports":
+                            _pareto_title = "Match Volume Distribution"
+                        elif domain_id == "entertainment":
+                            _pareto_title = "Rating Content Volume Distribution"
+                        else:
+                            _pareto_title = f"{_pareto_col_label} Revenue Contribution"
                         fig_pareto.update_layout(
                             yaxis2=dict(
                                 title="Cumulative %", overlaying="y",
@@ -8623,15 +8638,19 @@ class SmartChartRecommender:
                             legend=dict(orientation="h"),
                             title=f"Pareto: {_pareto_title}"
                         )
+                        # Domain-aware description
+                        if domain_id == "sports":
+                            _pareto_desc = "80/20 analysis — which categories drive 80% of match volume"
+                        elif domain_id == "entertainment":
+                            _pareto_desc = "80/20 analysis — which ratings drive 80% of catalogue"
+                        else:
+                            _pareto_desc = "80/20 analysis — which categories drive 80% of revenue"
+                        
                         add("pareto_revenue", {
                             "chart_id": "pareto_revenue",
                             "chart_type": "pareto",
                             "title": f"Pareto: {_pareto_title}",
-                            "description": (
-                                "80/20 analysis — which categories drive 80% of match volume"
-                                if domain_id == "sports"
-                                else "80/20 analysis — which categories drive 80% of revenue"
-                            ),
+                            "description": _pareto_desc,
                             "plotly_json": json.loads(fig_pareto.update_layout(**CHART_LAYOUT_BASE).to_json()),
                             "columns_used": [best_cat_col, price_col],
                             "priority_score": 92,
