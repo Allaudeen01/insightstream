@@ -284,8 +284,62 @@ class C:
 
 
 def friendly_col(col: str) -> str:
-    """Convert a raw column name to a human-readable label."""
-    return col.replace("_", " ").title()
+    """Convert a raw column name to a human-readable label.
+    
+    Handles snake_case, camelCase, PascalCase, and concatenated names like
+    'employmentstatus' → 'Employment Status', 'MonthlyIncome' → 'Monthly Income'.
+    """
+    if not col:
+        return ""
+    s = str(col)
+    # Insert space before camelCase boundaries: monthlyIncome → monthly Income
+    import re as _re
+    s = _re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', s)
+    # Replace underscores
+    s = s.replace("_", " ")
+    
+    # Split common concatenated lowercase HR/business words
+    _CONCAT_WORDS = [
+        ("employmentstatus", "Employment Status"),
+        ("monthlyincome",    "Monthly Income"),
+        ("yearlyincome",     "Yearly Income"),
+        ("annualincome",     "Annual Income"),
+        ("hourlyrate",       "Hourly Rate"),
+        ("dailyrate",        "Daily Rate"),
+        ("monthlyrate",      "Monthly Rate"),
+        ("jobsatisfaction",  "Job Satisfaction"),
+        ("worklifebalance",  "Work Life Balance"),
+        ("yearsatcompany",   "Years At Company"),
+        ("totalworkingyears","Total Working Years"),
+        ("performancerating","Performance Rating"),
+        ("relationshipsatisfaction", "Relationship Satisfaction"),
+        ("environmentsatisfaction",  "Environment Satisfaction"),
+        ("businesstravel",   "Business Travel"),
+        ("educationfield",   "Education Field"),
+        ("jobinvolvement",   "Job Involvement"),
+        ("joblevel",         "Job Level"),
+        ("jobrole",          "Job Role"),
+        ("maritalstatus",    "Marital Status"),
+        ("overtime",         "Overtime"),
+        ("stockoption",      "Stock Option"),
+        ("trainingtimes",    "Training Times"),
+        ("dateadded",        "Date Added"),
+        ("releaseyear",      "Release Year"),
+        ("imdbrating",       "IMDB Rating"),
+        ("metascore",        "Metascore"),
+    ]
+    _lower_compact = s.replace(" ", "").lower()
+    for _bad, _good in _CONCAT_WORDS:
+        if _lower_compact == _bad:
+            return _good
+    
+    # Title-case the result
+    # Preserve common acronyms in uppercase
+    _ACRONYMS = {"IMDB", "ROI", "KPI", "ID", "URL", "API", "SKU", "GST", "TAX"}
+    return " ".join(
+        w.upper() if w.upper() in _ACRONYMS else w.title()
+        for w in s.split()
+    )
 
 
 def _friendly_title(title: str) -> str:
@@ -2531,18 +2585,62 @@ class PDFReportGenerator:
                 "satisfaction" in str(_r.get("action", "")).lower()
                 for _r in recommendations if isinstance(_r, dict)
             )
+            
+            # Compute actual low-satisfaction % from insight data
+            _low_sat_pct = None
+            for _i in (insights or []):
+                if isinstance(_i, dict) and "satisfaction" in str(_i.get("title", "")).lower():
+                    _cd = _i.get("chart_data", {}) or {}
+                    _low_sat_pct = _cd.get("low_sat_pct")
+                    break
+            
             if _has_sat_insight and not _has_sat_in_recs:
+                _sat_pct_str = f"{int(_low_sat_pct)}%" if _low_sat_pct else "a significant share of"
                 recommendations.insert(0, {
                     "priority": 1,
                     "action": (
-                        "Run pulse surveys to diagnose satisfaction drivers. "
-                        "39% of employees report low satisfaction — focus on "
-                        "manager quality and career growth opportunities, the "
-                        "two highest-leverage retention levers."
+                        f"Run pulse surveys to diagnose satisfaction drivers. "
+                        f"{_sat_pct_str} of employees report low satisfaction — focus on "
+                        f"manager quality and career growth opportunities, the "
+                        f"two highest-leverage retention levers."
                     ),
                     "timeframe": "Next 14 days",
                     "owner": "HR / People team",
                     "impact": "Critical",
+                })
+            
+            # Department-specific retention plan rec
+            # Pull worst-attrition department from insights
+            _worst_dept = None
+            _worst_rate = None
+            for _i in (insights or []):
+                if isinstance(_i, dict) and "highest attrition" in str(_i.get("title", "")).lower():
+                    _cd = _i.get("chart_data", {}) or {}
+                    _dept_rates = _cd.get("dept_rates", {})
+                    if _dept_rates:
+                        _sorted_d = sorted(_dept_rates.items(), key=lambda x: x[1], reverse=True)
+                        if _sorted_d:
+                            _worst_dept = _sorted_d[0][0]
+                            _worst_rate = _sorted_d[0][1]
+                    break
+            
+            _has_dept_in_recs = any(
+                _worst_dept and _worst_dept.lower() in str(_r.get("action", "")).lower()
+                for _r in recommendations if isinstance(_r, dict)
+            )
+            if _worst_dept and _worst_rate is not None and not _has_dept_in_recs:
+                _severity = "Critical" if _worst_rate > 30 else "Important"
+                recommendations.append({
+                    "priority": len(recommendations) + 1,
+                    "action": (
+                        f"Build a department-specific retention plan for {_worst_dept} "
+                        f"({_worst_rate:.0f}% attrition rate). Conduct stay interviews with "
+                        f"all current team members within 30 days, audit compensation against "
+                        f"benchmarks, and establish a 90-day succession pipeline for high-risk roles."
+                    ),
+                    "timeframe": "Next 30 days",
+                    "owner": "HR / People team",
+                    "impact": _severity,
                 })
 
         if domain_id == "sports" and len(recommendations) < 5:
@@ -3798,6 +3896,53 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 f"carry the highest burden. Data completeness is "
                 f"critical for reliable epidemiological conclusions."
             )
+
+        # HR AI brief override — replaces sales/portfolio language with HR-specific
+        if domain_id == "hr" and (
+            "General Business" in ai_summary
+            or "No single numeric driver" in ai_summary
+            or "portfolio" in ai_summary.lower()
+            or "concentration risk" in ai_summary.lower()
+            or not ai_summary.strip()
+        ):
+            try:
+                _hr_pdf = df.to_pandas() if (df is not None and hasattr(df, "to_pandas")) else df
+                _n_emp = len(_hr_pdf) if _hr_pdf is not None else 0
+                
+                # Compute attrition rate
+                _attrition_rate = 0.0
+                if _hr_pdf is not None:
+                    _attr_col = next((c for c in _hr_pdf.columns if any(
+                        k in c.lower() for k in ["attrition", "termd", "terminated",
+                                                  "left_company", "employment_status"]
+                    )), None)
+                    if _attr_col:
+                        _yes_vals = {"yes", "1", "true", "terminated",
+                                     "term", "inactive", "left", "resigned"}
+                        _left = _hr_pdf[_attr_col].astype(str).str.lower().str.strip()
+                        _attrition_rate = _left.isin(_yes_vals).sum() / max(_n_emp, 1) * 100
+                
+                _above_benchmark = _attrition_rate > 15
+                _benchmark_phrase = "above" if _above_benchmark else "within"
+                
+                # Count high-impact insights
+                _high_risk_count = sum(
+                    1 for i in (insights or [])
+                    if isinstance(i, dict) and (
+                        "critical" in str(i.get("impact", "")).lower()
+                        or "important" in str(i.get("impact", "")).lower()
+                    )
+                )
+                
+                ai_summary = (
+                    f"The HR dataset covers {_n_emp:,} employees. "
+                    f"Attrition rate is {_attrition_rate:.1f}% — {_benchmark_phrase} "
+                    f"the industry benchmark of 13-15%. "
+                    f"Risk assessment identifies {_high_risk_count} high-impact "
+                    f"finding{'s' if _high_risk_count != 1 else ''} requiring review."
+                )
+            except Exception as _hr_e:
+                log.warning(f"[HR AI brief] {_hr_e}")
 
         if ai_summary:
             elements.append(Paragraph("AI Intelligence Brief", self.S["ChartTitle"]))

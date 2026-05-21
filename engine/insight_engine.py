@@ -3234,23 +3234,34 @@ class BusinessRuleEngine:
                         high_sat = (pdf[pdf[sat_col] >= 3][attr_col]
                                     .apply(lambda x: str(x).lower() == "yes")
                                     .mean()) * 100
+                    
+                    # Skip the gap sub-clause if both rates are zero (no signal)
+                    _gap = low_sat - high_sat
+                    _gap_clause = (
+                        f"Low-satisfaction employees leave at {low_sat:.0f}% "
+                        f"vs {high_sat:.0f}% for satisfied employees — "
+                        f"a {_gap:.0f}pp attrition gap driven by engagement."
+                        if (low_sat > 0 or high_sat > 0)
+                        else "Attrition data is unavailable for satisfaction-level comparison."
+                    )
+                    _evidence = (
+                        f"Low satisfaction attrition: {low_sat:.0f}% | "
+                        f"High satisfaction attrition: {high_sat:.0f}%"
+                        if (low_sat > 0 or high_sat > 0)
+                        else f"Low satisfaction: {low_pct:.0f}% of workforce"
+                    )
+                    
                     insights.append(BusinessInsight(
                         title=f"Job Satisfaction: {low_pct:.0f}% Rate Low Satisfaction",
                         description=(
                             f"{low_count:,} employees ({low_pct:.0f}%) report low satisfaction "
-                            f"(score 1-2 out of 4). "
-                            f"Low-satisfaction employees leave at {low_sat:.0f}% "
-                            f"vs {high_sat:.0f}% for satisfied employees — "
-                            f"a {low_sat - high_sat:.0f}pp attrition gap driven by engagement."
+                            f"(score 1-2 out of 4). {_gap_clause}"
                         ),
                         why_it_matters=(
                             "Job satisfaction is the strongest leading indicator of voluntary "
                             "attrition — more predictive than salary alone."
                         ),
-                        evidence=(
-                            f"Low satisfaction attrition: {low_sat:.0f}% | "
-                            f"High satisfaction attrition: {high_sat:.0f}%"
-                        ),
+                        evidence=_evidence,
                         impact="🔴 Critical" if low_sat > 20 else "🟠 Important",
                         recommendation=(
                             "Run pulse surveys to identify top satisfaction drivers. "
@@ -3265,6 +3276,104 @@ class BusinessRuleEngine:
                     ))
                 except Exception as _se:
                     log.warning(f"[hr_satisfaction] {_se}")
+
+            # 5. Salary band analysis: median salary by department
+            if dept_col and income_col:
+                try:
+                    _dept_salary = (
+                        pdf.groupby(dept_col)[income_col]
+                        .median()
+                        .sort_values(ascending=False)
+                    )
+                    if len(_dept_salary) >= 2:
+                        _highest_dept = _dept_salary.index[0]
+                        _highest_salary = float(_dept_salary.iloc[0])
+                        _lowest_dept = _dept_salary.index[-1]
+                        _lowest_salary = float(_dept_salary.iloc[-1])
+                        _spread_pct = (
+                            (_highest_salary - _lowest_salary) / max(_highest_salary, 1) * 100
+                        )
+                        insights.append(BusinessInsight(
+                            title=f"Salary Spread: {_highest_dept} Pays {_spread_pct:.0f}% More Than {_lowest_dept}",
+                            description=(
+                                f"Median salary by department ranges from "
+                                f"{_fmt_currency(_lowest_salary)} ({_lowest_dept}) to "
+                                f"{_fmt_currency(_highest_salary)} ({_highest_dept}) — "
+                                f"a {_spread_pct:.0f}% spread. "
+                                f"{'Wide spread reflects role-based pay structure.' if _spread_pct > 30 else 'Compressed pay scale across departments.'}"
+                            ),
+                            why_it_matters=(
+                                "Department-level pay disparities affect retention, internal "
+                                "equity perceptions, and recruiting competitiveness."
+                            ),
+                            evidence=(
+                                f"Highest: {_highest_dept} ({_fmt_currency(_highest_salary)}) | "
+                                f"Lowest: {_lowest_dept} ({_fmt_currency(_lowest_salary)})"
+                            ),
+                            impact="🟠 Important",
+                            recommendation=(
+                                f"Benchmark {_lowest_dept} pay against market rates. "
+                                f"If gaps reflect role complexity, document pay philosophy clearly. "
+                                f"If gaps reflect underpayment, plan targeted adjustments."
+                            ),
+                            rule_type="hr_salary_band",
+                            score=7.5,
+                            chart_data={"dept_salary": _dept_salary.to_dict(),
+                                        "spread_pct": round(_spread_pct, 1)},
+                        ))
+                except Exception as _sb:
+                    log.warning(f"[hr_salary_band] {_sb}")
+
+            # 6. Tenure insight: average years at company for leavers vs stayers
+            _tenure_col = next((c for c in pdf.columns if any(k in c.lower() for k in
+                ["yearsatcompany", "tenure", "years_at_company",
+                 "lengthofservice", "service_years"])), None)
+            if _tenure_col and attr_col:
+                try:
+                    _yes_vals_t = {"yes", "1", "true", "terminated",
+                                   "term", "inactive", "left", "resigned"}
+                    _attr_lower = pdf[attr_col].astype(str).str.lower().str.strip()
+                    _leaver_mask = _attr_lower.isin(_yes_vals_t)
+                    _stayer_mask = ~_leaver_mask
+                    
+                    _leaver_tenure = float(pdf[_leaver_mask][_tenure_col].mean())
+                    _stayer_tenure = float(pdf[_stayer_mask][_tenure_col].mean())
+                    
+                    if pd.notna(_leaver_tenure) and pd.notna(_stayer_tenure):
+                        _tenure_gap = _stayer_tenure - _leaver_tenure
+                        _early_attrition = _leaver_tenure < 3
+                        insights.append(BusinessInsight(
+                            title=f"Tenure: Leavers Average {_leaver_tenure:.1f}y vs Stayers {_stayer_tenure:.1f}y",
+                            description=(
+                                f"Employees who left averaged {_leaver_tenure:.1f} years at the company, "
+                                f"vs {_stayer_tenure:.1f} years for those still active — "
+                                f"a {_tenure_gap:+.1f} year gap. "
+                                f"{'Early-stage attrition signals onboarding or expectation-setting issues.' if _early_attrition else 'Mid/late tenure attrition signals career growth or compensation gaps.'}"
+                            ),
+                            why_it_matters=(
+                                "Tenure-at-departure reveals whether attrition is concentrated in "
+                                "the first years (onboarding fit) or later (growth/comp issues)."
+                            ),
+                            evidence=(
+                                f"Leavers avg tenure: {_leaver_tenure:.1f}y | "
+                                f"Stayers avg tenure: {_stayer_tenure:.1f}y"
+                            ),
+                            impact="🟠 Important",
+                            recommendation=(
+                                "Strengthen the first-90-day onboarding experience and assign "
+                                "structured mentorship. Track first-year attrition as a leading KPI."
+                                if _early_attrition else
+                                "Audit career progression paths and compensation reviews for "
+                                "mid-tenure employees. Plan internal mobility programmes."
+                            ),
+                            rule_type="hr_tenure",
+                            score=7.5,
+                            chart_data={"leaver_tenure": round(_leaver_tenure, 1),
+                                        "stayer_tenure": round(_stayer_tenure, 1),
+                                        "gap": round(_tenure_gap, 1)},
+                        ))
+                except Exception as _tn:
+                    log.warning(f"[hr_tenure] {_tn}")
 
         except Exception as e:
             log.warning(f"[hr_attrition] Failed: {e}")
@@ -8808,6 +8917,25 @@ class SmartChartRecommender:
                                 grp_pareto.columns = [cat, "_count"]
                                 _pareto_value_col = "_count"
                                 grp_sorted = grp_pareto.sort_values(_pareto_value_col, ascending=False)
+                        elif domain_id == "hr":
+                            # HR: count headcount per employment category
+                            best_cat_col = cat if cat else None
+                            if best_cat_col is None or best_cat_col not in pdf_tmp.columns:
+                                # Find first low-cardinality categorical column
+                                for _c in pdf_tmp.columns:
+                                    try:
+                                        if pdf_tmp[_c].dtype == object and pdf_tmp[_c].nunique() <= 20:
+                                            best_cat_col = _c
+                                            break
+                                    except Exception:
+                                        continue
+                            if best_cat_col:
+                                grp_pareto = pdf_tmp[best_cat_col].value_counts().reset_index()
+                                grp_pareto.columns = [best_cat_col, "_count"]
+                                _pareto_value_col = "_count"
+                                grp_sorted = grp_pareto.sort_values(_pareto_value_col, ascending=False)
+                            else:
+                                raise ValueError("No suitable HR categorical column for Pareto")
                         else:
                             # Original logic for non-entertainment domains
                             # ✅ PARETO FIX: Pick the categorical column with highest concentration
@@ -8836,11 +8964,13 @@ class SmartChartRecommender:
                             _pareto_bar_name = "Match Volume"
                         elif domain_id == "entertainment":
                             _pareto_bar_name = "Title Count"
+                        elif domain_id == "hr":
+                            _pareto_bar_name = "Headcount"
                         else:
                             _pareto_bar_name = "Revenue"
                         
                         # Domain-aware text formatting
-                        if domain_id in ("sports", "entertainment"):
+                        if domain_id in ("sports", "entertainment", "hr"):
                             _pareto_text = [f"{int(v):,}" for v in grp_sorted[_pareto_value_col]]
                         else:
                             _pareto_text = [f"{v/1e6:.1f}M" for v in grp_sorted[_pareto_value_col]]
@@ -8864,6 +8994,14 @@ class SmartChartRecommender:
                             _pareto_title = "Match Volume Distribution"
                         elif domain_id == "entertainment":
                             _pareto_title = "Rating Content Volume Distribution"
+                        elif domain_id == "hr":
+                            # Friendly column name for HR (Employmentstatus → Employment Status)
+                            try:
+                                from report_generator import friendly_col as _fc_hr
+                                _pareto_col_label = _fc_hr(best_cat_col)
+                            except Exception:
+                                pass
+                            _pareto_title = f"{_pareto_col_label} Distribution"
                         else:
                             _pareto_title = f"{_pareto_col_label} Revenue Contribution"
                         fig_pareto.update_layout(
@@ -8881,6 +9019,8 @@ class SmartChartRecommender:
                             _pareto_desc = "80/20 analysis — which categories drive 80% of match volume"
                         elif domain_id == "entertainment":
                             _pareto_desc = "80/20 analysis — which ratings drive 80% of catalogue"
+                        elif domain_id == "hr":
+                            _pareto_desc = "80/20 analysis — which employment categories dominate headcount"
                         else:
                             _pareto_desc = "80/20 analysis — which categories drive 80% of revenue"
                         
