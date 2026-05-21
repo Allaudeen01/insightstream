@@ -2398,7 +2398,8 @@ class PDFReportGenerator:
 
     def _build_section_7_recommendations(self, recommendations: list,
                                           insights: list = None,
-                                          domain_id: str = "general") -> list:
+                                          domain_id: str = "general",
+                                          df=None) -> list:
         elements = []
 
         # ── P2 FIX: Use RecommendationEngine when no pre-built recs provided ──
@@ -2582,8 +2583,10 @@ class PDFReportGenerator:
             })
 
         if domain_id == "entertainment" and len(recommendations) < 3:
-            # Compute dynamic values from df
+            # Compute dynamic values from df parameter
             _ent_df = df if df is not None else None
+            if _ent_df is not None and hasattr(_ent_df, 'to_pandas'):
+                _ent_df = _ent_df.to_pandas()
             
             # Fix 1: Dynamic top rating %
             _ent_top_rating = "TV-MA"
@@ -4543,7 +4546,7 @@ class UnifiedReportGenerator(PDFReportGenerator):
             if "recommendation" in b.get("content", "").lower()
         ]
         elements.extend(self._build_section_7_recommendations(
-            recs, insights=insights, domain_id=domain_id
+            recs, insights=insights, domain_id=domain_id, df=df
         ))
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
