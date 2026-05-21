@@ -2415,14 +2415,25 @@ class BusinessRuleEngine:
 
                     direction = "increases" if corr > 0 else "decreases"
                     impact = "Critical" if abs(corr) >= 0.85 else "Important"
+                    # Friendly display names for column names in title (e.g. "imdb_rating" → "IMDB Rating")
+                    def _friendly(name: str) -> str:
+                        s = str(name).replace("_", " ").strip()
+                        # Special-case common acronyms
+                        upper_words = {"imdb", "irr", "roi", "kpi", "id", "url", "api", "sku", "gst", "tax"}
+                        return " ".join(
+                            w.upper() if w.lower() in upper_words else w.title()
+                            for w in s.split()
+                        )
+                    _c1_disp = _friendly(c1)
+                    _c2_disp = _friendly(c2)
                     insights.append(BusinessInsight(
-                        title=f"Systemic Linkage: {c1} & {c2}",
-                        description=f"Strong decision-relevant linkage detected where {c1} acts as a reliable predictor for {c2} behavior.",
+                        title=f"Systemic Linkage: {_c1_disp} & {_c2_disp}",
+                        description=f"Strong decision-relevant linkage detected where {_c1_disp} acts as a reliable predictor for {_c2_disp} behavior.",
                         why_it_matters="Predictive accuracy is highest when variables are strongly coupled. This linkage should be the foundation of any forecasting models.",
                         evidence=f"Correlation coefficient: {corr:.2f} | Strength: {'High' if abs(corr) >= 0.7 else 'Moderate'}",
-                        decision_implication=f"Incorporate both {c1} and {c2} as primary features in all future predictive modeling efforts. Use {c1} as a leading indicator for {c2} performance.",
+                        decision_implication=f"Incorporate both {_c1_disp} and {_c2_disp} as primary features in all future predictive modeling efforts. Use {_c1_disp} as a leading indicator for {_c2_disp} performance.",
                         impact=impact,
-                        recommendation=f"Foundation for predictive modeling identified via {c1}/{c2} linkage.",
+                        recommendation=f"Foundation for predictive modeling identified via {_c1_disp}/{_c2_disp} linkage.",
                         rule_type="correlation_matrix"
                     ))
         except Exception:
@@ -3283,6 +3294,56 @@ class BusinessRuleEngine:
             "rating", "maturity_rating", "age_rating", "content_rating",
             "certification", "rated"
         ])
+        
+        # Value-based validation: ensure rating_col actually contains G/PG/R/TV-MA classifications
+        # This prevents matching numerical rating columns like imdb_rating (7.1, 8.5)
+        # Convert to pandas first for robust value inspection
+        try:
+            _df_pd_for_rating = df.to_pandas() if hasattr(df, "to_pandas") else df
+        except Exception:
+            _df_pd_for_rating = df
+
+        def _find_content_rating_col(df_local):
+            """Find the column containing G/PG/R/TV-MA style classifications."""
+            _rating_keywords = {'G', 'PG', 'PG-13', 'R', 'TV-MA', 'TV-14',
+                                'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'NC-17',
+                                'NR', 'UR', 'TV-13'}
+            for col in df_local.columns:
+                try:
+                    sample = df_local[col].dropna().astype(str).head(20).tolist()
+                    matches = sum(
+                        1 for val in sample
+                        if val.strip().upper() in _rating_keywords
+                    )
+                    if matches >= 3:  # At least 3 sample values are content ratings
+                        return col
+                except Exception:
+                    continue
+            return None
+        
+        # Validate rating_col by checking its values
+        if rating_col is not None:
+            try:
+                _sample_vals = _df_pd_for_rating[rating_col].dropna().astype(str).head(20).tolist()
+                _rating_keywords = {'G', 'PG', 'PG-13', 'R', 'TV-MA', 'TV-14',
+                                    'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'NC-17',
+                                    'NR', 'UR'}
+                _content_matches = sum(
+                    1 for v in _sample_vals
+                    if v.strip().upper() in _rating_keywords
+                )
+                # If <3 matches, the column is likely numerical (e.g. imdb_rating)
+                if _content_matches < 3:
+                    print(f"[CONTENT_LIBRARY] '{rating_col}' is not a content rating column "
+                          f"(sample: {_sample_vals[:3]}), searching by values...")
+                    rating_col = _find_content_rating_col(_df_pd_for_rating)
+                    print(f"[CONTENT_LIBRARY] Value-based rating_col: {rating_col}")
+            except Exception:
+                rating_col = _find_content_rating_col(_df_pd_for_rating)
+        else:
+            # No name match — try value-based detection
+            rating_col = _find_content_rating_col(_df_pd_for_rating)
+        
         country_col = _find_col([
             "country", "countries", "origin_country", "country_of_origin",
             "production_country", "region"
@@ -3447,7 +3508,9 @@ class BusinessRuleEngine:
             # 4. Release year trend
             if year_col:
                 try:
-                    year_counts   = pdf[year_col].dropna().astype(int).value_counts().sort_index()
+                    import pandas as _pd_y2
+                    _yr_clean = _pd_y2.to_numeric(pdf[year_col], errors="coerce").dropna().astype(int)
+                    year_counts   = _yr_clean.value_counts().sort_index()
                     peak_year     = int(year_counts.idxmax())
                     recent_count  = int(year_counts[year_counts.index >= 2018].sum())
                     recent_pct    = recent_count / total * 100
@@ -3572,9 +3635,13 @@ class BusinessRuleEngine:
                     import datetime as _dtmod
                     _current_year = _dtmod.date.today().year
                     _cutoff_year = _current_year - 3
-                    _years = pdf[year_col].dropna().astype(int)
+                    # Coerce to numeric safely (handles strings/dates)
+                    import pandas as _pd_year
+                    _years = _pd_year.to_numeric(pdf[year_col], errors="coerce").dropna().astype(int)
+                    if len(_years) == 0:
+                        raise ValueError("No valid years")
                     _recent_3yr = int((_years >= _cutoff_year).sum())
-                    _recent_3yr_pct = _recent_3yr / max(len(_years), 1) * 100
+                    _recent_3yr_pct = _recent_3yr / len(_years) * 100
                     _oldest_year = int(_years.min())
                     _newest_year = int(_years.max())
                     _span = _newest_year - _oldest_year

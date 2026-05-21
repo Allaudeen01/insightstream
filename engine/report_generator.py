@@ -2588,14 +2588,42 @@ class PDFReportGenerator:
             if _ent_df is not None and hasattr(_ent_df, 'to_pandas'):
                 _ent_df = _ent_df.to_pandas()
             
-            # Fix 1: Dynamic top rating %
+            # Helper: find content rating column by VALUES (not name) to avoid imdb_rating
+            def _find_content_rating_col_local(df_local):
+                _kw = {'G', 'PG', 'PG-13', 'R', 'TV-MA', 'TV-14',
+                       'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'NC-17', 'NR', 'UR'}
+                for col in df_local.columns:
+                    try:
+                        sample = df_local[col].dropna().astype(str).head(20).tolist()
+                        matches = sum(1 for v in sample if v.strip().upper() in _kw)
+                        if matches >= 3:
+                            return col
+                    except Exception:
+                        continue
+                return None
+            
+            # Fix 1: Dynamic top rating % (using value-based detection)
             _ent_top_rating = "TV-MA"
             _ent_top_rating_pct = 36
             if _ent_df is not None:
                 try:
+                    # First try by name
                     _rating_col = next((c for c in _ent_df.columns if any(
-                        k in c.lower() for k in ["rating", "maturity_rating", "age_rating", "content_rating"]
+                        k in c.lower() for k in ["maturity_rating", "age_rating",
+                                                  "content_rating", "certification"]
                     )), None)
+                    
+                    # Validate by checking values; if not content ratings, search by value
+                    if _rating_col:
+                        _sample = _ent_df[_rating_col].dropna().astype(str).head(20).tolist()
+                        _kw_check = {'G', 'PG', 'PG-13', 'R', 'TV-MA', 'TV-14',
+                                     'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'NC-17'}
+                        _matches = sum(1 for v in _sample if v.strip().upper() in _kw_check)
+                        if _matches < 3:
+                            _rating_col = _find_content_rating_col_local(_ent_df)
+                    else:
+                        _rating_col = _find_content_rating_col_local(_ent_df)
+                    
                     if _rating_col:
                         _rc = _ent_df[_rating_col].value_counts()
                         _ent_top_rating = str(_rc.index[0])
@@ -2637,8 +2665,10 @@ class PDFReportGenerator:
                         k in c.lower() for k in ["release_year", "year", "production_year"]
                     )), None)
                     if _year_col:
-                        _recent = _ent_df[_ent_df[_year_col].dropna().astype(int) >= 2018].shape[0]
-                        _ent_recency_pct = round(_recent / max(len(_ent_df), 1) * 100)
+                        _years_clean = pd.to_numeric(_ent_df[_year_col], errors="coerce").dropna()
+                        if len(_years_clean) > 0:
+                            _recent = int((_years_clean >= 2018).sum())
+                            _ent_recency_pct = round(_recent / len(_years_clean) * 100)
                 except Exception:
                     pass
 
@@ -3601,15 +3631,35 @@ class UnifiedReportGenerator(PDFReportGenerator):
             or not ai_summary.strip()
         ):
             _total = len(df) if df is not None else 0
-            # Fix 4: Compute top rating dynamically
+            # Fix 4: Compute top rating dynamically (value-based, avoid imdb_rating)
             _ai_top_rating = "TV-MA"
             if df is not None:
                 try:
-                    _r_col = next((c for c in df.columns if any(
-                        k in c.lower() for k in ["rating", "maturity_rating", "age_rating", "content_rating"]
-                    )), None)
+                    # Convert to pandas if needed
+                    _df_local = df.to_pandas() if hasattr(df, "to_pandas") else df
+                    
+                    # Value-based content rating detection
+                    _ai_kw = {'G', 'PG', 'PG-13', 'R', 'TV-MA', 'TV-14',
+                              'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'NC-17', 'NR', 'UR'}
+                    _r_col = None
+                    for _col in _df_local.columns:
+                        try:
+                            _smp = _df_local[_col].dropna().astype(str).head(20).tolist()
+                            _m = sum(1 for v in _smp if v.strip().upper() in _ai_kw)
+                            if _m >= 3:
+                                _r_col = _col
+                                break
+                        except Exception:
+                            continue
+                    
+                    # Fallback to name-based if value-based fails
+                    if _r_col is None:
+                        _r_col = next((c for c in _df_local.columns if any(
+                            k in c.lower() for k in ["maturity_rating", "age_rating", "content_rating"]
+                        )), None)
+                    
                     if _r_col:
-                        _ai_top_rating = str(df[_r_col].value_counts().index[0])
+                        _ai_top_rating = str(_df_local[_r_col].value_counts().index[0])
                 except Exception:
                     pass
             ai_summary = (
