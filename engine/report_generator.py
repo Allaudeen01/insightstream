@@ -307,6 +307,11 @@ def friendly_col(col: str) -> str:
         ("hourlyrate",       "Hourly Rate"),
         ("dailyrate",        "Daily Rate"),
         ("monthlyrate",      "Monthly Rate"),
+        ("payzone",          "Pay Zone"),
+        ("paygrade",         "Pay Grade"),
+        ("payband",          "Pay Band"),
+        ("paytype",          "Pay Type"),
+        ("payrate",          "Pay Rate"),
         ("jobsatisfaction",  "Job Satisfaction"),
         ("worklifebalance",  "Work Life Balance"),
         ("yearsatcompany",   "Years At Company"),
@@ -323,6 +328,9 @@ def friendly_col(col: str) -> str:
         ("overtime",         "Overtime"),
         ("stockoption",      "Stock Option"),
         ("trainingtimes",    "Training Times"),
+        ("trainingcost",     "Training Cost"),
+        ("manageremp",       "Manager Emp"),
+        ("managername",      "Manager Name"),
         ("dateadded",        "Date Added"),
         ("releaseyear",      "Release Year"),
         ("imdbrating",       "IMDB Rating"),
@@ -1305,12 +1313,59 @@ class InsightNarrator:
 
         # ── Sentence 1: domain-aware opening — always fires when records present
         if records:
+            # HR-specific: build a workforce-aware opener using metrics if available
+            _hr_opener = None
+            if domain == "hr":
+                try:
+                    # Try to pull attrition rate from metrics or insights
+                    _hr_attr = None
+                    _hr_dept = None
+                    _hr_high_risk = 0
+                    _hr_top_attr_dept = None
+                    
+                    for ins in (insights or []):
+                        if not isinstance(ins, dict):
+                            continue
+                        rt = str(ins.get("rule_type", "")).lower()
+                        impact = str(ins.get("impact", "")).lower()
+                        if "critical" in impact or "important" in impact:
+                            _hr_high_risk += 1
+                        if rt == "hr_attrition":
+                            cd = ins.get("chart_data", {}) or {}
+                            _hr_attr = cd.get("attrition_rate")
+                        elif rt == "hr_attrition_by_dept":
+                            cd = ins.get("chart_data", {}) or {}
+                            _dept_rates = cd.get("dept_rates", {}) or {}
+                            if _dept_rates:
+                                _hr_dept = len(_dept_rates)
+                                _sorted_d = sorted(_dept_rates.items(),
+                                                   key=lambda x: x[1], reverse=True)
+                                if _sorted_d:
+                                    _hr_top_attr_dept = _sorted_d[0][0]
+                    
+                    if _hr_attr is not None and _hr_top_attr_dept and _hr_dept:
+                        _hr_opener = (
+                            f"This workforce dataset covers {records} employees "
+                            f"across {_hr_dept} departments. "
+                            f"Key risk: {_hr_attr:.1f}% attrition rate with "
+                            f"{_hr_top_attr_dept} showing the highest departmental turnover."
+                        )
+                    elif _hr_attr is not None:
+                        _hr_opener = (
+                            f"This workforce dataset covers {records} employees "
+                            f"with a {_hr_attr:.1f}% attrition rate. "
+                            f"{_hr_high_risk} high-impact finding"
+                            f"{'s' if _hr_high_risk != 1 else ''} require HR leadership review."
+                        )
+                except Exception:
+                    pass
+            
             _DOMAIN_OPENERS = {
-                "hr": (
+                "hr": (_hr_opener or (
                     f"Across {records} employee records, "
                     f"this {domain_label} dataset reveals workforce patterns "
                     f"that require strategic attention."
-                ),
+                )),
                 "entertainment": (
                     f"Across {records} titles, "
                     f"this content library analysis reveals distribution patterns "
@@ -1338,7 +1393,8 @@ class InsightNarrator:
         # ── Sentence 2: revenue concentration / segment dominance ──────────
         # Exclude customer_concentration — it has its own sentence below and
         # its description triggers the "accounts for Y%" regex incorrectly.
-        rev_insight = next(
+        # Skip entirely for non-financial domains (HR, sports, entertainment, health).
+        rev_insight = None if domain in ("hr", "sports", "entertainment", "health") else next(
             (i for i in insights
              if isinstance(i, dict)
              and i.get("rule_type") != "customer_concentration"

@@ -1832,8 +1832,12 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_domain_detection, "domain_detection", df, profile))
 
         # ── EXISTING rules ────────────────────────────────────────────────
+        # Skip revenue-style rules on non-financial domains
+        _NON_FIN = {"hr", "sports", "entertainment", "health"}
+        _is_non_financial = domain in _NON_FIN
+        
         # Always try revenue_by_category if we have a category column
-        if profile.category_col and profile.revenue_col:
+        if profile.category_col and profile.revenue_col and not _is_non_financial:
             rev_series = getattr(profile, "_revenue_series", None)
             all_insights.extend(safe_rule_call(self._rule_revenue_by_category, "revenue_by_category", df, pdf, profile, rev_series))
 
@@ -1854,10 +1858,12 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_outlier_alert, "outlier_alert", df, profile))
 
         # ── ✅ NEW SEGMENT RULES (Fix 3) ──────────────────────────────────
-        all_insights.extend(safe_rule_call(self._rule_revenue_by_segment, "revenue_by_segment", df, domain))
-        all_insights.extend(safe_rule_call(self._rule_top_performers, "top_performers", df, domain))
+        if not _is_non_financial:
+            all_insights.extend(safe_rule_call(self._rule_revenue_by_segment, "revenue_by_segment", df, domain))
+            all_insights.extend(safe_rule_call(self._rule_top_performers, "top_performers", df, domain))
         all_insights.extend(safe_rule_call(self._rule_skewed_distribution_alert, "skewed_distribution", df, domain))
-        all_insights.extend(safe_rule_call(self._rule_discount_impact, "discount_impact", df, domain))
+        if not _is_non_financial:
+            all_insights.extend(safe_rule_call(self._rule_discount_impact, "discount_impact", df, domain))
         all_insights.extend(safe_rule_call(self._rule_demographic_split, "demographic_split", df, domain))
 
         _HR_ATTRITION_SIGNALS = [
@@ -1948,13 +1954,19 @@ class BusinessRuleEngine:
                 )
 
         # ── Tier 1.2: Enhanced Time-Series Analysis ───────────────────────
-        _ts = TimeSeriesAnalyzer()
-        _ts_insights = safe_rule_call(_ts.analyze, "time_series_analyzer", df, profile)
-        if _ts_insights:
-            all_insights.extend(_ts_insights)
+        # Skip revenue-trend analysis on non-financial domains (HR, sports,
+        # entertainment, health) — date+numeric coincidence triggers it incorrectly.
+        _NON_FINANCIAL_DOMAINS = {"hr", "sports", "entertainment", "health"}
+        if domain in _NON_FINANCIAL_DOMAINS:
+            print(f"[TIME_SERIES] Skipped — domain '{domain}' is non-financial")
         else:
-            # Fallback to basic rule if enhanced analyzer produces nothing
-            all_insights.extend(safe_rule_call(self._rule_temporal_peaks, "temporal_peaks_fallback", df))
+            _ts = TimeSeriesAnalyzer()
+            _ts_insights = safe_rule_call(_ts.analyze, "time_series_analyzer", df, profile)
+            if _ts_insights:
+                all_insights.extend(_ts_insights)
+            else:
+                # Fallback to basic rule if enhanced analyzer produces nothing
+                all_insights.extend(safe_rule_call(self._rule_temporal_peaks, "temporal_peaks_fallback", df))
         
         # ── ✅ GAP 1: Cross-Dimensional Reasoning ─────────────────────────
         all_insights.extend(safe_rule_call(self._rule_cross_dimensional, "cross_dimensional", df, profile))
@@ -1971,13 +1983,15 @@ class BusinessRuleEngine:
         all_insights.extend(safe_rule_call(self._rule_simulation, "simulation", df, profile))
         all_insights.extend(safe_rule_call(self._rule_rating_analysis, "rating_analysis", df, profile))
         all_insights.extend(safe_rule_call(self._rule_category_satisfaction_cross, "category_satisfaction", df, profile))
-        all_insights.extend(safe_rule_call(self._rule_customer_concentration, "customer_concentration", df, profile))
+        if not _is_non_financial:
+            all_insights.extend(safe_rule_call(self._rule_customer_concentration, "customer_concentration", df, profile))
 
         # ── NEW: Customer Intelligence & Forecasting Rules ───────────────
-        all_insights.extend(safe_rule_call(self._rule_rfm_segmentation, "rfm_segmentation", df, profile))
-        all_insights.extend(safe_rule_call(self._rule_cohort_retention, "cohort_retention", df, profile))
-        all_insights.extend(safe_rule_call(self._rule_clv_estimate, "clv_estimate", df, profile))
-        all_insights.extend(safe_rule_call(self._rule_seasonal_forecast, "seasonal_forecast", df, profile))
+        if not _is_non_financial:
+            all_insights.extend(safe_rule_call(self._rule_rfm_segmentation, "rfm_segmentation", df, profile))
+            all_insights.extend(safe_rule_call(self._rule_cohort_retention, "cohort_retention", df, profile))
+            all_insights.extend(safe_rule_call(self._rule_clv_estimate, "clv_estimate", df, profile))
+            all_insights.extend(safe_rule_call(self._rule_seasonal_forecast, "seasonal_forecast", df, profile))
 
         # Root-cause must run last — it reads all_insights to attach hypotheses to parent findings
         all_insights.extend(safe_rule_call(self._rule_root_cause_analysis, "root_cause_analysis", df, profile, all_insights))
