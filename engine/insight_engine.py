@@ -3617,6 +3617,15 @@ class BusinessRuleEngine:
             # 3. Top producing countries
             if country_col:
                 try:
+                    # Check data completeness for country column
+                    _country_missing_pct = pdf[country_col].isnull().sum() / max(len(pdf), 1) * 100
+                    _data_warning = ""
+                    if _country_missing_pct > 30:
+                        _data_warning = (
+                            f" Note: {_country_missing_pct:.0f}% of country data is missing — "
+                            f"geographic figures reflect available records only."
+                        )
+                    
                     country_series = pdf[country_col].dropna().str.split(",").explode().str.strip()
                     country_counts = country_series.value_counts().head(5)
                     top_country     = country_counts.index[0]
@@ -3628,6 +3637,7 @@ class BusinessRuleEngine:
                             f"({country_counts.iloc[0]:,} titles). "
                             f"Top 5 countries: {', '.join(f'{c} ({n:,})' for c, n in country_counts.items())}. "
                             f"Geographic concentration signals both market strength and localisation opportunity."
+                            f"{_data_warning}"
                         ),
                         why_it_matters="Content origin shapes cultural relevance and international subscriber growth.",
                         evidence=f"Top: {top_country} ({top_country_pct:.0f}%) | {len(country_counts)} countries in top 5",
@@ -3638,10 +3648,63 @@ class BusinessRuleEngine:
                         ),
                         rule_type="content_by_country",
                         score=7.0,
-                        chart_data={"country_counts": country_counts.to_dict()},
+                        chart_data={
+                            "country_counts": country_counts.to_dict(),
+                            "missing_pct": round(_country_missing_pct, 1),
+                        },
                     ))
                 except Exception as _ce:
                     log.warning(f"[content_by_country] {_ce}")
+
+            # Genre insight (top genres from listed_in/genre column)
+            if genre_col:
+                try:
+                    _genre_series = (
+                        pdf[genre_col].dropna()
+                        .astype(str)
+                        .str.split(",")
+                        .explode()
+                        .str.strip()
+                    )
+                    # Drop empty strings
+                    _genre_series = _genre_series[_genre_series != ""]
+                    if len(_genre_series) > 0:
+                        _top_genres = _genre_series.value_counts().head(5)
+                        _top_genre = str(_top_genres.index[0])
+                        _top_genre_count = int(_top_genres.iloc[0])
+                        # Use unique titles as denominator (since genre column is comma-separated)
+                        _genre_pct = _top_genre_count / max(len(pdf), 1) * 100
+                        _genre_diversity = len(_genre_series.unique())
+                        
+                        insights.append(BusinessInsight(
+                            title=f"Top Genre: {_top_genre} at {_genre_pct:.0f}% of Catalogue",
+                            description=(
+                                f"{_top_genre} appears in {_top_genre_count:,} titles "
+                                f"({_genre_pct:.0f}% of catalogue). "
+                                f"Top 5 genres: {', '.join(f'{g} ({c:,})' for g, c in _top_genres.items())}. "
+                                f"Catalogue spans {_genre_diversity} distinct genres — "
+                                f"{'broad genre coverage signals horizontal audience reach.' if _genre_diversity > 15 else 'narrower genre focus suggests targeted audience strategy.'}"
+                            ),
+                            why_it_matters=(
+                                "Genre mix drives content discovery, recommendation algorithms, "
+                                "and subscriber retention across distinct audience segments."
+                            ),
+                            evidence=(
+                                f"Top: {_top_genre} ({_genre_pct:.0f}%) | "
+                                f"Genre diversity: {_genre_diversity} unique genres"
+                            ),
+                            impact="🟠 Important",
+                            recommendation=(
+                                f"Invest in {_top_genre} adjacencies to capitalise on the strongest "
+                                f"genre. Audit underrepresented genres in the long tail — "
+                                f"strategic gaps may signal acquisition opportunities."
+                            ),
+                            rule_type="content_top_genre",
+                            score=7.0,
+                            chart_data={"genre_counts": _top_genres.to_dict()},
+                        ))
+                except Exception as _ge:
+                    log.warning(f"[content_top_genre] {_ge}")
 
             # 4. Release year trend
             if year_col:
