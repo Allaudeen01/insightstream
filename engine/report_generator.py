@@ -2582,11 +2582,68 @@ class PDFReportGenerator:
             })
 
         if domain_id == "entertainment" and len(recommendations) < 3:
+            # Compute dynamic values from df
+            _ent_df = df if df is not None else None
+            
+            # Fix 1: Dynamic top rating %
+            _ent_top_rating = "TV-MA"
+            _ent_top_rating_pct = 36
+            if _ent_df is not None:
+                try:
+                    _rating_col = next((c for c in _ent_df.columns if any(
+                        k in c.lower() for k in ["rating", "maturity_rating", "age_rating", "content_rating"]
+                    )), None)
+                    if _rating_col:
+                        _rc = _ent_df[_rating_col].value_counts()
+                        _ent_top_rating = str(_rc.index[0])
+                        _ent_top_rating_pct = round(_rc.iloc[0] / len(_ent_df) * 100)
+                except Exception:
+                    pass
+
+            # Fix 2: Dynamic top non-US countries
+            _ent_country_str = "India and UK are strong secondary markets"
+            if _ent_df is not None:
+                try:
+                    _country_col = next((c for c in _ent_df.columns if any(
+                        k in c.lower() for k in ["country", "countries", "origin_country"]
+                    )), None)
+                    if _country_col:
+                        _country_series = _ent_df[_country_col].dropna().str.split(",").explode().str.strip()
+                        _non_us = _country_series[~_country_series.str.lower().isin(
+                            ["united states", "usa", "us"]
+                        )].value_counts().head(2)
+                        if len(_non_us) >= 2:
+                            _ent_country_str = (
+                                f"{_non_us.index[0]} ({_non_us.iloc[0]:,} titles) "
+                                f"and {_non_us.index[1]} ({_non_us.iloc[1]:,}) "
+                                f"are strong secondary markets"
+                            )
+                        elif len(_non_us) == 1:
+                            _ent_country_str = (
+                                f"{_non_us.index[0]} ({_non_us.iloc[0]:,} titles) "
+                                f"is the strongest secondary market"
+                            )
+                except Exception:
+                    pass
+
+            # Fix 3: Dynamic recency %
+            _ent_recency_pct = 42
+            if _ent_df is not None:
+                try:
+                    _year_col = next((c for c in _ent_df.columns if any(
+                        k in c.lower() for k in ["release_year", "year", "production_year"]
+                    )), None)
+                    if _year_col:
+                        _recent = _ent_df[_ent_df[_year_col].dropna().astype(int) >= 2018].shape[0]
+                        _ent_recency_pct = round(_recent / max(len(_ent_df), 1) * 100)
+                except Exception:
+                    pass
+
             recommendations.extend([
                 {
                     "priority": len(recommendations) + 1,
                     "action": (
-                        "Balance mature content (TV-MA 36%) with family-friendly titles. "
+                        f"Balance mature content ({_ent_top_rating} {_ent_top_rating_pct}%) with family-friendly titles. "
                         "Parental controls and kids profiles are critical retention levers "
                         "for household accounts."
                     ),
@@ -2597,8 +2654,7 @@ class PDFReportGenerator:
                 {
                     "priority": len(recommendations) + 2,
                     "action": (
-                        "Diversify content origin beyond United States (37%). "
-                        "India (1,046 titles) and UK (806) are strong secondary markets — "
+                        f"Diversify content origin — {_ent_country_str} — "
                         "invest in local originals from underrepresented regions to drive "
                         "international growth."
                     ),
@@ -2609,7 +2665,7 @@ class PDFReportGenerator:
                 {
                     "priority": len(recommendations) + 3,
                     "action": (
-                        "Refresh catalogue with post-2020 content. Only 42% of titles were "
+                        f"Refresh catalogue with post-2020 content. Only {_ent_recency_pct}% of titles were "
                         "released in 2018 or later — licensing newer releases reduces churn "
                         "from subscribers seeking fresh content."
                     ),
@@ -3541,12 +3597,23 @@ class UnifiedReportGenerator(PDFReportGenerator):
             or "No single numeric driver" in ai_summary
             or not ai_summary.strip()
         ):
-            _total = len(df) if df is not None else 8807
+            _total = len(df) if df is not None else 0
+            # Fix 4: Compute top rating dynamically
+            _ai_top_rating = "TV-MA"
+            if df is not None:
+                try:
+                    _r_col = next((c for c in df.columns if any(
+                        k in c.lower() for k in ["rating", "maturity_rating", "age_rating", "content_rating"]
+                    )), None)
+                    if _r_col:
+                        _ai_top_rating = str(df[_r_col].value_counts().index[0])
+                except Exception:
+                    pass
             ai_summary = (
                 f"This content library contains {_total:,} titles "
                 f"spanning multiple genres, ratings, and countries. "
                 f"Movies account for the majority of catalogue. "
-                f"Mature content (TV-MA) leads in volume, suggesting "
+                f"{_ai_top_rating} leads in volume, suggesting "
                 f"an adult-skewing audience. The United States is the "
                 f"dominant content producer. Content acquisition strategy "
                 f"should balance recency, diversity, and audience rating fit."
