@@ -3646,6 +3646,10 @@ class BusinessRuleEngine:
                     _newest_year = int(_years.max())
                     _span = _newest_year - _oldest_year
                     
+                    # Guarantee earlier year first (avoid "2023–2020" inversion)
+                    _range_start, _range_end = sorted([_cutoff_year, _newest_year])
+                    _span_start, _span_end   = sorted([_oldest_year, _newest_year])
+                    
                     if _span > 3:
                         _freshness = (
                             "Catalogue is fresh and current — strong recent investment."
@@ -3656,12 +3660,12 @@ class BusinessRuleEngine:
                             title=f"Catalogue Freshness: {_recent_3yr_pct:.0f}% from Last 3 Years",
                             description=(
                                 f"{_recent_3yr:,} titles ({_recent_3yr_pct:.0f}%) were released in "
-                                f"{_cutoff_year}–{_newest_year}. "
-                                f"Catalogue spans {_span} years ({_oldest_year}–{_newest_year}). "
+                                f"{_range_start}–{_range_end}. "
+                                f"Catalogue spans {_span} years ({_span_start}–{_span_end}). "
                                 f"{_freshness}"
                             ),
                             why_it_matters="Content freshness drives subscriber engagement and reduces churn from stale catalogues.",
-                            evidence=f"Last 3 years: {_recent_3yr_pct:.0f}% | Span: {_oldest_year}–{_newest_year}",
+                            evidence=f"Last 3 years: {_recent_3yr_pct:.0f}% | Span: {_span_start}–{_span_end}",
                             impact="🟢 Minor",
                             recommendation=(
                                 f"{'Maintain current acquisition pace — freshness is a competitive advantage.' if _recent_3yr_pct > 40 else f'Prioritise licensing titles from {_cutoff_year}+ to improve catalogue freshness score.'}"

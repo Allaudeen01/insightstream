@@ -2676,9 +2676,18 @@ class PDFReportGenerator:
                 {
                     "priority": len(recommendations) + 1,
                     "action": (
-                        f"Balance mature content ({_ent_top_rating} {_ent_top_rating_pct}%) with family-friendly titles. "
-                        "Parental controls and kids profiles are critical retention levers "
-                        "for household accounts."
+                        # Rating-aware recommendation
+                        f"Maintain family-friendly focus ({_ent_top_rating} {_ent_top_rating_pct}%). "
+                        "Ensure parental controls and kids profiles remain prominent — "
+                        "they are critical retention levers for household accounts."
+                        if _ent_top_rating.strip().upper() in {
+                            'G', 'PG', 'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'U'
+                        }
+                        else (
+                            f"Balance mature content ({_ent_top_rating} {_ent_top_rating_pct}%) with family-friendly titles. "
+                            "Parental controls and kids profiles are critical retention levers "
+                            "for household accounts."
+                        )
                     ),
                     "timeframe": "Next 30 days",
                     "owner": "Content Strategy team",
@@ -3662,12 +3671,24 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         _ai_top_rating = str(_df_local[_r_col].value_counts().index[0])
                 except Exception:
                     pass
+            
+            # Rating-aware audience description
+            _FAMILY_RATINGS = {'G', 'PG', 'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'U'}
+            _ADULT_RATINGS  = {'TV-MA', 'R', 'NC-17', 'A', '18+'}
+            _top_upper = _ai_top_rating.strip().upper()
+            if _top_upper in _FAMILY_RATINGS:
+                _audience_desc = "suggesting a family-friendly audience"
+            elif _top_upper in _ADULT_RATINGS:
+                _audience_desc = "suggesting an adult-skewing audience"
+            else:
+                _audience_desc = "spanning broad audience demographics"
+            
             ai_summary = (
                 f"This content library contains {_total:,} titles "
                 f"spanning multiple genres, ratings, and countries. "
                 f"Movies account for the majority of catalogue. "
-                f"{_ai_top_rating} leads in volume, suggesting "
-                f"an adult-skewing audience. The United States is the "
+                f"{_ai_top_rating} leads in volume, {_audience_desc}. "
+                f"The United States is the "
                 f"dominant content producer. Content acquisition strategy "
                 f"should balance recency, diversity, and audience rating fit."
             )
