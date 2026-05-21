@@ -3453,22 +3453,51 @@ class BusinessRuleEngine:
                     top_rating     = rating_counts.index[0]
                     top_rating_pct = rating_counts.iloc[0] / total * 100
                     mature_ratings = ["tv-ma", "r", "nc-17", "18+"]
-                    mature_count   = int(pdf[rating_col].str.lower().str.strip().isin(mature_ratings).sum())
+                    mature_count   = int(pdf[rating_col].astype(str).str.lower().str.strip().isin(mature_ratings).sum())
                     mature_pct     = mature_count / total * 100
+                    
+                    # Rating-aware audience description
+                    _FAMILY_RATINGS = {'G', 'PG', 'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'ALL', 'U'}
+                    _TEEN_RATINGS   = {'PG-13', '13+', 'TV-14', '12+'}
+                    _ADULT_RATINGS  = {'TV-MA', 'R', 'NC-17', '18+', '16+', 'A'}
+                    _top_upper = str(top_rating).strip().upper()
+                    
+                    if _top_upper in _FAMILY_RATINGS:
+                        _audience_desc = "Family-friendly ratings are prominent — broad audience appeal."
+                        _audience_rec = (
+                            "Maintain family-friendly focus with continued investment in G/PG content. "
+                            "Ensure parental controls and kids profiles remain prominent retention levers."
+                        )
+                    elif _top_upper in _TEEN_RATINGS:
+                        _audience_desc = "Teen-and-above ratings dominate — platform skews older audiences."
+                        _audience_rec = (
+                            "Balance teen-targeted content with broader family titles to expand household reach. "
+                            "Monitor age-gating and content advisories for younger viewers."
+                        )
+                    elif _top_upper in _ADULT_RATINGS:
+                        _audience_desc = "Mature ratings lead — platform targets adult audiences."
+                        _audience_rec = (
+                            "Balance mature and family content to avoid audience concentration risk. "
+                            "Ensure parental controls are prominent given mature content dominance."
+                        )
+                    else:
+                        _audience_desc = "Mixed rating distribution — broad audience demographics."
+                        _audience_rec = (
+                            "Maintain rating diversity to serve both family and adult viewers. "
+                            "Track shifts in rating mix as a leading indicator of audience strategy."
+                        )
+                    
                     insights.append(BusinessInsight(
                         title=f"Content Rating: {top_rating} Dominates at {top_rating_pct:.0f}%",
                         description=(
                             f"{top_rating} is the most common rating ({top_rating_pct:.0f}% of catalogue). "
                             f"Top 5 ratings: {', '.join(f'{r} ({c:,})' for r, c in rating_counts.items())}. "
-                            f"{'Mature content (TV-MA/R) makes up the majority — platform skews adult.' if top_rating in ['TV-MA', 'R'] else 'Family-friendly ratings are prominent — broad audience appeal.'}"
+                            f"{_audience_desc}"
                         ),
                         why_it_matters="Rating distribution defines audience demographics and content acquisition strategy.",
                         evidence=f"Top rating: {top_rating} ({top_rating_pct:.0f}%)",
                         impact="🟠 Important",
-                        recommendation=(
-                            "Balance mature and family content to avoid audience concentration risk. "
-                            "Ensure parental controls are prominent if mature content dominates."
-                        ),
+                        recommendation=_audience_rec,
                         rule_type="content_rating_distribution",
                         score=7.0,
                         chart_data={"rating_counts": rating_counts.to_dict()},
