@@ -3706,6 +3706,75 @@ class BusinessRuleEngine:
                 except Exception as _ge:
                     log.warning(f"[content_top_genre] {_ge}")
 
+            # Movie runtime insight (extract minutes from duration column)
+            if duration_col and type_col:
+                try:
+                    # Filter to movies only (case-insensitive match for "Movie", "Film")
+                    _movie_mask = pdf[type_col].astype(str).str.lower().isin(["movie", "film"])
+                    _movie_rows = pdf[_movie_mask]
+                    
+                    if len(_movie_rows) >= 5:
+                        # Extract numeric minutes from strings like "90 min", "120 min", "1h 32m"
+                        _raw_dur = _movie_rows[duration_col].astype(str)
+                        _runtimes = _raw_dur.str.extract(r'(\d+)', expand=False).astype(float)
+                        _runtimes = _runtimes.dropna()
+                        # Filter out unreasonably small values that likely represent seasons
+                        _runtimes = _runtimes[_runtimes >= 20]
+                        
+                        if len(_runtimes) >= 5:
+                            _median_runtime = float(_runtimes.median())
+                            _mean_runtime = float(_runtimes.mean())
+                            _min_runtime = float(_runtimes.min())
+                            _max_runtime = float(_runtimes.max())
+                            
+                            # Categorize the median runtime
+                            if _median_runtime < 80:
+                                _runtime_class = "shorter than typical feature-length films — leaning toward documentaries and shorts"
+                            elif _median_runtime < 110:
+                                _runtime_class = "standard feature-length territory"
+                            elif _median_runtime < 140:
+                                _runtime_class = "longer than average — drama and prestige content territory"
+                            else:
+                                _runtime_class = "epic-length territory — limited rewatch frequency"
+                            
+                            insights.append(BusinessInsight(
+                                title=f"Movie Runtime: Median {_median_runtime:.0f} Minutes — {'Standard Feature' if 80 <= _median_runtime < 140 else 'Atypical'} Length",
+                                description=(
+                                    f"Median movie runtime is {_median_runtime:.0f} minutes "
+                                    f"(mean: {_mean_runtime:.0f}, range: {_min_runtime:.0f}–{_max_runtime:.0f}) — "
+                                    f"{_runtime_class}."
+                                ),
+                                why_it_matters=(
+                                    "Runtime distribution affects viewing-session planning, "
+                                    "ad-slot pricing, and watch-time KPIs. Audiences self-select "
+                                    "by length when discovering content."
+                                ),
+                                evidence=(
+                                    f"Median: {_median_runtime:.0f} min | "
+                                    f"Range: {_min_runtime:.0f}–{_max_runtime:.0f} min "
+                                    f"({len(_runtimes):,} movies)"
+                                ),
+                                impact="🟢 Minor",
+                                recommendation=(
+                                    "Maintain current runtime mix — feature-length content "
+                                    "balances completion rates with depth."
+                                    if 80 <= _median_runtime < 140 else
+                                    "Audit runtime distribution against viewer completion data — "
+                                    "atypical lengths may signal acquisition gaps."
+                                ),
+                                rule_type="content_movie_runtime",
+                                score=6.5,
+                                chart_data={
+                                    "median_runtime": round(_median_runtime, 1),
+                                    "mean_runtime": round(_mean_runtime, 1),
+                                    "min_runtime": round(_min_runtime, 1),
+                                    "max_runtime": round(_max_runtime, 1),
+                                    "movie_count": int(len(_runtimes)),
+                                },
+                            ))
+                except Exception as _re:
+                    log.warning(f"[content_movie_runtime] {_re}")
+
             # 4. Release year trend
             if year_col:
                 try:
