@@ -8744,43 +8744,81 @@ class SmartChartRecommender:
                     
                     # ✅ TIER 1 ENHANCEMENT: Add Pareto Chart (80/20 analysis)
                     try:
-                        # ✅ PARETO FIX: Pick the categorical column with highest concentration
-                        # (biggest gap between top and bottom segment)
-                        best_cat_col = cat
-                        best_top1_pct = 0
+                        # Helper: find content rating column by VALUES
+                        def _pareto_find_rating_col(_df_local):
+                            _kw = {'G', 'PG', 'PG-13', 'R', 'TV-MA', 'TV-14',
+                                   'TV-G', 'TV-PG', 'TV-Y', 'TV-Y7', 'NC-17', 'NR', 'UR'}
+                            for _c in _df_local.columns:
+                                try:
+                                    _smp = _df_local[_c].dropna().astype(str).head(20).tolist()
+                                    _m = sum(1 for v in _smp if v.strip().upper() in _kw)
+                                    if _m >= 3:
+                                        return _c
+                                except Exception:
+                                    continue
+                            return None
                         
-                        for col in [cat, geo_col]:
-                            if col and col in pdf_tmp.columns:
-                                shares = pdf_tmp.groupby(col)[rev_col].sum()
-                                top1_pct = shares.max() / shares.sum()
-                                if top1_pct > best_top1_pct:
-                                    best_top1_pct = top1_pct
-                                    best_cat_col = col
+                        # ── Entertainment: group by content rating, count rows ──
+                        if domain_id == "entertainment":
+                            _rating_col_pareto = _pareto_find_rating_col(pdf_tmp)
+                            if _rating_col_pareto:
+                                best_cat_col = _rating_col_pareto
+                                # COUNT rows per rating instead of summing revenue
+                                grp_pareto = (
+                                    pdf_tmp[_rating_col_pareto]
+                                    .value_counts()
+                                    .reset_index()
+                                )
+                                grp_pareto.columns = [_rating_col_pareto, "_count"]
+                                _pareto_value_col = "_count"
+                                grp_sorted = grp_pareto.sort_values(_pareto_value_col, ascending=False)
+                            else:
+                                # Fallback: use cat column with row counts
+                                best_cat_col = cat
+                                grp_pareto = pdf_tmp[cat].value_counts().reset_index()
+                                grp_pareto.columns = [cat, "_count"]
+                                _pareto_value_col = "_count"
+                                grp_sorted = grp_pareto.sort_values(_pareto_value_col, ascending=False)
+                        else:
+                            # Original logic for non-entertainment domains
+                            # ✅ PARETO FIX: Pick the categorical column with highest concentration
+                            # (biggest gap between top and bottom segment)
+                            best_cat_col = cat
+                            best_top1_pct = 0
+                            
+                            for col in [cat, geo_col]:
+                                if col and col in pdf_tmp.columns:
+                                    shares = pdf_tmp.groupby(col)[rev_col].sum()
+                                    top1_pct = shares.max() / shares.sum()
+                                    if top1_pct > best_top1_pct:
+                                        best_top1_pct = top1_pct
+                                        best_cat_col = col
 
-
-                        # Use the best categorical column for Pareto
-                        grp_pareto = pdf_tmp.groupby(best_cat_col)[rev_col].sum().reset_index()
-                        grp_sorted = grp_pareto.sort_values(rev_col, ascending=False)
+                            # Use the best categorical column for Pareto
+                            grp_pareto = pdf_tmp.groupby(best_cat_col)[rev_col].sum().reset_index()
+                            _pareto_value_col = rev_col
+                            grp_sorted = grp_pareto.sort_values(_pareto_value_col, ascending=False)
+                        
                         grp_sorted["cumulative_pct"] = (
-                            grp_sorted[rev_col].cumsum() / grp_sorted[rev_col].sum() * 100
+                            grp_sorted[_pareto_value_col].cumsum() / grp_sorted[_pareto_value_col].sum() * 100
                         )
                         # Domain-aware bar name
                         if domain_id == "sports":
                             _pareto_bar_name = "Match Volume"
                         elif domain_id == "entertainment":
-                            _pareto_bar_name = "Content Volume"
+                            _pareto_bar_name = "Title Count"
                         else:
                             _pareto_bar_name = "Revenue"
                         
                         # Domain-aware text formatting
                         if domain_id in ("sports", "entertainment"):
-                            _pareto_text = [f"{int(v):,}" for v in grp_sorted[rev_col]]
+                            _pareto_text = [f"{int(v):,}" for v in grp_sorted[_pareto_value_col]]
                         else:
-                            _pareto_text = [f"{v/1e6:.1f}M" for v in grp_sorted[rev_col]]
+                            _pareto_text = [f"{v/1e6:.1f}M" for v in grp_sorted[_pareto_value_col]]
                         
                         fig_pareto = go.Figure()
                         fig_pareto.add_trace(go.Bar(
-                            x=grp_sorted[best_cat_col], y=grp_sorted[rev_col],
+                            x=grp_sorted[best_cat_col], y=grp_sorted[_pareto_value_col],
                             name=_pareto_bar_name, marker_color="#6366f1",
                             text=_pareto_text,
                             textposition="outside"

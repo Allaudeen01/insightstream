@@ -923,8 +923,25 @@ class ChartGenerator:
             log.warning("  ✗ category chart skipped (category=%r, numeric=%r)", cm.category, cm.numeric)
             return None
 
-        data = (df.groupby(cm.category)[cm.numeric]
-                  .sum().sort_values(ascending=False).head(10))
+        # Detect if "numeric" column is actually a year column (e.g. release_year)
+        # In that case, COUNT records per category instead of summing year values
+        _is_year_metric = any(
+            k in str(cm.numeric).lower()
+            for k in ["release_year", "year", "production_year", "release_date", "year_released"]
+        )
+        
+        if _is_year_metric:
+            # Count records per category instead of summing year values
+            data = (df.groupby(cm.category).size()
+                      .sort_values(ascending=False).head(10))
+            _y_label = "Count"
+            _title = f"Title Count by {friendly_col(cm.category)}"
+        else:
+            data = (df.groupby(cm.category)[cm.numeric]
+                      .sum().sort_values(ascending=False).head(10))
+            _y_label = friendly_col(cm.numeric)
+            _title = f"Total {friendly_col(cm.numeric)} by {friendly_col(cm.category)}"
+        
         if data.empty:
             return None
 
@@ -932,11 +949,17 @@ class ChartGenerator:
         with self._safe_fig(fname) as (fig, ax):
             bp = sns.barplot(x=data.index.astype(str), y=data.values,
                              palette=C.BRAND_PALETTE[:len(data)], ax=ax)
-            ax.set_title(f"Total {friendly_col(cm.numeric)} by {friendly_col(cm.category)}",
+            ax.set_title(_title,
                          fontsize=13, fontweight="bold", pad=10)
-            ax.set_xlabel(friendly_col(cm.category)); ax.set_ylabel(friendly_col(cm.numeric))
-            ax.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
+            ax.set_xlabel(friendly_col(cm.category)); ax.set_ylabel(_y_label)
+            
+            # Use plain integer formatter for year/count metrics, currency otherwise
+            if _is_year_metric:
+                ax.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+            else:
+                ax.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
             # Average reference line
             avg_val = data.mean()
             ax.axhline(avg_val, color=C.COLOR_NEUTRAL, linestyle="--", linewidth=1.2,
@@ -959,9 +982,18 @@ class ChartGenerator:
             log.warning("  ✗ region chart skipped (region=%r, numeric=%r)", cm.region, cm.numeric)
             return None
 
+        # Detect if "numeric" column is actually a year column
+        _is_year_metric = any(
+            k in str(cm.numeric).lower()
+            for k in ["release_year", "year", "production_year", "release_date", "year_released"]
+        )
+
         # Skip flat simple regional chart — grouped chart (with category) is always shown
         if not (cm.category and cm.category != cm.region):
-            _pre_data = df.groupby(cm.region)[cm.numeric].sum()
+            if _is_year_metric:
+                _pre_data = df.groupby(cm.region).size()
+            else:
+                _pre_data = df.groupby(cm.region)[cm.numeric].sum()
             _vals = _pre_data.tolist()
             if _vals:
                 _variance_pct = (max(_vals) - min(_vals)) / max(max(_vals), 1) * 100
@@ -972,16 +1004,32 @@ class ChartGenerator:
         sns.set_style(C.SNS_STYLE)
         with self._safe_fig(fname) as (fig, ax):
             if cm.category and cm.category != cm.region:
-                pivot = (df.groupby([cm.region, cm.category])[cm.numeric]
-                           .sum().unstack(cm.category).fillna(0))
+                # Grouped chart: COUNT records by region & category if year metric
+                if _is_year_metric:
+                    pivot = (df.groupby([cm.region, cm.category])
+                               .size().unstack(cm.category).fillna(0))
+                    _y_label = "Count"
+                    _grp_title = f"Title Count by {friendly_col(cm.region)} & {friendly_col(cm.category)}"
+                else:
+                    pivot = (df.groupby([cm.region, cm.category])[cm.numeric]
+                               .sum().unstack(cm.category).fillna(0))
+                    _y_label = friendly_col(cm.numeric)
+                    _grp_title = f"{friendly_col(cm.numeric)} by {friendly_col(cm.region)} & {friendly_col(cm.category)}"
                 pivot.plot(kind="bar", ax=ax,
                            color=C.BRAND_PALETTE[:pivot.shape[1]], width=0.75)
-                ax.set_title(f"{friendly_col(cm.numeric)} by {friendly_col(cm.region)} & {friendly_col(cm.category)}",
+                ax.set_title(_grp_title,
                              fontsize=13, fontweight="bold", pad=10)
                 ax.legend(title=friendly_col(cm.category), bbox_to_anchor=(1.01, 1),
                           loc="upper left", fontsize=8)
             else:
-                data = df.groupby(cm.region)[cm.numeric].sum().sort_values(ascending=False)
+                if _is_year_metric:
+                    data = df.groupby(cm.region).size().sort_values(ascending=False)
+                    _y_label = "Count"
+                    _solo_title = f"Title Count by {friendly_col(cm.region)}"
+                else:
+                    data = df.groupby(cm.region)[cm.numeric].sum().sort_values(ascending=False)
+                    _y_label = friendly_col(cm.numeric)
+                    _solo_title = f"Total {friendly_col(cm.numeric)} by {friendly_col(cm.region)}"
                 sns.barplot(x=data.index.astype(str), y=data.values,
                             palette=C.BRAND_PALETTE[:len(data)], ax=ax)
                 # Average line
@@ -989,11 +1037,15 @@ class ChartGenerator:
                 ax.axhline(avg_val, color=C.COLOR_NEUTRAL, linestyle="--", linewidth=1.2,
                            label=f"Avg: {avg_val:,.0f}")
                 ax.legend(fontsize=8)
-                ax.set_title(f"Total {friendly_col(cm.numeric)} by {friendly_col(cm.region)}",
+                ax.set_title(_solo_title,
                              fontsize=13, fontweight="bold", pad=10)
-            ax.set_xlabel(friendly_col(cm.region)); ax.set_ylabel(friendly_col(cm.numeric))
-            ax.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
+            ax.set_xlabel(friendly_col(cm.region)); ax.set_ylabel(_y_label)
+            if _is_year_metric:
+                ax.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+            else:
+                ax.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda v, _: f"\u20b9{v:,.0f}" if v >= 1000 else f"{v:,.0f}"))
             plt.xticks(rotation=20, ha="right")
             fig.tight_layout()
         return self._verify(fname)
