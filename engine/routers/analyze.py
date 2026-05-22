@@ -8,6 +8,7 @@ from auth import get_current_user
 from models import User
 from services.session_service import create_session, save_results, mark_failed
 from insight_engine import run_insight_engine
+from analyzer import analyze_dataset, detect_domain
 
 router = APIRouter(tags=["analyze"])
 
@@ -88,7 +89,139 @@ async def analyze(
         
         await db.commit()
 
-        results = run_insight_engine(df)
+        # ── STEP 9: Domain-based routing ─────────────────────────────────
+        # Detect domain from column patterns BEFORE calling the engine.
+        # Known domains (sports, entertainment) → existing rule engine.
+        # Unknown domains (HR, salary, housing, etc.) → LLM analyzer.
+        detected = detect_domain(df, filename=file.filename or "")
+        print(f"[ROUTER] domain={detected!r} for file={file.filename!r}")
+
+        if detected in ("sports", "entertainment"):
+            # Use the existing validated rule engine for known domains
+            print(f"[ROUTER] {detected} → rule engine (run_insight_engine)")
+            results = run_insight_engine(df)
+        else:
+            # Use LLM analyzer for any unknown dataset type
+            print(f"[ROUTER] {detected} → LLM analyzer (analyze_dataset)")
+            llm_results = analyze_dataset(df)
+
+            # ── Persist LLM results to DB so PDF export can use them ─────
+            # Convert Plotly figures to JSON strings now so the export
+            # endpoint can use them directly without re-rendering.
+            import plotly.io as pio
+            chart_jsons = []
+            for _i, _fig in enumerate(llm_results.get("charts", [])):
+                try:
+                    chart_jsons.append({
+                        "id":          f"llm_chart_{_i}",
+                        "title":       _fig.layout.title.text or f"Chart {_i + 1}",
+                        "plotly_json": pio.to_json(_fig),
+                        "insight":     "",
+                    })
+                except Exception as _ce:
+                    print(f"[ROUTER] Chart {_i} serialization failed: {_ce}")
+
+            session_record.llm_results = {
+                "insights":        llm_results.get("insights", []),
+                "recommendations": llm_results.get("recommendations", []),
+                "domain":          llm_results.get("domain", "general").lower(),
+                "title":           llm_results.get("title", "Data Analysis Report"),
+                "charts":          chart_jsons,
+            }
+            db.add(session_record)
+
+            # Debug: log first insight to confirm text is populated
+            _stored_insights = llm_results.get("insights", [])
+            if _stored_insights:
+                _first = _stored_insights[0]
+                print(f"[ROUTER] First insight: title={_first.get('title')!r}, "
+                      f"text_len={len(_first.get('text', ''))}, "
+                      f"text_preview={_first.get('text', '')[:80]!r}")
+            print(f"[ROUTER] Stored LLM results: "
+                  f"{len(_stored_insights)} insights, "
+                  f"{len(chart_jsons)} charts")
+
+            # Wrap LLM results into the run_insight_engine return shape so
+            # save_results() and the frontend receive a consistent structure.
+            # LLM insights are stored in strategic_brief; recommendations stay.
+            llm_insights = llm_results.get("insights", [])
+            llm_recs     = llm_results.get("recommendations", [])
+            llm_domain   = llm_results.get("domain", "General")
+            llm_title    = llm_results.get("title", "Data Analysis Report")
+
+            # Convert LLM insight dicts to the strategic_brief shape
+            strategic_brief = [
+                {
+                    "title":                  ins.get("title", ""),
+                    "description":            ins.get("text", ""),
+                    "why_it_matters":         "",
+                    "evidence":               "",
+                    "decision_implication":   "",
+                    "impact":                 ins.get("impact", "IMPORTANT"),
+                    "recommendation":         "",
+                    "is_unexpected":          False,
+                    "confidence_label":       "medium",
+                    "confidence_explanation": "LLM-generated insight",
+                    "score":                  0.5,
+                    "chart_type":             None,
+                    "chart_data":             None,
+                    "qualified_segments":     [],
+                    "excluded_segments":      [],
+                    "rule_type":              "llm_generated",
+                    "methodology":            "LLM code generation",
+                    "narrative_hook":         ins.get("text", "")[:120],
+                }
+                for ins in llm_insights
+            ]
+
+            # Convert LLM recommendation dicts to the engine rec shape
+            recommendations = [
+                {
+                    "action":    rec.get("text", ""),
+                    "timeframe": rec.get("timeframe", "Next 30 days"),
+                    "owner":     rec.get("owner", "Strategy team"),
+                    "impact":    rec.get("impact", "Important"),
+                }
+                for rec in llm_recs
+            ]
+
+            results = {
+                "domain": {
+                    "name":       llm_domain,
+                    "confidence": "medium",
+                    "reason":     "LLM-detected domain",
+                    "id":         llm_domain.lower(),
+                },
+                "target":           None,
+                "key_drivers":      [],
+                "profile": {
+                    "identifiers":  [],
+                    "numericals":   df.select_dtypes(include="number").columns.tolist(),
+                    "categoricals": df.select_dtypes(exclude="number").columns.tolist(),
+                    "temporals":    [],
+                    "binaries":     [],
+                },
+                "computed_metrics": {},
+                "strategic_brief":  strategic_brief,
+                "recommendations":  recommendations,
+                "executive_summary": llm_title,
+                "warnings":         [],
+                "sports_meta":      {},
+                "column_coverage": {
+                    "total_columns":    len(df.columns),
+                    "analyzed_columns": len(df.columns),
+                    "coverage_pct":     100.0,
+                    "untouched_columns": [],
+                    "high_value_missed": [],
+                    "warning":          None,
+                },
+                # Pass LLM charts through for the frontend
+                "llm_charts": [
+                    fig.to_json() if hasattr(fig, "to_json") else None
+                    for fig in llm_results.get("charts", [])
+                ],
+            }
+        # ── END routing ───────────────────────────────────────────────────
 
         # Mock PDF generation for now, wire it properly later
         report_path = f"/tmp/Report_{session_record.id}.pdf"

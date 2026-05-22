@@ -53,6 +53,11 @@ class AnalysisSession(Base):
     # KPIs stored as JSON string (SQLite-safe)
     kpis_json = Column(Text)
 
+    # LLM analysis results for unknown-domain datasets (HR, salary, etc.)
+    # Stored as JSON text — contains insights, recommendations, chart_specs, domain, title.
+    # Plotly figures are NOT stored here; they are re-rendered at PDF export time.
+    llm_results_json = Column(Text, nullable=True)
+
     # Status tracking
     status = Column(
         SAEnum("pending", "processing", "complete", "failed", name="session_status"),
@@ -81,6 +86,14 @@ class AnalysisSession(Base):
     @kpis.setter
     def kpis(self, value):
         self.kpis_json = json.dumps(value)
+
+    @property
+    def llm_results(self):
+        return json.loads(self.llm_results_json) if self.llm_results_json else None
+
+    @llm_results.setter
+    def llm_results(self, value):
+        self.llm_results_json = json.dumps(value, default=str) if value is not None else None
 
 
 class SessionInsight(Base):

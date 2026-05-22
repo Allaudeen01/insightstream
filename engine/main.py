@@ -141,7 +141,19 @@ async def run_migrations(db_path: str):
             print("[DB MIGRATION] Added 'currency' column ✓")
         except Exception as e:
             print(f"[DB MIGRATION] Error or already exists: {e}")
-    
+
+    # Add llm_results_json column if missing
+    if "llm_results_json" not in existing_cols:
+        try:
+            cursor.execute(
+                "ALTER TABLE analysis_sessions "
+                "ADD COLUMN llm_results_json TEXT DEFAULT NULL"
+            )
+            conn.commit()
+            print("[DB MIGRATION] Added 'llm_results_json' column ✓")
+        except Exception as e:
+            print(f"[DB MIGRATION] Error or already exists: {e}")
+
     conn.close()
 
 @asynccontextmanager
@@ -773,55 +785,127 @@ async def export_dashboard_pdf(
     logger.info(f"🚀 [PIPELINE] New Pixel-Perfect Export hit for session: {session_id}")
     logger.info(f"📦 [PAYLOAD] Received {len(body.charts)} charts, {len(body.insights)} insights.")
 
-    # Load currency from session
+    # ── Resolve user_id (optional — shared links have no auth) ───────────
+    user_id = None
+    try:
+        from auth import get_current_user_optional
+        _cu = await get_current_user_optional(db)
+        user_id = _cu.id if _cu else None
+    except Exception:
+        pass
+
+    # ── Load currency from session ────────────────────────────────────────
     _currency_code = None
     try:
-        from services.session_service import get_session_detail
-        try:
-            from auth import get_current_user_optional
-        except ImportError:
-            get_current_user_optional = None
-        # Try to get current user, but don't fail if not authenticated (for shared links)
-        try:
-            current_user = await get_current_user_optional(db)
-            user_id = current_user.id if current_user else None
-        except:
-            user_id = None
-        
+        from services.session_service import get_session_detail as _gsd_cur
         if user_id:
-            _session = await get_session_detail(db, int(session_id), user_id)
-            if _session:
-                _currency_code = getattr(_session, 'currency', None)
+            _sess_cur = await _gsd_cur(db, int(session_id), user_id)
+            if _sess_cur:
+                _currency_code = getattr(_sess_cur, "currency", None)
                 print(f"[PDF EXPORT] Currency override: {_currency_code}")
-    except Exception as e:
-        logger.warning(f"Could not load session currency: {e}")
-        print(f"[PDF EXPORT] Currency load failed: {e}")
+    except Exception as _ce:
+        print(f"[PDF EXPORT] Currency load failed: {_ce}")
+
+    # ── Helper: plotly_json string → base64 PNG ───────────────────────────
+    def _plotly_json_to_base64(plotly_json_str: str):
+        """Deserialize stored Plotly JSON and render to PNG base64.
+        Strips layout.template first — it may contain trace types (e.g. heatmapgl)
+        removed in newer Plotly versions that cause from_json() to crash.
+        """
+        try:
+            import plotly.io as _pio
+            import base64 as _b64
+            import json as _json
+            raw = _json.loads(plotly_json_str)
+            raw.get("layout", {}).pop("template", None)
+            _fig = _pio.from_json(_json.dumps(raw))
+            _img = _pio.to_image(_fig, format="png", width=800, height=500)
+            return _b64.b64encode(_img).decode("utf-8")
+        except Exception as _err:
+            print(f"[EXPORT] Chart conversion failed: {_err}")
+            return None
 
     try:
         out_name = f"Report_{session_id}_{uuid.uuid4().hex[:6]}.pdf"
         out_path = Path(tempfile.gettempdir()) / out_name
-        
-        # Load session data to get the actual DF for regional charts
+
+        # ── Load DF from disk ─────────────────────────────────────────────
         try:
             filename, df = load_session(session_id)
             from insight_engine import detect_domain
-            domain_id = detect_domain(df)   # ← pass df not cols
-        except Exception as e:
-            logger.warning(f"Could not load session data for PDF: {e}")
-            print(f"[load_session FAILED] session_id={session_id}, error={type(e).__name__}: {e}")
+            domain_id = detect_domain(df)
+        except Exception as _le:
+            logger.warning(f"Could not load session data for PDF: {_le}")
             df = None
             domain_id = "general"
 
-        logger.info(f"🛠 [GENERATOR] Instantiating UnifiedReportGenerator with domain: {domain_id}")
-        
-        # SANITIZATION LAYER: Prevent raw data dumps from reaching PDF
+        # ── UNCONDITIONAL LLM OVERRIDE ────────────────────────────────────
+        # Check DB for stored LLM results regardless of auth state.
+        # Uses raw SQLite so it works even when user_id is None.
+        _llm_override = False
+        _insights_to_use = None
+        _structured_recs = None
+        _llm_domain_id = None
+
+        try:
+            import sqlite3 as _sq
+            import json as _jmod
+            from pathlib import Path as _P
+            _db_path = _P(__file__).parent / "data" / "insightstream.db"
+            _conn = _sq.connect(str(_db_path))
+            _row = _conn.execute(
+                "SELECT llm_results_json FROM analysis_sessions WHERE id = ?",
+                (int(session_id),)
+            ).fetchone()
+            _conn.close()
+
+            if _row and _row[0]:
+                _llm_data = _jmod.loads(_row[0])
+                _stored_charts = _llm_data.get("charts", [])
+
+                if _stored_charts:
+                    _converted = []
+                    for _ch in _stored_charts:
+                        _b64 = _plotly_json_to_base64(_ch.get("plotly_json", ""))
+                        if _b64:
+                            _converted.append({
+                                "id":           _ch.get("id", "llm_chart"),
+                                "title":        _ch.get("title", ""),
+                                "image_base64": _b64,
+                                "insight":      "",
+                            })
+                            print(f"[EXPORT] Converted chart: {_ch.get('title')!r}")
+                        else:
+                            print(f"[EXPORT] Skipped chart: {_ch.get('title')!r}")
+
+                    if _converted:
+                        body.charts = _converted
+                        _llm_override = True
+                        _insights_to_use = _llm_data.get("insights", [])
+                        _structured_recs = [
+                            {
+                                "action":    r.get("text", r.get("action", "")),
+                                "timeframe": r.get("timeframe", "Next 30 days"),
+                                "owner":     r.get("owner", "Strategy team"),
+                                "impact":    r.get("impact", "Important"),
+                            }
+                            for r in _llm_data.get("recommendations", [])
+                        ]
+                        _llm_domain_id = _llm_data.get("domain", "general").lower()
+                        domain_id = _llm_domain_id
+                        print(f"[EXPORT] _llm_override=True, {len(_converted)} LLM charts ready")
+        except Exception as _oe:
+            print(f"[EXPORT] LLM override check failed: {_oe}")
+        # ── END UNCONDITIONAL LLM OVERRIDE ───────────────────────────────
+
+        logger.info(f"🛠 [GENERATOR] domain={domain_id}, llm_override={_llm_override}")
+
+        # ── Sanitize payload ──────────────────────────────────────────────
         clean_ai_summary = sanitize_insight(body.ai_summary, max_length=1000)
-        # Preserve dict insights — sanitize_insight would str() them and lose rule_type/chart_data
         clean_insights = [
             ins if isinstance(ins, dict) else sanitize_insight(ins, max_length=500)
             for ins in body.insights
         ]
-        
         clean_charts = []
         for ch in body.charts:
             ch_copy = ch.copy()
@@ -829,58 +913,62 @@ async def export_dashboard_pdf(
                 ch_copy["insight"] = sanitize_insight(ch_copy["insight"], max_length=400)
             clean_charts.append(ch_copy)
 
-        # CHART FALLBACK: If every chart is missing both image_base64 and plotly_json
-        # (old frontend build that didn't send plotly_json), regenerate from viz engine.
-        needs_plotly = any(
-            not ch.get("image_base64") and not ch.get("plotly_json")
-            for ch in clean_charts
-        )
-        if needs_plotly and clean_charts:
-            print("[PDF Export] plotly_json absent — regenerating from viz engine as fallback")
-            try:
-                viz_resp = _internal_gen_viz(session_id=session_id, max_charts=12)
-                viz_by_id    = {c.chart_id: c for c in viz_resp.charts}
-                viz_by_title = {c.title: c    for c in viz_resp.charts}
-                for ch in clean_charts:
-                    if not ch.get("image_base64") and not ch.get("plotly_json"):
-                        match = (viz_by_id.get(ch.get("id", "")) or
-                                 viz_by_title.get(ch.get("title", "")))
-                        if match:
-                            ch["plotly_json"] = match.plotly_json
-                            print(f"[PDF Export] Enriched with plotly_json: {ch.get('title', '?')}")
-            except Exception as _ve:
-                print(f"[PDF Export] Viz fallback failed: {_ve}")
+        # ── Chart fallback (rule engine) — ONLY for non-LLM sessions ─────
+        if not _llm_override:
+            needs_plotly = any(
+                not ch.get("image_base64") and not ch.get("plotly_json")
+                for ch in clean_charts
+            )
+            if needs_plotly and clean_charts:
+                print("[PDF Export] plotly_json absent — regenerating from viz engine")
+                try:
+                    viz_resp = _internal_gen_viz(session_id=session_id, max_charts=12)
+                    viz_by_id    = {c.chart_id: c for c in viz_resp.charts}
+                    viz_by_title = {c.title: c    for c in viz_resp.charts}
+                    for ch in clean_charts:
+                        if not ch.get("image_base64") and not ch.get("plotly_json"):
+                            match = (viz_by_id.get(ch.get("id", "")) or
+                                     viz_by_title.get(ch.get("title", "")))
+                            if match:
+                                ch["plotly_json"] = match.plotly_json
+                except Exception as _ve:
+                    print(f"[PDF Export] Viz fallback failed: {_ve}")
 
-        # Prefer structured dicts from the engine cache; fall back to the payload the
-        # frontend sent. Normalize emoji-prefixed impact values regardless of source.
+        # ── Insights / recommendations ────────────────────────────────────
         def _norm_impact(raw: str) -> str:
             s = raw.lower()
             if "critical" in s: return "critical"
             if "important" in s or "high" in s: return "important"
             return "minor"
 
-        insight_result = _cache.get(session_id, "insight_result")
-        structured_insights = []
-        structured_recs = []
         sports_meta = {}
-        if insight_result and isinstance(insight_result, dict):
-            structured_insights = insight_result.get("strategic_brief", [])
-            raw_recs = insight_result.get("recommendations", [])
-            sports_meta = insight_result.get("sports_meta", {}) or {}
-            # Guard: skip strings that snuck in — only pass dicts to the generator
-            structured_recs = [
-                {**r, "impact": _norm_impact(r.get("impact", "minor"))}
-                for r in raw_recs if isinstance(r, dict)
-            ]
+        if _llm_override:
+            # LLM path — use stored insights and recs
+            final_insights = _insights_to_use or []
+            final_recs     = _structured_recs or []
+        else:
+            # Rule engine path — pull from in-memory cache
+            insight_result = _cache.get(session_id, "insight_result")
+            _rule_insights = []
+            final_recs     = []
+            if insight_result and isinstance(insight_result, dict):
+                _rule_insights = insight_result.get("strategic_brief", [])
+                sports_meta    = insight_result.get("sports_meta", {}) or {}
+                final_recs     = [
+                    {**r, "impact": _norm_impact(r.get("impact", "minor"))}
+                    for r in insight_result.get("recommendations", [])
+                    if isinstance(r, dict)
+                ]
+            if not final_recs and body.recommendations:
+                final_recs = [
+                    r if isinstance(r, dict) else {"action": str(r)}
+                    for r in body.recommendations
+                ]
+            final_insights = _rule_insights if _rule_insights else clean_insights
 
-        # Fall back to full rec objects sent by the frontend when cache is empty
-        if not structured_recs and body.recommendations:
-            structured_recs = [
-                r if isinstance(r, dict) else {"action": str(r)}
-                for r in body.recommendations
-            ]
-
-        _insights_to_use = structured_insights if structured_insights else clean_insights
+        print(f"[EXPORT] Final: {len(clean_charts)} charts, "
+              f"{len(final_insights)} insights, {len(final_recs)} recs, "
+              f"domain={domain_id!r}")
 
         gen = UnifiedReportGenerator()
         gen.build_from_assets(
@@ -888,8 +976,8 @@ async def export_dashboard_pdf(
             charts=clean_charts,
             kpis=body.kpis,
             ai_summary=clean_ai_summary,
-            insights=_insights_to_use,
-            recommendations=structured_recs,
+            insights=final_insights,
+            recommendations=final_recs,
             text_blocks=body.text_blocks,
             title=body.title,
             project_name=body.project_name,
@@ -3701,7 +3789,70 @@ def generate_visualizations(
     """
     Auto-generate advanced interactive charts based on dataset characteristics.
     Returns Plotly JSON for frontend rendering with react-plotly.js.
+
+    For unknown-domain datasets (HR, salary, etc.) that were analyzed by the LLM,
+    returns the stored LLM charts directly so the UI matches the PDF export.
+    Falls back to the rule-based engine for known domains (sports, entertainment).
     """
+    # ── LLM chart override for unknown-domain sessions ────────────────────
+    # If the session has stored LLM results with charts, return those directly.
+    # This makes the UI show the same charts as the PDF export.
+    if session_id.isdigit():
+        try:
+            import sqlite3 as _sq, json as _jmod
+            from pathlib import Path as _P
+            _db_path = _P(__file__).parent / "data" / "insightstream.db"
+            _conn = _sq.connect(str(_db_path))
+            _row = _conn.execute(
+                "SELECT llm_results_json FROM analysis_sessions WHERE id = ?",
+                (int(session_id),)
+            ).fetchone()
+            _conn.close()
+
+            if _row and _row[0]:
+                _llm = _jmod.loads(_row[0])
+                _stored = _llm.get("charts", [])
+                if _stored:
+                    # Convert stored plotly_json strings to ChartData objects
+                    # using the same shape _internal_gen_viz returns
+                    import plotly.io as _pio
+                    _chart_list = []
+                    for _i, _ch in enumerate(_stored):
+                        _pj = _ch.get("plotly_json", "")
+                        if not _pj:
+                            continue
+                        try:
+                            # Strip template to avoid version-mismatch errors
+                            _raw = _jmod.loads(_pj) if isinstance(_pj, str) else _pj
+                            _raw.get("layout", {}).pop("template", None)
+                            # plotly_json must be a dict (not a string) per ChartData schema
+                            _plotly_dict = _raw
+                            _chart_list.append(ChartData(
+                                chart_id=_ch.get("id", f"llm_chart_{_i}"),
+                                chart_type="bar",
+                                title=_ch.get("title", f"Chart {_i+1}"),
+                                description=_ch.get("title", ""),   # required field
+                                plotly_json=_plotly_dict,            # dict, not string
+                                columns_used=[],                     # required field
+                                priority_score=90.0,
+                                insight_reason="LLM-generated chart",
+                                interest_level="high",
+                            ))
+                        except Exception as _ce:
+                            print(f"[generate-viz] LLM chart {_i} parse failed: {_ce}")
+
+                    if _chart_list:
+                        print(f"[generate-viz] Returning {len(_chart_list)} LLM charts for session {session_id}")
+                        # Return a VizResponse-compatible object
+                        return VizResponse(
+                            session_id=str(session_id),
+                            charts=_chart_list,
+                            total_generated=len(_chart_list),
+                        )
+        except Exception as _oe:
+            print(f"[generate-viz] LLM override check failed: {_oe}")
+    # ── END LLM override ──────────────────────────────────────────────────
+
     try:
         resp = _internal_gen_viz(
             session_id=session_id,

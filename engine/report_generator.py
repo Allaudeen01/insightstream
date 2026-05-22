@@ -2410,7 +2410,9 @@ class PDFReportGenerator:
                     insight.get("rule_type") or
                     "Strategic Finding"
                 )
-                desc  = insight.get('description', '') or insight.get('body', '')
+                desc  = (insight.get('description', '') or
+                         insight.get('body', '') or
+                         insight.get('text', ''))
                 impact = (
                     insight.get("impact") or
                     insight.get("severity") or
