@@ -963,6 +963,7 @@ async def export_dashboard_pdf(
             # LLM path — use stored insights and recs
             final_insights = _insights_to_use or []
             final_recs     = _structured_recs or []
+            print(f"[EXPORT] Using {len(final_recs)} stored LLM recommendations (frontend payload ignored)")
         else:
             # Rule engine path — pull from in-memory cache
             insight_result = _cache.get(session_id, "insight_result")
@@ -976,11 +977,41 @@ async def export_dashboard_pdf(
                     for r in insight_result.get("recommendations", [])
                     if isinstance(r, dict)
                 ]
+            # Fix 2: if no rule-engine recs, try stored LLM recs before
+            # falling back to the frontend payload (which may be stale)
+            if not final_recs:
+                try:
+                    import sqlite3 as _sq2, json as _jmod2
+                    from pathlib import Path as _P2
+                    _db2 = _P2(__file__).parent / "data" / "insightstream.db"
+                    _c2  = _sq2.connect(str(_db2))
+                    _r2  = _c2.execute(
+                        "SELECT llm_results_json FROM analysis_sessions WHERE id = ?",
+                        (int(session_id),)
+                    ).fetchone()
+                    _c2.close()
+                    if _r2 and _r2[0]:
+                        _ld2 = _jmod2.loads(_r2[0])
+                        _stored_recs = _ld2.get("recommendations", [])
+                        if _stored_recs:
+                            final_recs = [
+                                {
+                                    "action":    r.get("text", r.get("action", "")),
+                                    "timeframe": r.get("timeframe", "Next 30 days"),
+                                    "owner":     r.get("owner", "Strategy team"),
+                                    "impact":    r.get("impact", "Important"),
+                                }
+                                for r in _stored_recs
+                            ]
+                            print(f"[EXPORT] Using {len(final_recs)} stored LLM recommendations (frontend payload ignored)")
+                except Exception:
+                    pass
             if not final_recs and body.recommendations:
                 final_recs = [
                     r if isinstance(r, dict) else {"action": str(r)}
                     for r in body.recommendations
                 ]
+                print(f"[EXPORT] Using {len(final_recs)} frontend payload recommendations (no LLM stored)")
             final_insights = _rule_insights if _rule_insights else clean_insights
 
         # ── Filter hallucinated recommendations before PDF generation ─────
@@ -1000,6 +1031,19 @@ async def export_dashboard_pdf(
         print(f"[EXPORT] Final: {len(clean_charts)} charts, "
               f"{len(final_insights)} insights, {len(final_recs)} recs, "
               f"domain={domain_id!r}")
+
+        # Fix 1: Deduplicate charts by title — keep first occurrence
+        _seen_titles: set = set()
+        _unique_charts = []
+        for _ch in clean_charts:
+            _title = _ch.get("title", "")
+            if _title not in _seen_titles:
+                _seen_titles.add(_title)
+                _unique_charts.append(_ch)
+        if len(_unique_charts) < len(clean_charts):
+            print(f"[EXPORT] Deduplicated charts: {len(_unique_charts)} unique "
+                  f"(removed {len(clean_charts) - len(_unique_charts)} duplicates)")
+        clean_charts = _unique_charts
 
         gen = UnifiedReportGenerator()
         gen.build_from_assets(
