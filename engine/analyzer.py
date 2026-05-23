@@ -280,20 +280,59 @@ _BINARY_TARGET_KEYWORDS = [
     "label", "class", "outcome", "event", "failure",
 ]
 
+# Canonical mapping for string binary values → 0/1
+_BINARY_STRING_MAP = {
+    "yes": 1, "no": 0,
+    "true": 1, "false": 0,
+    "y": 1, "n": 0,
+    "t": 1, "f": 0,
+    "1": 1, "0": 0,
+    "positive": 1, "negative": 0,
+    "present": 1, "absent": 0,
+}
+
+
+def _to_binary_series(series: pd.Series) -> Optional[pd.Series]:
+    """
+    Convert a series to float 0/1.
+    Handles numeric 0/1 and string variants (Yes/No, True/False, etc.).
+    Returns None if conversion is not possible.
+    """
+    if series.dtype in ("int64", "float64", "int32", "float32"):
+        vals = set(series.dropna().unique())
+        if vals <= {0, 1}:
+            return series.astype(float)
+        return None
+    if series.dtype in ("object", "string"):
+        mapped = series.dropna().str.strip().str.lower().map(_BINARY_STRING_MAP)
+        if mapped.isna().sum() == 0:  # all values mapped successfully
+            return series.str.strip().str.lower().map(_BINARY_STRING_MAP).astype(float)
+    return None
+
 
 def _detect_binary_target(df: pd.DataFrame) -> Optional[str]:
     """
-    Return the first column that is binary (0/1 values) and whose name
-    hints at being a classification target. Returns None if not found.
+    Return the first column that is binary (0/1, Yes/No, True/False, etc.)
+    and whose name hints at being a classification target.
+    Supports both numeric and string binary columns.
     """
     for col in df.columns:
+        col_lower = col.lower().replace("_", "").replace(" ", "")
+        if not any(kw.replace("_", "") in col_lower
+                   for kw in _BINARY_TARGET_KEYWORDS):
+            continue
+        unique_vals = df[col].dropna().unique()
+        if len(unique_vals) != 2:
+            continue
+        # Numeric 0/1
         if df[col].dtype in ("int64", "float64", "int32", "float32"):
-            unique_vals = set(df[col].dropna().unique())
-            if unique_vals <= {0, 1} and len(unique_vals) == 2:
-                col_lower = col.lower().replace("_", "").replace(" ", "")
-                if any(kw.replace("_", "") in col_lower
-                       for kw in _BINARY_TARGET_KEYWORDS):
-                    return col
+            if set(unique_vals) <= {0, 1}:
+                return col
+        # String binary (Yes/No, True/False, etc.)
+        elif df[col].dtype in ("object", "string"):
+            vals_lower = {str(v).strip().lower() for v in unique_vals}
+            if vals_lower <= set(_BINARY_STRING_MAP.keys()):
+                return col
     return None
 
 
@@ -323,17 +362,25 @@ def _statistical_tests(df: pd.DataFrame, target_col: str) -> list:
     """
     Run t-tests (numeric) and chi-square tests (categorical) comparing
     target=0 vs target=1 groups. Returns list of significant results (p<0.05).
+    Supports both numeric and string binary target columns.
     """
     results = []
     try:
         from scipy.stats import ttest_ind, chi2_contingency
+
+        # Convert target to numeric 0/1 for grouping
+        target_series = _to_binary_series(df[target_col])
+        if target_series is None:
+            print(f"[intelligence] Cannot convert {target_col!r} to binary — skipping tests")
+            return []
+
         for col in df.columns:
             if col == target_col:
                 continue
             try:
                 if df[col].dtype in ("int64", "float64", "int32", "float32"):
-                    g0 = df[df[target_col] == 0][col].dropna()
-                    g1 = df[df[target_col] == 1][col].dropna()
+                    g0 = df[target_series == 0][col].dropna()
+                    g1 = df[target_series == 1][col].dropna()
                     if len(g0) > 1 and len(g1) > 1:
                         _, p = ttest_ind(g0, g1, equal_var=False)
                         if p < 0.05:
@@ -349,8 +396,8 @@ def _statistical_tests(df: pd.DataFrame, target_col: str) -> list:
                                     f"target=1 (mean={g1.mean():.2f}) — p={p:.4f}"
                                 ),
                             })
-                elif df[col].dtype == "object":
-                    ct = pd.crosstab(df[col], df[target_col])
+                elif df[col].dtype in ("object", "string"):
+                    ct = pd.crosstab(df[col], target_series)
                     if ct.shape[0] > 1 and ct.shape[1] > 1:
                         chi2, p, _, _ = chi2_contingency(ct)
                         if p < 0.05:
@@ -365,7 +412,6 @@ def _statistical_tests(df: pd.DataFrame, target_col: str) -> list:
                             })
             except Exception:
                 continue
-        # Sort by p-value ascending (most significant first)
         results.sort(key=lambda x: x["p_value"])
     except Exception as e:
         print(f"[intelligence] Statistical tests failed: {e}")
@@ -377,14 +423,22 @@ def _feature_importance(df: pd.DataFrame, target_col: str,
     """
     Train a shallow Decision Tree to get feature importances for target_col.
     Returns top-5 (feature_name, importance) pairs sorted descending.
+    Supports both numeric and string binary target columns.
     """
     try:
         from sklearn.tree import DecisionTreeClassifier
         from sklearn.preprocessing import LabelEncoder
 
+        # Convert target to numeric 0/1
+        y_series = _to_binary_series(df[target_col])
+        if y_series is None:
+            print(f"[intelligence] Cannot convert {target_col!r} to binary for feature importance")
+            return []
+        y = y_series.fillna(0)
+
         X = df.copy()
         # Encode categorical columns
-        for col in X.select_dtypes(include=["object"]).columns:
+        for col in X.select_dtypes(include=["object", "string"]).columns:
             X[col] = LabelEncoder().fit_transform(X[col].astype(str))
         # Use all numeric columns except the target
         feature_cols = [c for c in X.select_dtypes(
@@ -393,7 +447,6 @@ def _feature_importance(df: pd.DataFrame, target_col: str,
         if not feature_cols:
             return []
         X_feat = X[feature_cols].fillna(0)
-        y      = df[target_col].fillna(0)
         clf = DecisionTreeClassifier(max_depth=5, random_state=42)
         clf.fit(X_feat, y)
         pairs = sorted(
@@ -421,7 +474,10 @@ def _build_intel_block(df: pd.DataFrame) -> str:
     # Anomaly detection
     numeric_cols = [
         c for c in df.select_dtypes(include="number").columns
-        if c != target_col and not _is_id_column(df, c)
+        if c != target_col
+        # Only skip integer ID columns (not continuous floats like credit_limit)
+        and not ("id" in c.lower() and df[c].dtype in ("int64", "int32")
+                 and len(df) > 0 and df[c].nunique() / len(df) > 0.95)
     ]
     scores, anomalies = _detect_anomalies(df, numeric_cols)
     if anomalies is not None:
