@@ -308,10 +308,11 @@ def _build_context(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 5 — JSON-spec prompt (replaces Python code generation)
 # ─────────────────────────────────────────────────────────────────────────────
-def _generate_prompt(context: dict, quality: dict) -> str:
+def _generate_prompt(context: dict, quality: dict, domain_risk: str = None) -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
+    domain_risk: "sports" | "entertainment" | None — adds extra rule 8 if set.
     """
     high_missing = quality.get("high_missing_columns", [])
     missing_note = ""
@@ -329,6 +330,18 @@ def _generate_prompt(context: dict, quality: dict) -> str:
 
     # Truncate context to keep prompt under token limits
     context_str = json.dumps(context, indent=2, default=str)[:3000]
+
+    # Rule 8: domain-specific financial language ban
+    financial_ban = ""
+    if domain_risk in ("sports", "entertainment"):
+        financial_ban = f"""
+- Rule 8 — This is a {domain_risk.upper()} dataset. Do NOT use financial language.
+  NEVER include words like "revenue", "profit", "sales", "customer acquisition",
+  "product pricing", "cost reduction", "profit margin", "ROI", "gross margin",
+  "monetize", or any business/financial term not present in the column list.
+  Use domain-appropriate language: match outcomes, player performance, venue stats,
+  content ratings, viewership, etc.
+"""
 
     return f"""You are a senior data analyst. Analyze this dataset and return ONLY a valid JSON object — no markdown, no code, no explanation.
 
@@ -391,7 +404,7 @@ Example of a correct recommendation:
 Do NOT return insights with empty or missing text fields.
 Do NOT return recommendations that mention topics unrelated to the dataset columns.
 {missing_note}
-
+{financial_ban}
 Available columns: {context["columns"]}
 
 Dataset summary:
@@ -680,6 +693,7 @@ def _safe_fallback(df: pd.DataFrame) -> dict:
 
 # Keywords that indicate the LLM hallucinated content unrelated to the dataset
 _FORBIDDEN_REC_KEYWORDS = [
+    # Health / pandemic hallucinations — always forbidden
     "case fatality", "recovery rate", "public health", "disease outbreak",
     "pandemic", "covid", "corona", "virus", "health ministry",
     "public health authority", "high-burden nations", "international aid",
@@ -687,37 +701,96 @@ _FORBIDDEN_REC_KEYWORDS = [
     "vaccination", "quarantine", "epidemi", "mortality rate",
 ]
 
+# Financial terms — only forbidden for non-financial datasets (sports, entertainment, HR, etc.)
+_FINANCIAL_KEYWORDS = [
+    "revenue", "profit", "sales volume", "customer acquisition",
+    "product pricing", "cost reduction", "profit margin",
+    "return on investment", " roi ", "gross margin", "net revenue",
+    "monetize", "monetisation", "monetization",
+]
+
+# Column patterns that indicate a financial dataset (safe to use financial terms)
+_FINANCIAL_COL_SIGNALS = {
+    "revenue", "profit", "sales", "price", "cost", "margin",
+    "revenue_total", "gross_profit", "net_income", "cogs",
+}
+
+
+def _detect_financial_language_risk(df: pd.DataFrame):
+    """
+    Detect if the dataset is NON-financial but the LLM might hallucinate
+    financial language (e.g., cricket/sports data → LLM writes 'revenue').
+
+    Returns:
+      "sports"          — dataset looks like sports/cricket data
+      "entertainment"   — dataset looks like streaming/entertainment data
+      None              — dataset is financial or unknown (no extra rule needed)
+    """
+    cols_lower = {c.lower().replace("_", "").replace(" ", "") for c in df.columns}
+
+    # If the dataset already has financial columns, financial language is fine
+    if any(sig in cols_lower for sig in _FINANCIAL_COL_SIGNALS):
+        return None
+
+    # Sports/cricket signals
+    sports_signals = {"winner", "tosswinner", "team1", "team2", "venue",
+                      "battingteam", "bowlingteam", "runs", "wickets",
+                      "homerun", "awayrun", "innings", "over"}
+    if len(cols_lower & sports_signals) >= 2:
+        return "sports"
+
+    # Entertainment signals
+    entertainment_signals = {"listedin", "dateadded", "releaseyear",
+                             "showid", "genre", "rating"}
+    if len(cols_lower & entertainment_signals) >= 2:
+        return "entertainment"
+
+    return None
+
 
 def _filter_recommendations(recommendations: list, df_columns) -> list:
     """
     Remove recommendations that:
     1. Contain forbidden keywords (hallucinated health/pandemic content)
-    2. Do not reference any column name from the actual dataset
+    2. Contain financial keywords when the dataset is non-financial
+    3. Do not reference any column name from the actual dataset
     """
-    col_names = [c.lower() for c in df_columns if len(c) > 2]
-
-    # Build a set of column name variants to match against recommendation text.
-    # Handles: exact match, camelCase split ("SibSp" → "sib sp"), underscore strip.
     import re as _re
+
+    # Build column variant set
     col_variants: set = set()
     for col in df_columns:
         if len(col) <= 2:
             continue
         col_lower = col.lower()
         col_variants.add(col_lower)
-        # camelCase → space-separated: "SibSp" → "sib sp"
-        spaced = _re.sub(r'([a-z])([A-Z])', r'\1 \2', col).lower()
-        col_variants.add(spaced)
-        # strip underscores/spaces: "sib_sp" → "sibsp"
+        col_variants.add(_re.sub(r'([a-z])([A-Z])', r'\1 \2', col).lower())
         col_variants.add(col_lower.replace("_", "").replace(" ", ""))
+
+    # Determine if financial language is appropriate for this dataset
+    cols_lower_set = {c.lower().replace("_","").replace(" ","") for c in df_columns}
+    dataset_is_financial = any(sig in cols_lower_set for sig in _FINANCIAL_COL_SIGNALS)
+
+    # Build the active forbidden list
+    active_forbidden = list(_FORBIDDEN_REC_KEYWORDS)
+    if not dataset_is_financial:
+        # Add financial terms only for non-financial datasets
+        for kw in _FINANCIAL_KEYWORDS:
+            if kw not in active_forbidden:
+                active_forbidden.append(kw)
 
     def is_valid(rec: dict) -> bool:
         text = rec.get("text", "").lower()
         if not text:
             return False
         # Reject forbidden keywords
-        for kw in _FORBIDDEN_REC_KEYWORDS:
+        for kw in active_forbidden:
             if kw in text:
+                # Exception: if the keyword is also a column name in this dataset,
+                # it's legitimate (e.g. "revenue" column in a financial dataset)
+                kw_stripped = kw.strip().replace(" ", "")
+                if kw_stripped in cols_lower_set:
+                    continue  # column name match — allow it
                 print(f"[filter_recs] Removed — forbidden keyword {kw!r}: {text[:60]}")
                 return False
         # Reject if no dataset column variant is mentioned
@@ -770,7 +843,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     quality = _build_data_quality(df)
 
     # ── 4. Generate JSON prompt ───────────────────────────────────────────
-    prompt = _generate_prompt(context, quality)
+    domain_risk = _detect_financial_language_risk(df)
+    if domain_risk:
+        print(f"[analyzer] Financial language risk detected: {domain_risk!r} — adding rule 8")
+    prompt = _generate_prompt(context, quality, domain_risk=domain_risk)
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
