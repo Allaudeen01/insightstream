@@ -10898,3 +10898,4 @@ def auto_clean_dataframe(df: pl.DataFrame) -> pl.DataFrame:
 
     return pl.from_pandas(pdf)
 
+ 
