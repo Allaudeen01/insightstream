@@ -1473,6 +1473,24 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     outlier_block  = _explain_outlier_impact(df, _oc, _cat_cols) if _oc else ""
     duplicate_block = _duplicate_insight(df)
 
+    # ── 3d. Domain classification (rule-based fast path, no LLM yet) ──────
+    # Initialize with safe default — LLM-based classification happens after
+    # the Groq client is created (step 5), but we need domain for the prompt.
+    domain_info     = {"category": "GENERIC_TABULAR", "confidence": 0.5, "reason": ""}
+    domain_template = {}
+    try:
+        from classifiers.domain import _rule_based_classify, get_domain_template
+        _rb = _rule_based_classify(df)
+        if _rb:
+            domain_info     = {"category": _rb, "confidence": 0.95,
+                               "reason": "Rule-based classification"}
+            domain_template = get_domain_template(_rb)
+            context["domain_info"]     = domain_info
+            context["domain_template"] = domain_template
+            print(f"[analyzer] Domain (rule-based): {_rb}")
+    except Exception as _rbe:
+        print(f"[analyzer] Rule-based domain classification failed: {_rbe}")
+
     # ── 4. Generate JSON prompt ───────────────────────────────────────────
     domain_risk = _detect_financial_language_risk(df)
     if domain_risk:
@@ -1498,22 +1516,18 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
 
     client = Groq(api_key=api_key)
 
-    # ── 3d. Domain classification (LLM-based, with rule-based fast path) ──
-    try:
-        from classifiers.domain import classify_domain, get_domain_template
-        domain_info = classify_domain(df, client)
-        domain_template = get_domain_template(domain_info["category"])
-        context["domain_info"]     = domain_info
-        context["domain_template"] = domain_template
-        print(f"[analyzer] Domain: {domain_info['category']} "
-              f"(confidence={domain_info.get('confidence', '?'):.2f}) — "
-              f"{domain_info.get('reason', '')[:80]}")
-    except Exception as _de:
-        print(f"[analyzer] Domain classification failed: {_de}")
-        domain_info     = {"category": "GENERIC_TABULAR", "confidence": 0.5, "reason": ""}
-        domain_template = {}
-        context["domain_info"]     = domain_info
-        context["domain_template"] = domain_template
+    # ── 5b. Refine domain with LLM if rule-based returned GENERIC_TABULAR ─
+    if domain_info["category"] == "GENERIC_TABULAR":
+        try:
+            from classifiers.domain import classify_domain, get_domain_template
+            domain_info     = classify_domain(df, client)
+            domain_template = get_domain_template(domain_info["category"])
+            context["domain_info"]     = domain_info
+            context["domain_template"] = domain_template
+            print(f"[analyzer] Domain (LLM): {domain_info['category']} "
+                  f"(confidence={domain_info.get('confidence', '?'):.2f})")
+        except Exception as _de:
+            print(f"[analyzer] LLM domain classification failed: {_de}")
 
     def _call_groq(messages: list) -> str:
         resp = client.chat.completions.create(
