@@ -270,6 +270,193 @@ def _build_data_quality(df: pd.DataFrame) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# INTELLIGENCE MODULES — Anomaly detection, statistical tests, feature importance
+# Only activate when a binary target column is detected (fraud, attrition, etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BINARY_TARGET_KEYWORDS = [
+    "fraud", "attrition", "survived", "churn", "default",
+    "flag", "dark_web", "is_fraud", "is_default", "target",
+    "label", "class", "outcome", "event", "failure",
+]
+
+
+def _detect_binary_target(df: pd.DataFrame) -> Optional[str]:
+    """
+    Return the first column that is binary (0/1 values) and whose name
+    hints at being a classification target. Returns None if not found.
+    """
+    for col in df.columns:
+        if df[col].dtype in ("int64", "float64", "int32", "float32"):
+            unique_vals = set(df[col].dropna().unique())
+            if unique_vals <= {0, 1} and len(unique_vals) == 2:
+                col_lower = col.lower().replace("_", "").replace(" ", "")
+                if any(kw.replace("_", "") in col_lower
+                       for kw in _BINARY_TARGET_KEYWORDS):
+                    return col
+    return None
+
+
+def _detect_anomalies(df: pd.DataFrame, numeric_cols: list,
+                      contamination: float = 0.05):
+    """
+    Run Isolation Forest on numeric columns.
+    Returns (scores_array, anomaly_index_list) or (None, None) on failure.
+    """
+    if len(numeric_cols) < 2:
+        return None, None
+    try:
+        from sklearn.ensemble import IsolationForest
+        X = df[numeric_cols].fillna(df[numeric_cols].mean()).values
+        iso = IsolationForest(contamination=contamination, random_state=42,
+                              n_estimators=100)
+        preds  = iso.fit_predict(X)
+        scores = iso.score_samples(X)
+        anomaly_indices = df.index[preds == -1].tolist()
+        return scores, anomaly_indices
+    except Exception as e:
+        print(f"[intelligence] Anomaly detection failed: {e}")
+        return None, None
+
+
+def _statistical_tests(df: pd.DataFrame, target_col: str) -> list:
+    """
+    Run t-tests (numeric) and chi-square tests (categorical) comparing
+    target=0 vs target=1 groups. Returns list of significant results (p<0.05).
+    """
+    results = []
+    try:
+        from scipy.stats import ttest_ind, chi2_contingency
+        for col in df.columns:
+            if col == target_col:
+                continue
+            try:
+                if df[col].dtype in ("int64", "float64", "int32", "float32"):
+                    g0 = df[df[target_col] == 0][col].dropna()
+                    g1 = df[df[target_col] == 1][col].dropna()
+                    if len(g0) > 1 and len(g1) > 1:
+                        _, p = ttest_ind(g0, g1, equal_var=False)
+                        if p < 0.05:
+                            results.append({
+                                "column":         col,
+                                "test":           "t-test",
+                                "p_value":        round(float(p), 4),
+                                "mean_0":         round(float(g0.mean()), 2),
+                                "mean_1":         round(float(g1.mean()), 2),
+                                "interpretation": (
+                                    f"Significant difference in {col} between "
+                                    f"target=0 (mean={g0.mean():.2f}) and "
+                                    f"target=1 (mean={g1.mean():.2f}) — p={p:.4f}"
+                                ),
+                            })
+                elif df[col].dtype == "object":
+                    ct = pd.crosstab(df[col], df[target_col])
+                    if ct.shape[0] > 1 and ct.shape[1] > 1:
+                        chi2, p, _, _ = chi2_contingency(ct)
+                        if p < 0.05:
+                            results.append({
+                                "column":         col,
+                                "test":           "chi-square",
+                                "p_value":        round(float(p), 4),
+                                "interpretation": (
+                                    f"Significant association between {col} "
+                                    f"and {target_col} — p={p:.4f}"
+                                ),
+                            })
+            except Exception:
+                continue
+        # Sort by p-value ascending (most significant first)
+        results.sort(key=lambda x: x["p_value"])
+    except Exception as e:
+        print(f"[intelligence] Statistical tests failed: {e}")
+    return results
+
+
+def _feature_importance(df: pd.DataFrame, target_col: str,
+                        numeric_cols: list) -> list:
+    """
+    Train a shallow Decision Tree to get feature importances for target_col.
+    Returns top-5 (feature_name, importance) pairs sorted descending.
+    """
+    try:
+        from sklearn.tree import DecisionTreeClassifier
+        from sklearn.preprocessing import LabelEncoder
+
+        X = df.copy()
+        # Encode categorical columns
+        for col in X.select_dtypes(include=["object"]).columns:
+            X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+        # Use all numeric columns except the target
+        feature_cols = [c for c in X.select_dtypes(
+            include=["int64", "float64", "int32", "float32"]
+        ).columns if c != target_col]
+        if not feature_cols:
+            return []
+        X_feat = X[feature_cols].fillna(0)
+        y      = df[target_col].fillna(0)
+        clf = DecisionTreeClassifier(max_depth=5, random_state=42)
+        clf.fit(X_feat, y)
+        pairs = sorted(
+            zip(feature_cols, clf.feature_importances_),
+            key=lambda x: x[1], reverse=True
+        )
+        return [(str(f), round(float(i), 4)) for f, i in pairs[:5] if i > 0]
+    except Exception as e:
+        print(f"[intelligence] Feature importance failed: {e}")
+        return []
+
+
+def _build_intel_block(df: pd.DataFrame) -> str:
+    """
+    Run all intelligence modules and return a formatted string to inject
+    into the LLM prompt. Returns empty string if no binary target found.
+    """
+    target_col = _detect_binary_target(df)
+    if not target_col:
+        return ""
+
+    print(f"[INTELLIGENCE] Binary target detected: {target_col!r}")
+    lines = [f"\n=== AI Intelligence Analysis (target: {target_col}) ==="]
+
+    # Anomaly detection
+    numeric_cols = [
+        c for c in df.select_dtypes(include="number").columns
+        if c != target_col and not _is_id_column(df, c)
+    ]
+    scores, anomalies = _detect_anomalies(df, numeric_cols)
+    if anomalies is not None:
+        pct = round(len(anomalies) / max(len(df), 1) * 100, 1)
+        lines.append(
+            f"Anomaly detection (Isolation Forest): {len(anomalies)} anomalous "
+            f"rows ({pct}% of data). These rows have unusual feature combinations "
+            f"and warrant investigation."
+        )
+        print(f"[INTELLIGENCE] Anomalies: {len(anomalies)} ({pct}%)")
+
+    # Statistical tests
+    stat_tests = _statistical_tests(df, target_col)
+    if stat_tests:
+        lines.append(f"\nStatistically significant features (p<0.05) for {target_col}:")
+        for t in stat_tests[:5]:
+            lines.append(f"  - {t['interpretation']}")
+        print(f"[INTELLIGENCE] Significant features: {len(stat_tests)}")
+
+    # Feature importance
+    importance = _feature_importance(df, target_col, numeric_cols)
+    if importance:
+        lines.append(f"\nTop predictors for {target_col} (Decision Tree importance):")
+        for feat, imp in importance:
+            lines.append(f"  - {feat}: {imp:.3f}")
+        lines.append(
+            "Use these features to build predictive models or focus risk mitigation."
+        )
+        print(f"[INTELLIGENCE] Top feature: {importance[0][0]} ({importance[0][1]:.3f})")
+
+    lines.append("=== End Intelligence Analysis ===\n")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Correlation pre-computation (injected into prompt so LLM uses real r values)
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_correlations(df: pd.DataFrame) -> list:
@@ -363,11 +550,13 @@ def _build_context(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 5 — JSON-spec prompt (replaces Python code generation)
 # ─────────────────────────────────────────────────────────────────────────────
-def _generate_prompt(context: dict, quality: dict, domain_risk: str = None) -> str:
+def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
+                     intel_block: str = "") -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
     domain_risk: "sports" | "entertainment" | None — adds extra rule 8 if set.
+    intel_block: pre-computed intelligence results to inject into the prompt.
     """
     high_missing = quality.get("high_missing_columns", [])
     missing_note = ""
@@ -489,7 +678,7 @@ Do NOT return recommendations that mention topics unrelated to the dataset colum
 Available columns: {context["columns"]}
 
 {corr_block}
-
+{intel_block}
 Dataset summary:
 {context_str}
 """
@@ -930,11 +1119,15 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     n_corr  = len(context.get("correlations", []))
     print(f"[analyzer] Building context with {n_corr} correlation pairs")
 
+    # ── 3b. Intelligence modules (anomaly, stats, feature importance) ─────
+    intel_block = _build_intel_block(df)
+
     # ── 4. Generate JSON prompt ───────────────────────────────────────────
     domain_risk = _detect_financial_language_risk(df)
     if domain_risk:
         print(f"[analyzer] Financial language risk detected: {domain_risk!r} — adding rule 8")
-    prompt = _generate_prompt(context, quality, domain_risk=domain_risk)
+    prompt = _generate_prompt(context, quality, domain_risk=domain_risk,
+                              intel_block=intel_block)
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
