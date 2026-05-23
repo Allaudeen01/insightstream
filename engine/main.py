@@ -271,7 +271,18 @@ def load_session(session_id: str) -> tuple[str, pl.DataFrame]:
                     df_pd = pd.read_csv(filepath, encoding="latin-1")
         except Exception as e:
             raise ValueError(f"Failed to load uploaded file for session {session_id}: {e}")
-        return filepath.name, pl.from_pandas(df_pd)
+
+        # Normalize object/string columns to str before Polars conversion —
+        # mixed-type columns (e.g. int + str) cause ArrowTypeError.
+        for col in df_pd.select_dtypes(include=["object", "string"]).columns:
+            df_pd[col] = df_pd[col].astype(str)
+
+        try:
+            return filepath.name, pl.from_pandas(df_pd)
+        except Exception as e:
+            # Fall back to pandas if Polars conversion still fails
+            print(f"[load_session] Polars conversion failed: {e} — using pandas")
+            return filepath.name, df_pd
 
     raise FileNotFoundError(f"Session {session_id} not found")
 
