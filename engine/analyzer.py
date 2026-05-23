@@ -778,7 +778,8 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
                      intel_block: str = "",
                      group_block: str = "",
                      outlier_block: str = "",
-                     duplicate_block: str = "") -> str:
+                     duplicate_block: str = "",
+                     domain: str = "GENERIC_TABULAR") -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
@@ -787,6 +788,7 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
     group_block: categorical group-by analysis results.
     outlier_block: outlier impact explanation per category.
     duplicate_block: duplicate row detection alert.
+    domain: classified domain (PEOPLE_CATALOG, MEDIA_CATALOG, etc.)
     """
     high_missing = quality.get("high_missing_columns", [])
     missing_note = ""
@@ -816,6 +818,22 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
   Use domain-appropriate language: match outcomes, player performance, venue stats,
   content ratings, viewership, etc.
 """
+
+    # Domain-specific forbidden concepts block
+    domain_forbidden_block = ""
+    try:
+        from classifiers.domain import DOMAIN_FORBIDDEN_CONCEPTS
+        _forbidden = DOMAIN_FORBIDDEN_CONCEPTS.get(domain.upper(), [])
+        if _forbidden:
+            domain_forbidden_block = (
+                f"\nThis is a {domain.upper()} dataset. "
+                f"The following concepts are FORBIDDEN in recommendations "
+                f"(they do not exist in this dataset):\n"
+                + "\n".join(f"  - {c}" for c in _forbidden)
+                + "\n"
+            )
+    except Exception:
+        pass
 
     # Rules 9 & 10: correlation reporting + actionable recommendations
     correlations = context.get("correlations", [])
@@ -913,6 +931,7 @@ Few-shot examples of correct recommendations (adapt to this dataset's columns):
 
 Do NOT return insights with empty or missing text fields.
 Do NOT return recommendations that mention topics unrelated to the dataset columns.
+{domain_forbidden_block}
 - Key Takeaway (MANDATORY): The FIRST insight in the list must be titled "Key Takeaway"
   and answer: "If the user remembers only one thing from this report, what should it be?"
   It must be a single, striking sentence with the most important finding and a specific number.
@@ -1276,14 +1295,68 @@ def _detect_financial_language_risk(df: pd.DataFrame):
     return None
 
 
-def _filter_recommendations(recommendations: list, df_columns) -> list:
+def validate_recommendation(rec_text: str, df_columns: list,
+                            computed_stats: dict = None) -> bool:
     """
-    Remove recommendations that:
-    1. Contain forbidden keywords (hallucinated health/pandemic content)
-    2. Contain financial keywords when the dataset is non-financial
-    3. Do not reference any column name from the actual dataset
+    Reject recommendations that cite statistics not computable from the
+    actual dataframe, or that reference concepts from the wrong domain.
+
+    Checks:
+    1. Any percentage cited in the text must appear in computed_stats
+       (within ±1 percentage point tolerance).
+    2. Column reference check is handled by _filter_recommendations.
     """
     import re as _re
+    if not rec_text:
+        return False
+
+    if computed_stats:
+        # Extract all percentages mentioned in the recommendation
+        cited_pcts = [float(p.rstrip("%")) for p in _re.findall(r'\d+\.?\d*%', rec_text)]
+        if cited_pcts:
+            # Build the set of valid percentages from computed stats
+            valid_pcts: set = set()
+            for v in computed_stats.values():
+                if isinstance(v, (int, float)):
+                    # Raw fraction (0-1) → percentage
+                    if 0 < v <= 1:
+                        valid_pcts.add(round(v * 100, 1))
+                    # Already a percentage (1-100)
+                    elif 1 < v <= 100:
+                        valid_pcts.add(round(float(v), 1))
+
+            for pct in cited_pcts:
+                # Allow ±1 pp tolerance
+                if not any(abs(pct - vp) <= 1.0 for vp in valid_pcts):
+                    print(f"[validate_rec] Rejected — hallucinated stat {pct}%: "
+                          f"{rec_text[:60]}")
+                    return False
+
+    return True
+
+
+def _filter_recommendations(recommendations: list, df_columns,
+                            domain: str = "GENERIC_TABULAR",
+                            computed_stats: dict = None) -> list:
+    """
+    Remove recommendations that:
+    1. Contain forbidden keywords (hallucinated health/pandemic/entertainment content)
+    2. Contain financial keywords when the dataset is non-financial
+    3. Contain domain-specific forbidden concepts (e.g., TV ratings for people datasets)
+    4. Do not reference any column name from the actual dataset
+    5. Cite statistics not computable from the actual data (via validate_recommendation)
+    """
+    import re as _re
+
+    # Load domain-specific forbidden concepts
+    try:
+        from classifiers.domain import DOMAIN_FORBIDDEN_CONCEPTS
+        domain_forbidden = [
+            kw.lower() for kw in
+            DOMAIN_FORBIDDEN_CONCEPTS.get(domain.upper(), [])
+        ]
+    except Exception:
+        domain_forbidden = []
 
     # Build column variant set
     col_variants: set = set()
@@ -1310,24 +1383,30 @@ def _filter_recommendations(recommendations: list, df_columns) -> list:
     def is_valid(rec: dict) -> bool:
         # Support both 'text' (LLM format) and 'action' (engine format)
         text = rec.get("text", "") or rec.get("action", "")
-        text = text.lower()
-        if not text:
+        text_lower = text.lower()
+        if not text_lower:
             return False
-        # Reject forbidden keywords
+        # Reject global forbidden keywords (health/pandemic/entertainment-platform)
         for kw in active_forbidden:
-            if kw in text:
-                # Exception: if the keyword is also a column name in this dataset,
-                # it's legitimate (e.g. "revenue" column in a financial dataset)
+            if kw in text_lower:
                 kw_stripped = kw.strip().replace(" ", "")
                 if kw_stripped in cols_lower_set:
-                    continue  # column name match — allow it
-                print(f"[filter_recs] Removed — forbidden keyword {kw!r}: {text[:60]}")
+                    continue
+                print(f"[filter_recs] Removed — forbidden keyword {kw!r}: {text_lower[:60]}")
+                return False
+        # Reject domain-specific forbidden concepts
+        for kw in domain_forbidden:
+            if kw in text_lower:
+                print(f"[filter_recs] Removed — domain concept {kw!r}: {text_lower[:60]}")
                 return False
         # Reject if no dataset column variant is mentioned
-        if not any(v in text for v in col_variants if len(v) > 2):
-            print(f"[filter_recs] Removed — no column reference: {text[:60]}")
+        if not any(v in text_lower for v in col_variants if len(v) > 2):
+            print(f"[filter_recs] Removed — no column reference: {text_lower[:60]}")
             return False
-        print(f"[filter_recs] KEPT (col ref): {text[:80]}")
+        # Reject if cited statistics are not computable from the data
+        if computed_stats and not validate_recommendation(text, list(df_columns), computed_stats):
+            return False
+        print(f"[filter_recs] KEPT (col ref): {text_lower[:80]}")
         return True
 
     cleaned = [r for r in recommendations if is_valid(r)]
@@ -1402,7 +1481,8 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                               intel_block=intel_block,
                               group_block=group_block,
                               outlier_block=outlier_block,
-                              duplicate_block=duplicate_block)
+                              duplicate_block=duplicate_block,
+                              domain=domain_info.get("category", "GENERIC_TABULAR"))
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
@@ -1524,7 +1604,8 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
 
     # ── 10b. Filter hallucinated recommendations ──────────────────────────
     results["recommendations"] = _filter_recommendations(
-        results.get("recommendations", []), df.columns
+        results.get("recommendations", []), df.columns,
+        domain=domain_info.get("category", "GENERIC_TABULAR"),
     )
 
     # ── 11. Cache successful result ───────────────────────────────────────

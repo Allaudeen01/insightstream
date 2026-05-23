@@ -1022,7 +1022,10 @@ async def export_dashboard_pdf(
                 from analyzer import _filter_recommendations
                 _df_pd = df.to_pandas() if hasattr(df, "to_pandas") else df
                 _before = len(final_recs)
-                final_recs = _filter_recommendations(final_recs, _df_pd.columns.tolist())
+                final_recs = _filter_recommendations(
+                    final_recs, _df_pd.columns.tolist(),
+                    domain=domain_id.upper() if domain_id else "GENERIC_TABULAR",
+                )
                 if len(final_recs) < _before:
                     print(f"[EXPORT] Filtered {_before - len(final_recs)} bad recs from payload")
             except Exception as _fe:

@@ -112,6 +112,34 @@ DOMAIN_TEMPLATE_MAP: Dict[str, Dict[str, Any]] = {
 
 VALID_CATEGORIES = set(DOMAIN_TEMPLATE_MAP.keys())
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain-specific forbidden concepts for recommendation validation
+# ─────────────────────────────────────────────────────────────────────────────
+DOMAIN_FORBIDDEN_CONCEPTS: dict = {
+    "PEOPLE_CATALOG": [
+        "content ratings (TV-MA, PG, etc.)", "TV-MA", "TV-PG", "TV-14", "R-rated",
+        "mature content", "release date", "catalogue freshness", "catalogue refresh",
+        "regional origin", "local originals", "international growth", "regional content",
+        "subscriber", "churn", "household account", "kids profile", "kids profiles",
+        "revenue", "licensing", "box office", "episode count", "seasons",
+        "post-2020", "post-2019", "newer releases", "streaming accounts",
+    ],
+    "MEDIA_CATALOG": [
+        "demographic pyramid", "attrition", "employee turnover",
+        "salary", "payroll", "headcount",
+    ],
+    "ECOMMERCE_TRANSACTIONS": [
+        "case fatality", "recovery rate", "pandemic", "demographic pyramid",
+    ],
+    "FINANCIAL_TIMESERIES": [
+        "demographic pyramid", "attrition", "content ratings",
+    ],
+    "OPERATIONAL_METRICS": [
+        "content ratings", "box office", "demographic pyramid",
+    ],
+    "GENERIC_TABULAR": [],
+}
+
 
 def get_domain_template(domain: str) -> Dict[str, Any]:
     """Return the template for a given domain (defaults to GENERIC_TABULAR)."""
