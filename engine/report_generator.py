@@ -4215,6 +4215,16 @@ class UnifiedReportGenerator(PDFReportGenerator):
         log.info(f"[Charts] Processing {total_charts} charts for PDF")
         seen_chart_titles: set = set()
 
+        # ── Chart gating: skip forbidden chart types for this domain ─────
+        _domain_name = domain_id or "GENERIC_TABULAR"
+        try:
+            from classifiers.domain import get_domain_template as _get_tmpl
+            _forbidden_chart_types = set(
+                _get_tmpl(_domain_name.upper()).get("forbidden_chart_types", [])
+            )
+        except Exception:
+            _forbidden_chart_types = set()
+
         for i, chart in enumerate(charts):
             chart_title = _friendly_title(chart.get("title", f"Chart {i+1}"))
             chart_id    = chart.get("id", f"chart_{i}")
@@ -4224,6 +4234,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 log.info(f"[Chart {i+1}] Skipping duplicate: {chart_title}")
                 continue
             seen_chart_titles.add(chart_title)
+
+            # Chart gating: skip forbidden chart types
+            _chart_type = chart.get("type") or chart.get("chart_type") or chart_id
+            if _chart_type in _forbidden_chart_types:
+                log.info(f"[CHART GATE] Skipping forbidden chart {_chart_type!r} "
+                         f"for domain {_domain_name!r}")
+                continue
+
             log.info(
                 f"[Chart {i+1}/{total_charts}] id={chart_id!r} | "
                 f"has_base64={has_b64} | has_plotly={has_plotly} | title={chart_title!r}"

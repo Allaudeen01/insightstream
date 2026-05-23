@@ -1,0 +1,57 @@
+name: Report Regression Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas numpy scikit-learn scipy pytest pytest-cov
+          # Install engine as a package so imports work
+          pip install -e . --no-deps 2>/dev/null || true
+
+      - name: Run domain classifier tests
+        run: |
+          cd engine
+          python -m pytest ../tests/regression/test_domain_classification.py -v --tb=short
+
+      - name: Run report structure tests
+        run: |
+          cd engine
+          python -m pytest ../tests/regression/test_report_structure.py -v --tb=short
+
+      - name: Run chart gating tests
+        run: |
+          cd engine
+          python -m pytest ../tests/regression/test_chart_gating.py -v --tb=short
+
+      - name: Run all regression tests with coverage
+        run: |
+          cd engine
+          python -m pytest ../tests/regression/ -v --tb=short \
+            --cov=classifiers --cov-report=term-missing
+
+      - name: Upload snapshot diff on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-failure-logs
+          path: |
+            tests/regression/
+            engine/.analyzer_cache/

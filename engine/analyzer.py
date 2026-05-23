@@ -1418,6 +1418,23 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
 
     client = Groq(api_key=api_key)
 
+    # ── 3d. Domain classification (LLM-based, with rule-based fast path) ──
+    try:
+        from classifiers.domain import classify_domain, get_domain_template
+        domain_info = classify_domain(df, client)
+        domain_template = get_domain_template(domain_info["category"])
+        context["domain_info"]     = domain_info
+        context["domain_template"] = domain_template
+        print(f"[analyzer] Domain: {domain_info['category']} "
+              f"(confidence={domain_info.get('confidence', '?'):.2f}) — "
+              f"{domain_info.get('reason', '')[:80]}")
+    except Exception as _de:
+        print(f"[analyzer] Domain classification failed: {_de}")
+        domain_info     = {"category": "GENERIC_TABULAR", "confidence": 0.5, "reason": ""}
+        domain_template = {}
+        context["domain_info"]     = domain_info
+        context["domain_template"] = domain_template
+
     def _call_groq(messages: list) -> str:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
@@ -1514,4 +1531,7 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     _cache_set(fp, results)
 
     # ── 12. Return ────────────────────────────────────────────────────────
+    # Attach domain classification info for downstream use
+    results["domain_info"]     = context.get("domain_info", {})
+    results["domain_template"] = context.get("domain_template", {})
     return results
