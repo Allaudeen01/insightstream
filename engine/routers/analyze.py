@@ -91,8 +91,8 @@ async def analyze(
 
         # ── STEP 9: Domain-based routing ─────────────────────────────────
         # Detect domain from column patterns BEFORE calling the engine.
-        # Known domains (sports, entertainment) → existing rule engine.
-        # Unknown domains (HR, salary, housing, etc.) → LLM analyzer.
+        # Only a small set of explicitly validated datasets use the rule engine.
+        # Everything else (including PSL, generic sports, HR, etc.) → LLM.
         detected = detect_domain(df, filename=file.filename or "")
         print(f"[ROUTER] domain={detected!r} for file={file.filename!r}")
 
@@ -102,12 +102,18 @@ async def analyze(
         if _refined != detected:
             print(f"[ROUTER] Refined label: {_refined!r} (routing: {detected!r})")
 
-        if detected in ("sports", "entertainment"):
-            # Use the existing validated rule engine for known domains
+        # Domains where the rule engine produces validated, clean output.
+        # PSL and generic sports are intentionally excluded — the rule engine
+        # outputs "revenue" language for sports data which has no revenue column.
+        _RULE_ENGINE_DOMAINS = {
+            "entertainment",   # Netflix / Disney+ / Amazon Prime (validated)
+        }
+
+        if detected in _RULE_ENGINE_DOMAINS:
             print(f"[ROUTER] {detected} → rule engine (run_insight_engine)")
             results = run_insight_engine(df)
         else:
-            # Use LLM analyzer for any unknown dataset type
+            # LLM analyzer for sports, HR, housing, Titanic, PSL, and everything else
             print(f"[ROUTER] {detected} → LLM analyzer (analyze_dataset)")
             llm_results = analyze_dataset(df)
 
