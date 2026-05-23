@@ -640,6 +640,21 @@ def _filter_recommendations(recommendations: list, df_columns) -> list:
     """
     col_names = [c.lower() for c in df_columns if len(c) > 2]
 
+    # Build a set of column name variants to match against recommendation text.
+    # Handles: exact match, camelCase split ("SibSp" → "sib sp"), underscore strip.
+    import re as _re
+    col_variants: set = set()
+    for col in df_columns:
+        if len(col) <= 2:
+            continue
+        col_lower = col.lower()
+        col_variants.add(col_lower)
+        # camelCase → space-separated: "SibSp" → "sib sp"
+        spaced = _re.sub(r'([a-z])([A-Z])', r'\1 \2', col).lower()
+        col_variants.add(spaced)
+        # strip underscores/spaces: "sib_sp" → "sibsp"
+        col_variants.add(col_lower.replace("_", "").replace(" ", ""))
+
     def is_valid(rec: dict) -> bool:
         text = rec.get("text", "").lower()
         if not text:
@@ -649,8 +664,8 @@ def _filter_recommendations(recommendations: list, df_columns) -> list:
             if kw in text:
                 print(f"[filter_recs] Removed — forbidden keyword {kw!r}: {text[:60]}")
                 return False
-        # Reject if no dataset column is mentioned
-        if not any(col in text for col in col_names):
+        # Reject if no dataset column variant is mentioned
+        if not any(v in text for v in col_variants if len(v) > 2):
             print(f"[filter_recs] Removed — no column reference: {text[:60]}")
             return False
         return True

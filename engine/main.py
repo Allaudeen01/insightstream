@@ -977,6 +977,20 @@ async def export_dashboard_pdf(
                 ]
             final_insights = _rule_insights if _rule_insights else clean_insights
 
+        # ── Filter hallucinated recommendations before PDF generation ─────
+        # The frontend payload may contain stale/bad recs from a previous session.
+        # Apply the same filter used at upload time to catch anything that slipped through.
+        if _llm_override and df is not None:
+            try:
+                from analyzer import _filter_recommendations
+                _df_pd = df.to_pandas() if hasattr(df, "to_pandas") else df
+                _before = len(final_recs)
+                final_recs = _filter_recommendations(final_recs, _df_pd.columns.tolist())
+                if len(final_recs) < _before:
+                    print(f"[EXPORT] Filtered {_before - len(final_recs)} bad recs from payload")
+            except Exception as _fe:
+                print(f"[EXPORT] Rec filter failed: {_fe}")
+
         print(f"[EXPORT] Final: {len(clean_charts)} charts, "
               f"{len(final_insights)} insights, {len(final_recs)} recs, "
               f"domain={domain_id!r}")
