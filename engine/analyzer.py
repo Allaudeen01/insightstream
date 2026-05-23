@@ -461,22 +461,26 @@ Rules:
     not directly related to the columns provided
 - If you cannot derive a recommendation directly from the data, omit it entirely.
   Fewer relevant recommendations are better than irrelevant ones.
-- Rule 9 — Correlations: For any two numeric columns, report the Pearson correlation
-  coefficient (r) rounded to 2 decimals in the insight text. State whether it is
-  strong (|r|>0.7), moderate (0.3<|r|≤0.7), or weak (|r|≤0.3). Use the pre-computed
-  values below — do NOT invent correlation values.
-- Rule 10 — Actionable recommendations: Each recommendation must be specific and
-  actionable. Include concrete numbers (e.g., "Store 5 averages $600k/week — 40%
-  below median"). For sales/retail: optimise inventory for peak season, analyse
-  holiday lift, review underperforming stores. For HR: retention programs for
-  high-attrition departments. For sports: analyse venue/toss/dismissal patterns.
-  Do NOT write generic recommendations like "investigate underlying drivers".
+- Rule 9 — Correlations (MANDATORY): You are provided with pre-computed Pearson
+  correlation pairs below. You MUST include at least 3 insights that reference the
+  top 3 absolute correlation pairs. For each, report the exact r value (rounded to
+  2 decimals) and the strength label. Example: "Weekly_Sales shows a strong positive
+  correlation with Temperature (r=0.97)." Do NOT invent correlations — use only the
+  exact values from the injected list. If a top pair involves a store/ID column
+  (e.g., Store vs Weekly_Sales), still report it.
+- Rule 10 — Recommendations (MANDATORY column references): Generate 3-5 actionable
+  recommendations. Each recommendation MUST contain at least one actual column name
+  from the dataset (e.g., Weekly_Sales, Store, Temperature, Holiday_Flag, Date,
+  Fuel_Price, CPI, Unemployment). Recommendations without any column name will be
+  rejected. Do NOT use generic phrases like "investigate underlying drivers" or
+  "optimise operations". Be specific with concrete numbers from the data.
+  Example: "Increase inventory in May to prepare for the June peak in Weekly_Sales
+  (historical lift 72%)."
 
-Example of a correct insight with correlation:
-{{"title": "Sales vs Temperature Correlation", "text": "Weekly sales show a moderate positive correlation with temperature (r=0.34). Peak sales occur in June (mean $1.8M), dropping to $0.9M in January — a 50% seasonal swing.", "impact": "IMPORTANT"}}
-
-Example of a correct actionable recommendation:
-{{"text": "Increase inventory in May to prepare for the June peak — historical data shows a 72% sales lift from January baseline. Focus on stores in the top quartile by Weekly_Sales.", "timeframe": "Next 30 days", "owner": "Supply chain team", "impact": "Critical"}}
+Few-shot examples of correct recommendations (adapt to this dataset's columns):
+{{"text": "Analyse Weekly_Sales performance during weeks where Holiday_Flag = 1 to quantify the sales lift (currently 7% of weeks are holidays).", "timeframe": "Next 14 days", "owner": "Analytics team", "impact": "Important"}}
+{{"text": "Review stores with the lowest mean Weekly_Sales (e.g., Store 45: $381,869 vs Store 1: $1,641,690) to identify operational or demographic factors.", "timeframe": "Next 30 days", "owner": "Regional manager", "impact": "Critical"}}
+{{"text": "Use the strong correlation between Weekly_Sales and Temperature (r=0.97) to align staffing and inventory with seasonal temperature changes.", "timeframe": "Next quarter", "owner": "Supply chain team", "impact": "Important"}}
 
 Do NOT return insights with empty or missing text fields.
 Do NOT return recommendations that mention topics unrelated to the dataset columns.
@@ -876,6 +880,7 @@ def _filter_recommendations(recommendations: list, df_columns) -> list:
         if not any(v in text for v in col_variants if len(v) > 2):
             print(f"[filter_recs] Removed — no column reference: {text[:60]}")
             return False
+        print(f"[filter_recs] KEPT (col ref): {text[:80]}")
         return True
 
     cleaned = [r for r in recommendations if is_valid(r)]
