@@ -895,6 +895,16 @@ Rules:
   "optimise operations". Be specific with concrete numbers from the data.
   Example: "Increase inventory in May to prepare for the June peak in Weekly_Sales
   (historical lift 72%)."
+- Rule 11 — Domain-appropriate recommendations only. Each recommendation must be
+  directly derived from the columns and statistics in THIS dataset. Do NOT include
+  any recommendation that mentions:
+  * TV-MA, TV-PG, G, PG, or any rating system for movies/TV shows
+  * Content origin (India, UK, Canada, etc.) unless a country/origin column exists
+  * Catalogue refresh, licensing, release year (unless 'release_year' is a column)
+  * Parental controls, kids profiles, streaming tiers, subscription models
+  * Any term or concept that does NOT appear in the column names or data summary
+  For celebrity/people datasets: focus on department analysis, outliers, duplicates,
+  gender differences, or popularity trends. Never invent entertainment-platform advice.
 
 Few-shot examples of correct recommendations (adapt to this dataset's columns):
 {{"text": "Analyse Weekly_Sales performance during weeks where Holiday_Flag = 1 to quantify the sales lift (currently 7% of weeks are holidays).", "timeframe": "Next 14 days", "owner": "Analytics team", "impact": "Important"}}
@@ -908,6 +918,9 @@ Do NOT return recommendations that mention topics unrelated to the dataset colum
   It must be a single, striking sentence with the most important finding and a specific number.
   Example: "93% of records are actors — all popularity trends are actor-driven; small
   departments like Visual Effects appear popular only due to single outliers."
+  Also ensure that all 3-5 recommendations are strictly about the dataset at hand.
+  Do not import recommendations from other contexts (e.g., do not suggest streaming
+  platform features for a celebrity dataset, or health protocols for a sales dataset).
 {missing_note}
 {financial_ban}
 Available columns: {context["columns"]}
@@ -1209,6 +1222,11 @@ _FORBIDDEN_REC_KEYWORDS = [
     "public health authority", "high-burden nations", "international aid",
     "treatment protocol", "surge planning", "fatality rate", "outbreak",
     "vaccination", "quarantine", "epidemi", "mortality rate",
+    # Entertainment-platform hallucinations — forbidden for non-streaming datasets
+    "tv-ma", "tv-14", "tv-pg", "tv-g", "parental controls", "kids profiles",
+    "content origin", "catalogue refresh", "licensing", "release window",
+    "content acquisition", "original tv show", "family-friendly titles",
+    "streaming platform", "content library", "subscription tier",
 ]
 
 # Financial terms — only forbidden for non-financial datasets (sports, entertainment, HR, etc.)
