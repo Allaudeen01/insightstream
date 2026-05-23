@@ -172,7 +172,6 @@ def detect_domain(df: pd.DataFrame, filename: str = "") -> str:
         c.lower().replace("_", "").replace(" ", "")
         for c in df.columns
     }
-
     for domain, patterns in VALIDATED_DOMAINS_COLS.items():
         for pattern in patterns:
             normalized = [p.lower().replace("_", "") for p in pattern]
@@ -187,6 +186,43 @@ def detect_domain(df: pd.DataFrame, filename: str = "") -> str:
         return "entertainment"
 
     return "unknown"  # Route to LLM analyzer
+
+
+# Known dataset fingerprints for refined domain labelling (logging only)
+_DOMAIN_FINGERPRINTS = {
+    "disaster_survival": [
+        ["survived", "pclass", "sex", "age", "fare"],          # Titanic
+        ["survived", "pclass", "embarked"],
+    ],
+    "hr_analytics": [
+        ["attrition", "department", "salary"],
+        ["empstatus", "deptid", "salary"],
+    ],
+    "real_estate": [
+        ["saleprice", "grlivarea", "yearbuilt"],
+        ["price", "bedrooms", "bathrooms", "sqft"],
+    ],
+}
+
+
+def _refine_domain(domain: str, df: pd.DataFrame) -> str:
+    """
+    Post-process the detected domain for better logging and user-facing labels.
+    Does NOT change routing — 'unknown' domains still go to the LLM analyzer.
+    Returns a refined label string for display/logging purposes only.
+    """
+    cols_lower = {
+        c.lower().replace("_", "").replace(" ", "")
+        for c in df.columns
+    }
+    for refined, patterns in _DOMAIN_FINGERPRINTS.items():
+        for pattern in patterns:
+            normalized = [p.lower().replace("_", "") for p in pattern]
+            if all(p in cols_lower for p in normalized):
+                print(f"[DOMAIN DETECTOR] Refined domain: {refined} "
+                      f"(routing domain stays: {domain!r})")
+                return refined
+    return domain
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,6 +408,20 @@ _SKIP_COLS = {"EmpID", "ManagerID", "PositionID", "Zip", "DeptID",
               "empid", "managerid", "positionid", "zip", "deptid"}
 
 
+def _is_id_column(df: pd.DataFrame, col: str) -> bool:
+    """
+    Return True if a column is likely an ID column and should be skipped for charting.
+    Heuristics:
+      1. Column name contains 'id' (case-insensitive)
+      2. More than 90% of values are unique (high-cardinality identifier)
+    """
+    if "id" in col.lower():
+        return True
+    if len(df) > 0 and df[col].nunique() / len(df) > 0.9:
+        return True
+    return False
+
+
 def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
     """
     Render Plotly charts from a JSON spec produced by the LLM.
@@ -398,6 +448,11 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
                 y = None
             if color and color not in df.columns:
                 color = None
+
+            # ── Skip ID columns — they produce meaningless charts ─────────
+            if x and _is_id_column(df, x):
+                print(f"[analyzer] Skipping ID column: {x}")
+                raise ValueError(f"Column {x!r} is an ID column — skipping")
 
             # ── Fix: categorical y can't be aggregated → count-based bar ──
             if y and df[y].dtype in ["object", "category", "string"]:
@@ -439,9 +494,9 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
 
         except Exception as e:
             print(f"[analyzer] Chart spec failed ({e}), trying fallback")
-            # Fallback: histogram of first meaningful numeric column
+            # Fallback: histogram of first meaningful numeric column (skip IDs)
             for col in df.select_dtypes(include="number").columns:
-                if col not in _SKIP_COLS:
+                if not _is_id_column(df, col):
                     try:
                         fb = px.histogram(
                             df, x=col,
@@ -461,8 +516,9 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
     if len(valid_charts) < 2:
         print(f"[analyzer] Only {len(valid_charts)} charts from spec — adding guaranteed fallbacks")
         numeric_cols = [c for c in df.select_dtypes(include="number").columns
-                        if c not in _SKIP_COLS]
-        cat_cols     = [c for c in df.select_dtypes(include="object").columns]
+                        if not _is_id_column(df, c)]
+        cat_cols     = [c for c in df.select_dtypes(include="object").columns
+                        if not _is_id_column(df, c)]
 
         # Histogram of first meaningful numeric column
         if numeric_cols and len(valid_charts) < 2:

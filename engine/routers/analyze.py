@@ -96,6 +96,12 @@ async def analyze(
         detected = detect_domain(df, filename=file.filename or "")
         print(f"[ROUTER] domain={detected!r} for file={file.filename!r}")
 
+        # Refine domain for logging/display (does not change routing)
+        from analyzer import _refine_domain
+        _refined = _refine_domain(detected, df)
+        if _refined != detected:
+            print(f"[ROUTER] Refined label: {_refined!r} (routing: {detected!r})")
+
         if detected in ("sports", "entertainment"):
             # Use the existing validated rule engine for known domains
             print(f"[ROUTER] {detected} → rule engine (run_insight_engine)")
@@ -132,6 +138,7 @@ async def analyze(
 
             # Debug: log first insight to confirm text is populated
             _stored_insights = llm_results.get("insights", [])
+            _stored_recs     = llm_results.get("recommendations", [])
             if _stored_insights:
                 _first = _stored_insights[0]
                 print(f"[ROUTER] First insight: title={_first.get('title')!r}, "
@@ -139,7 +146,8 @@ async def analyze(
                       f"text_preview={_first.get('text', '')[:80]!r}")
             print(f"[ROUTER] Stored LLM results: "
                   f"{len(_stored_insights)} insights, "
-                  f"{len(chart_jsons)} charts")
+                  f"{len(chart_jsons)} charts, "
+                  f"{len(_stored_recs)} recommendations (filtered)")
 
             # Wrap LLM results into the run_insight_engine return shape so
             # save_results() and the frontend receive a consistent structure.
