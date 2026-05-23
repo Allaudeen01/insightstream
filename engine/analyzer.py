@@ -336,11 +336,24 @@ Rules:
 - If a column has >50% missing data, mention it in the insight text
 - The "charts" array MUST contain 3-4 objects — an empty charts array is invalid
 - Each insight MUST have a non-empty "text" field with 2-3 sentences including specific numbers
+- Recommendations MUST be SPECIFIC to this dataset. Each recommendation must:
+  * Reference at least one column name from: {context["columns"]}
+  * Use actual numbers derived from the data summary
+  * NEVER include phrases like "case fatality rate", "recovery rate", "public health",
+    "disease outbreak", "pandemic", "COVID", "corona", "virus", "health ministry",
+    "high-burden nations", "international aid", "treatment protocol", or any content
+    not directly related to the columns provided
+- If you cannot derive a recommendation directly from the data, omit it entirely.
+  Fewer relevant recommendations are better than irrelevant ones.
 
 Example of a correct insight:
 {{"title": "Termination Rate", "text": "The termination rate is 35.5% (110 out of 311 employees). This exceeds the industry benchmark of 13-15% for technology firms.", "impact": "CRITICAL"}}
 
+Example of a correct recommendation:
+{{"text": "Review compensation for the Production department where average Salary is $58,000 — 12% below the company median.", "timeframe": "Next 30 days", "owner": "HR team", "impact": "Important"}}
+
 Do NOT return insights with empty or missing text fields.
+Do NOT return recommendations that mention topics unrelated to the dataset columns.
 {missing_note}
 
 Available columns: {context["columns"]}
@@ -606,6 +619,47 @@ def _safe_fallback(df: pd.DataFrame) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Recommendation filter — removes hallucinated / off-topic recommendations
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Keywords that indicate the LLM hallucinated content unrelated to the dataset
+_FORBIDDEN_REC_KEYWORDS = [
+    "case fatality", "recovery rate", "public health", "disease outbreak",
+    "pandemic", "covid", "corona", "virus", "health ministry",
+    "public health authority", "high-burden nations", "international aid",
+    "treatment protocol", "surge planning", "fatality rate", "outbreak",
+    "vaccination", "quarantine", "epidemi", "mortality rate",
+]
+
+
+def _filter_recommendations(recommendations: list, df_columns) -> list:
+    """
+    Remove recommendations that:
+    1. Contain forbidden keywords (hallucinated health/pandemic content)
+    2. Do not reference any column name from the actual dataset
+    """
+    col_names = [c.lower() for c in df_columns if len(c) > 2]
+
+    def is_valid(rec: dict) -> bool:
+        text = rec.get("text", "").lower()
+        if not text:
+            return False
+        # Reject forbidden keywords
+        for kw in _FORBIDDEN_REC_KEYWORDS:
+            if kw in text:
+                print(f"[filter_recs] Removed — forbidden keyword {kw!r}: {text[:60]}")
+                return False
+        # Reject if no dataset column is mentioned
+        if not any(col in text for col in col_names):
+            print(f"[filter_recs] Removed — no column reference: {text[:60]}")
+            return False
+        return True
+
+    cleaned = [r for r in recommendations if is_valid(r)]
+    removed = len(recommendations) - len(cleaned)
+    if removed:
+        print(f"[filter_recs] Filtered {removed} bad recommendation(s), kept {len(cleaned)}")
+    return cleaned# ─────────────────────────────────────────────────────────────────────────────
 # STEP 10 — Complete analyze_dataset() function
 # ─────────────────────────────────────────────────────────────────────────────
 def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
@@ -747,6 +801,11 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
 
     # ── 10. Validate output ───────────────────────────────────────────────
     results = _validate_results(results, df)
+
+    # ── 10b. Filter hallucinated recommendations ──────────────────────────
+    results["recommendations"] = _filter_recommendations(
+        results.get("recommendations", []), df.columns
+    )
 
     # ── 11. Cache successful result ───────────────────────────────────────
     _cache_set(fp, results)
