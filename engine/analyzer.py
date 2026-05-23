@@ -408,6 +408,7 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None) -> s
                 f"  {p['col_a']} vs {p['col_b']}: r={p['r']} ({p['strength']})"
             )
         corr_block = "Pre-computed Pearson correlations (use these exact values):\n" + "\n".join(corr_lines)
+        print(f"[analyzer] Injected top {len(correlations[:5])} correlation pairs into prompt")
 
     return f"""You are a senior data analyst. Analyze this dataset and return ONLY a valid JSON object — no markdown, no code, no explanation.
 
@@ -919,6 +920,8 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     # ── 3. Pre-process ────────────────────────────────────────────────────
     context = _build_context(df)
     quality = _build_data_quality(df)
+    n_corr  = len(context.get("correlations", []))
+    print(f"[analyzer] Building context with {n_corr} correlation pairs")
 
     # ── 4. Generate JSON prompt ───────────────────────────────────────────
     domain_risk = _detect_financial_language_risk(df)
