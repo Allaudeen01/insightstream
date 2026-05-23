@@ -13,6 +13,7 @@ __pycache__/
 # FastAPI / Backend
 engine/data/*.db
 engine/data/sessions/
+engine/.analyzer_cache/
 insightstream_sessions/
 *.log
 
