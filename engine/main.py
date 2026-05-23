@@ -978,16 +978,29 @@ async def export_dashboard_pdf(
             final_insights = _rule_insights if _rule_insights else clean_insights
 
         # ── Filter hallucinated recommendations before PDF generation ─────
-        # The frontend payload may contain stale/bad recs from a previous session.
-        # Apply the same filter used at upload time to catch anything that slipped through.
-        if _llm_override and df is not None:
+        # Always run — the frontend payload may contain stale/bad recs from
+        # a previous session regardless of whether LLM override is active.
+        if df is not None:
             try:
                 from analyzer import _filter_recommendations
                 _df_pd = df.to_pandas() if hasattr(df, "to_pandas") else df
                 _before = len(final_recs)
-                final_recs = _filter_recommendations(final_recs, _df_pd.columns.tolist())
-                if len(final_recs) < _before:
-                    print(f"[EXPORT] Filtered {_before - len(final_recs)} bad recs from payload")
+                _filtered = _filter_recommendations(final_recs, _df_pd.columns.tolist())
+                if len(_filtered) < _before:
+                    print(f"[EXPORT] Filtered {_before - len(_filtered)} bad recs from payload")
+                else:
+                    print(f"[EXPORT] Rec filter: all {len(_filtered)} recs are clean")
+
+                # Safety net: if filter removed everything, fall back to stored DB recs
+                if len(_filtered) == 0 and _llm_override:
+                    _db_recs = _llm_override.get("recommendations", [])
+                    if _db_recs:
+                        print(f"[EXPORT] All payload recs filtered — using {len(_db_recs)} stored DB recs")
+                        final_recs = _db_recs
+                    else:
+                        final_recs = _filtered
+                else:
+                    final_recs = _filtered
             except Exception as _fe:
                 print(f"[EXPORT] Rec filter failed: {_fe}")
 
