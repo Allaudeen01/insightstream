@@ -159,6 +159,12 @@ async def run_migrations(db_path: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create session directory and initialize database on startup."""
+    # ── Version marker — confirms latest code is loaded ───────────────────
+    print("=" * 60)
+    print("InsightStream Engine — build 2026-05-23")
+    print("Rec filter: UNCONDITIONAL (export + upload)")
+    print("ID column skip: ACTIVE")
+    print("=" * 60)
     try:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
         print(f"Session directory created: {SESSION_DIR}")
