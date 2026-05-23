@@ -270,6 +270,60 @@ def _build_data_quality(df: pd.DataFrame) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Correlation pre-computation (injected into prompt so LLM uses real r values)
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_correlations(df: pd.DataFrame) -> list:
+    """
+    Compute Pearson correlation coefficients for all pairs of numeric columns.
+    Returns a list of dicts sorted by |r| descending, capped at 10 pairs.
+    Only includes pairs where both columns have at least 30 non-null values.
+    Excludes ID columns (name contains 'id' OR integer column with 100% unique values).
+    """
+    def _is_corr_skip(col: str) -> bool:
+        """Skip column for correlation if it's an ID (not just high-cardinality continuous)."""
+        if "id" in col.lower():
+            return True
+        # Only skip integer columns with near-100% uniqueness (true IDs)
+        # Continuous floats (Temperature, Sales) are high-cardinality but meaningful
+        if df[col].dtype in ("int64", "int32") and len(df) > 0:
+            if df[col].nunique() / len(df) > 0.95:
+                return True
+        return False
+
+    numeric_cols = [
+        c for c in df.select_dtypes(include="number").columns
+        if not _is_corr_skip(c) and df[c].dropna().shape[0] >= 30
+    ]
+    pairs = []
+    for i, col_a in enumerate(numeric_cols):
+        for col_b in numeric_cols[i + 1:]:
+            try:
+                r = df[[col_a, col_b]].dropna()
+                if len(r) < 30:
+                    continue
+                r_val = round(float(r[col_a].corr(r[col_b])), 2)
+                if pd.isna(r_val):
+                    continue
+                abs_r = abs(r_val)
+                strength = (
+                    "strong"   if abs_r > 0.7 else
+                    "moderate" if abs_r > 0.3 else
+                    "weak"
+                )
+                pairs.append({
+                    "col_a":    col_a,
+                    "col_b":    col_b,
+                    "r":        r_val,
+                    "strength": strength,
+                })
+            except Exception:
+                continue
+    # Sort by |r| descending, return top 10
+    pairs.sort(key=lambda x: abs(x["r"]), reverse=True)
+    return pairs[:10]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Context builder (used by analyze_dataset)
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_context(df: pd.DataFrame) -> dict:
@@ -302,6 +356,7 @@ def _build_context(df: pd.DataFrame) -> dict:
         "sample_values": sample_values,
         "numeric_stats": stats,
         "dtypes":       df.dtypes.astype(str).to_dict(),
+        "correlations": _build_correlations(df),
     }
 
 
@@ -342,6 +397,17 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None) -> s
   Use domain-appropriate language: match outcomes, player performance, venue stats,
   content ratings, viewership, etc.
 """
+
+    # Rules 9 & 10: correlation reporting + actionable recommendations
+    correlations = context.get("correlations", [])
+    corr_block = ""
+    if correlations:
+        corr_lines = []
+        for p in correlations[:5]:  # top 5 pairs in prompt
+            corr_lines.append(
+                f"  {p['col_a']} vs {p['col_b']}: r={p['r']} ({p['strength']})"
+            )
+        corr_block = "Pre-computed Pearson correlations (use these exact values):\n" + "\n".join(corr_lines)
 
     return f"""You are a senior data analyst. Analyze this dataset and return ONLY a valid JSON object — no markdown, no code, no explanation.
 
@@ -394,18 +460,30 @@ Rules:
     not directly related to the columns provided
 - If you cannot derive a recommendation directly from the data, omit it entirely.
   Fewer relevant recommendations are better than irrelevant ones.
+- Rule 9 — Correlations: For any two numeric columns, report the Pearson correlation
+  coefficient (r) rounded to 2 decimals in the insight text. State whether it is
+  strong (|r|>0.7), moderate (0.3<|r|≤0.7), or weak (|r|≤0.3). Use the pre-computed
+  values below — do NOT invent correlation values.
+- Rule 10 — Actionable recommendations: Each recommendation must be specific and
+  actionable. Include concrete numbers (e.g., "Store 5 averages $600k/week — 40%
+  below median"). For sales/retail: optimise inventory for peak season, analyse
+  holiday lift, review underperforming stores. For HR: retention programs for
+  high-attrition departments. For sports: analyse venue/toss/dismissal patterns.
+  Do NOT write generic recommendations like "investigate underlying drivers".
 
-Example of a correct insight:
-{{"title": "Termination Rate", "text": "The termination rate is 35.5% (110 out of 311 employees). This exceeds the industry benchmark of 13-15% for technology firms.", "impact": "CRITICAL"}}
+Example of a correct insight with correlation:
+{{"title": "Sales vs Temperature Correlation", "text": "Weekly sales show a moderate positive correlation with temperature (r=0.34). Peak sales occur in June (mean $1.8M), dropping to $0.9M in January — a 50% seasonal swing.", "impact": "IMPORTANT"}}
 
-Example of a correct recommendation:
-{{"text": "Review compensation for the Production department where average Salary is $58,000 — 12% below the company median.", "timeframe": "Next 30 days", "owner": "HR team", "impact": "Important"}}
+Example of a correct actionable recommendation:
+{{"text": "Increase inventory in May to prepare for the June peak — historical data shows a 72% sales lift from January baseline. Focus on stores in the top quartile by Weekly_Sales.", "timeframe": "Next 30 days", "owner": "Supply chain team", "impact": "Critical"}}
 
 Do NOT return insights with empty or missing text fields.
 Do NOT return recommendations that mention topics unrelated to the dataset columns.
 {missing_note}
 {financial_ban}
 Available columns: {context["columns"]}
+
+{corr_block}
 
 Dataset summary:
 {context_str}
