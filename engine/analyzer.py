@@ -459,6 +459,174 @@ def _feature_importance(df: pd.DataFrame, target_col: str,
         return []
 
 
+def _categorical_group_analysis(df: pd.DataFrame,
+                                numeric_target_col: str = None) -> str:
+    """
+    For every categorical column (≤20 unique values), compute group-by stats
+    against the best numeric target column. Returns a formatted text block.
+    """
+    # Pick numeric target: prefer named columns, else highest-variance numeric
+    if numeric_target_col and numeric_target_col in df.columns:
+        target = numeric_target_col
+    else:
+        preferred = ["popularity", "score", "sales", "price", "value",
+                     "rating", "revenue", "salary", "weekly_sales"]
+        target = next(
+            (c for c in preferred if c.lower() in
+             [x.lower() for x in df.columns]),
+            None
+        )
+        if not target:
+            num_cols = [c for c in df.select_dtypes(include="number").columns
+                        if not _is_id_column(df, c)]
+            if num_cols:
+                target = max(num_cols, key=lambda c: df[c].std() / max(df[c].mean(), 1e-9)
+                             if df[c].mean() != 0 else 0)
+    if not target:
+        return ""
+
+    cat_cols = [c for c in df.select_dtypes(include=["object", "string"]).columns
+                if df[c].nunique() <= 20 and not _is_id_column(df, c)]
+    if not cat_cols:
+        return ""
+
+    lines = [f"\n=== Group-by Analysis (target: {target}) ==="]
+    for cat in cat_cols[:3]:  # limit to 3 categorical columns
+        try:
+            grp = df.groupby(cat)[target].agg(
+                count="count", mean="mean", median="median"
+            ).reset_index().sort_values("count", ascending=False)
+
+            total = grp["count"].sum()
+            lines.append(f"\n{cat} breakdown (n={total:,}):")
+
+            # Top 5 categories
+            for _, row in grp.head(5).iterrows():
+                pct  = row["count"] / total * 100
+                warn = " ⚠ small sample" if row["count"] < 30 else ""
+                lines.append(
+                    f"  {row[cat]}: n={int(row['count'])} ({pct:.1f}%), "
+                    f"mean={row['mean']:.2f}, median={row['median']:.2f}{warn}"
+                )
+
+            # Narrative highlights
+            top_count = grp.iloc[0]
+            top_mean  = grp.loc[grp["mean"].idxmax()]
+            low_mean  = grp.loc[grp["mean"].idxmin()]
+
+            lines.append(
+                f"  → Dominant: {top_count[cat]} ({top_count['count']/total*100:.0f}% of records)"
+            )
+            if top_mean["count"] < 30:
+                lines.append(
+                    f"  → Highest mean: {top_mean[cat]} ({top_mean['mean']:.2f}) "
+                    f"⚠ only {int(top_mean['count'])} records — may be driven by outliers"
+                )
+            else:
+                lines.append(
+                    f"  → Highest mean: {top_mean[cat]} ({top_mean['mean']:.2f})"
+                )
+            lines.append(
+                f"  → Lowest mean: {low_mean[cat]} ({low_mean['mean']:.2f})"
+            )
+        except Exception as e:
+            print(f"[group_analysis] Failed for {cat}: {e}")
+            continue
+
+    lines.append("=== End Group-by Analysis ===\n")
+    result = "\n".join(lines)
+    print(f"[analyzer] Group-by analysis: {len(cat_cols)} categorical cols vs {target!r}")
+    return result
+
+
+def _explain_outlier_impact(df: pd.DataFrame, numeric_col: str,
+                            categorical_cols: list) -> str:
+    """
+    For each categorical column, compare mean of numeric_col with and without
+    outliers (IQR method). Flags categories where mean changes >50%.
+    """
+    if numeric_col not in df.columns:
+        return ""
+    try:
+        q1, q3 = df[numeric_col].quantile(0.25), df[numeric_col].quantile(0.75)
+        iqr     = q3 - q1
+        lo, hi  = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        mask_clean = (df[numeric_col] >= lo) & (df[numeric_col] <= hi)
+        n_outliers = (~mask_clean).sum()
+        if n_outliers == 0:
+            return ""
+
+        lines = [
+            f"\n=== Outlier Impact Analysis ({numeric_col}: {n_outliers} outliers) ==="
+        ]
+        found_any = False
+        for cat in categorical_cols[:3]:
+            if cat not in df.columns:
+                continue
+            try:
+                for val in df[cat].dropna().unique():
+                    mask_cat   = df[cat] == val
+                    mean_all   = df.loc[mask_cat, numeric_col].mean()
+                    mean_clean = df.loc[mask_cat & mask_clean, numeric_col].mean()
+                    n_cat      = mask_cat.sum()
+                    if pd.isna(mean_all) or pd.isna(mean_clean) or mean_all == 0:
+                        continue
+                    change_pct = abs(mean_all - mean_clean) / abs(mean_all) * 100
+                    abs_diff   = abs(mean_all - mean_clean)
+                    if change_pct > 30 or (abs_diff > 0.5 and n_cat < 50):
+                        found_any = True
+                        lines.append(
+                            f"  {cat}={val!r}: mean={mean_all:.2f} with outliers, "
+                            f"{mean_clean:.2f} without — {change_pct:.0f}% change. "
+                            f"n={n_cat}" +
+                            (" ⚠ small sample" if n_cat < 30 else "")
+                        )
+            except Exception:
+                continue
+
+        if not found_any:
+            return ""
+        lines.append("=== End Outlier Impact ===\n")
+        print(f"[analyzer] Outlier impact: {n_outliers} outliers in {numeric_col!r}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[analyzer] Outlier impact failed: {e}")
+        return ""
+
+
+def _duplicate_insight(df: pd.DataFrame) -> str:
+    """
+    Detect duplicate rows and return an alert string if >1% duplicates found.
+    """
+    try:
+        dup_count = int(df.duplicated().sum())
+        dup_pct   = dup_count / max(len(df), 1) * 100
+        if dup_pct <= 1.0:
+            return ""
+
+        # Find columns most responsible for duplicates
+        top_dup_cols = []
+        for col in df.columns[:10]:
+            col_dup = int(df.duplicated(subset=[col]).sum())
+            if col_dup > 0:
+                top_dup_cols.append((col, col_dup))
+        top_dup_cols.sort(key=lambda x: x[1], reverse=True)
+        top_names = ", ".join(c for c, _ in top_dup_cols[:3])
+
+        block = (
+            f"\n=== Data Quality Alert: Duplicates ===\n"
+            f"{dup_count:,} duplicate rows ({dup_pct:.1f}% of data) detected. "
+            f"Consider deduplicating before analysis to avoid over-representing "
+            f"the same entities. Most duplicated columns: {top_names}.\n"
+            f"=== End Duplicate Alert ===\n"
+        )
+        print(f"[analyzer] Duplicates: {dup_count:,} ({dup_pct:.1f}%)")
+        return block
+    except Exception as e:
+        print(f"[analyzer] Duplicate check failed: {e}")
+        return ""
+
+
 def _build_intel_block(df: pd.DataFrame) -> str:
     """
     Run all intelligence modules and return a formatted string to inject
@@ -607,12 +775,18 @@ def _build_context(df: pd.DataFrame) -> dict:
 # STEP 5 — JSON-spec prompt (replaces Python code generation)
 # ─────────────────────────────────────────────────────────────────────────────
 def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
-                     intel_block: str = "") -> str:
+                     intel_block: str = "",
+                     group_block: str = "",
+                     outlier_block: str = "",
+                     duplicate_block: str = "") -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
     domain_risk: "sports" | "entertainment" | None — adds extra rule 8 if set.
     intel_block: pre-computed intelligence results to inject into the prompt.
+    group_block: categorical group-by analysis results.
+    outlier_block: outlier impact explanation per category.
+    duplicate_block: duplicate row detection alert.
     """
     high_missing = quality.get("high_missing_columns", [])
     missing_note = ""
@@ -729,11 +903,19 @@ Few-shot examples of correct recommendations (adapt to this dataset's columns):
 
 Do NOT return insights with empty or missing text fields.
 Do NOT return recommendations that mention topics unrelated to the dataset columns.
+- Key Takeaway (MANDATORY): The FIRST insight in the list must be titled "Key Takeaway"
+  and answer: "If the user remembers only one thing from this report, what should it be?"
+  It must be a single, striking sentence with the most important finding and a specific number.
+  Example: "93% of records are actors — all popularity trends are actor-driven; small
+  departments like Visual Effects appear popular only due to single outliers."
 {missing_note}
 {financial_ban}
 Available columns: {context["columns"]}
 
 {corr_block}
+{group_block}
+{outlier_block}
+{duplicate_block}
 {intel_block}
 Dataset summary:
 {context_str}
@@ -1178,12 +1360,31 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     # ── 3b. Intelligence modules (anomaly, stats, feature importance) ─────
     intel_block = _build_intel_block(df)
 
+    # ── 3c. Group-by, outlier impact, duplicate detection ─────────────────
+    group_block    = _categorical_group_analysis(df)
+    # Pick best numeric col for outlier impact (same logic as group analysis)
+    _num_cols = [c for c in df.select_dtypes(include="number").columns
+                 if not _is_id_column(df, c)]
+    _preferred = ["popularity", "score", "sales", "price", "value",
+                  "rating", "revenue", "salary", "weekly_sales"]
+    _oc = next((c for c in _preferred
+                if c.lower() in [x.lower() for x in df.columns]), None)
+    if not _oc and _num_cols:
+        _oc = max(_num_cols, key=lambda c: df[c].std() / max(abs(df[c].mean()), 1e-9))
+    _cat_cols = [c for c in df.select_dtypes(include=["object", "string"]).columns
+                 if df[c].nunique() <= 20 and not _is_id_column(df, c)]
+    outlier_block  = _explain_outlier_impact(df, _oc, _cat_cols) if _oc else ""
+    duplicate_block = _duplicate_insight(df)
+
     # ── 4. Generate JSON prompt ───────────────────────────────────────────
     domain_risk = _detect_financial_language_risk(df)
     if domain_risk:
         print(f"[analyzer] Financial language risk detected: {domain_risk!r} — adding rule 8")
     prompt = _generate_prompt(context, quality, domain_risk=domain_risk,
-                              intel_block=intel_block)
+                              intel_block=intel_block,
+                              group_block=group_block,
+                              outlier_block=outlier_block,
+                              duplicate_block=duplicate_block)
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
