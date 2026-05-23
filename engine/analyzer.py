@@ -863,7 +863,9 @@ def _filter_recommendations(recommendations: list, df_columns) -> list:
                 active_forbidden.append(kw)
 
     def is_valid(rec: dict) -> bool:
-        text = rec.get("text", "").lower()
+        # Support both 'text' (LLM format) and 'action' (engine format)
+        text = rec.get("text", "") or rec.get("action", "")
+        text = text.lower()
         if not text:
             return False
         # Reject forbidden keywords
