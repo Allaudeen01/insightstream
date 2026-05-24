@@ -984,7 +984,8 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
                      group_block: str = "",
                      outlier_block: str = "",
                      duplicate_block: str = "",
-                     domain: str = "GENERIC_TABULAR") -> str:
+                     domain: str = "GENERIC_TABULAR",
+                     semantics_block: str = "") -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
@@ -1154,6 +1155,7 @@ Available columns: {context["columns"]}
 {outlier_block}
 {duplicate_block}
 {intel_block}
+{semantics_block}
 Dataset summary:
 {context_str}
 """
@@ -1638,7 +1640,96 @@ def _filter_recommendations(recommendations: list, df_columns,
     removed = len(recommendations) - len(cleaned)
     if removed:
         print(f"[filter_recs] Filtered {removed} bad recommendation(s), kept {len(cleaned)}")
-    return cleaned# ─────────────────────────────────────────────────────────────────────────────
+    return cleaned
+
+
+def _attach_phase2_keys(results: dict, semantics: dict, coerce_reports: dict,
+                         segmentations: list, hypotheses: list,
+                         unit_notes: list, df: "pd.DataFrame") -> dict:
+    """
+    Attach all Phase 2 keys to a results dict (works for both LLM and safe_fallback paths).
+    Mutates and returns results.
+    """
+    # Semantics
+    results["semantics"] = {
+        c: {"tag": s.tag, "confidence": s.confidence}
+        for c, s in semantics.items()
+    } if semantics else {}
+
+    # Data quality: degenerate columns + partial parse failures
+    _dq_items = []
+    if semantics:
+        for col, sem in semantics.items():
+            if sem.tag == "categorical_degenerate":
+                _dq_items.append({
+                    "column": col,
+                    "issue":  "no variance",
+                    "detail": f"'{col}' has only one distinct value — no analytical signal.",
+                })
+        for col, rpt in coerce_reports.items():
+            if rpt.get("success_rate", 1.0) < 0.95:
+                _dq_items.append({
+                    "column": col,
+                    "issue":  "partial parse failure",
+                    "detail": f"{rpt['success_rate']:.0%} of values parsed successfully.",
+                })
+    results["data_quality"] = _dq_items
+
+    # Hypotheses
+    results["hypotheses"] = [
+        {"observation": h.observation,
+         "candidates":  h.candidates,
+         "disambiguating_info": h.disambiguating_info}
+        for h in hypotheses
+    ]
+
+    # Unit-of-analysis notes
+    results["unit_notes"] = unit_notes
+
+    # Promote segmentations to findings (prepend to insights)
+    try:
+        from analysis.segmentation import impact_for
+        from render.metric_store import build_metric_store
+        from render.metric_filler import fill_metrics
+
+        _store = build_metric_store(df, semantics) if semantics else None
+        seg_findings = []
+        for seg in segmentations:
+            headline = seg.headline
+            if _store:
+                try:
+                    headline = fill_metrics(headline, _store)
+                except Exception:
+                    pass
+            seg_findings.append({
+                "title":           f"{seg.group_col} × {seg.target_col}",
+                "text":            headline,
+                "impact":          impact_for(seg),
+                "confidence":      "HIGH",
+                "is_segmentation": True,
+            })
+        if seg_findings:
+            results["insights"] = seg_findings + results.get("insights", [])
+    except Exception as _e:
+        print(f"[analyzer] _attach_phase2_keys segmentation failed: {_e}")
+
+    # Narrative headers
+    try:
+        from llm.headers import generate_narrative_headers
+        _findings_for_headers = [
+            {"title": f.get("title", ""), "body": f.get("text", "")}
+            for f in results.get("insights", [])
+        ]
+        _headers = generate_narrative_headers(_findings_for_headers)
+        for f, h in zip(results.get("insights", []), _headers):
+            f["narrative_title"] = h
+    except Exception as _e:
+        print(f"[analyzer] _attach_phase2_keys headers failed: {_e}")
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STEP 10 — Complete analyze_dataset() function
 # ─────────────────────────────────────────────────────────────────────────────
 def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
@@ -1672,6 +1763,51 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         if cached is not None:
             print(f"[analyzer] Cache hit: {fp}")
             return cached
+
+    # ── 2b. Phase 2: Coerce string-encoded numerics BEFORE any analysis ──
+    # This fixes the "35.2% missing credit_limit" bug — $24295 strings
+    # were failing pd.to_numeric and being reported as missing.
+    try:
+        from utils.coerce import coerce_numeric
+        coerce_reports: dict = {}
+        df = df.copy()  # single copy — mutate in place below
+        for col in list(df.columns):
+            col_dtype = df[col].dtype
+            # Check for string-like dtypes: object, str (ArrowStringDtype), StringDtype
+            is_string_like = (
+                col_dtype == object
+                or str(col_dtype) in ("str", "string", "large_string")
+                or hasattr(col_dtype, "name") and col_dtype.name in ("str", "string", "object")
+                or pd.api.types.is_string_dtype(col_dtype)
+            )
+            if is_string_like and not pd.api.types.is_numeric_dtype(col_dtype):
+                coerced, rpt = coerce_numeric(df[col])
+                if rpt["success_rate"] >= 0.95:
+                    df[col] = coerced
+                    coerce_reports[col] = rpt
+                    if rpt["detected_format"] != "plain":
+                        print(f"[analyzer] Coerced {col!r}: "
+                              f"{rpt['detected_format']} → numeric "
+                              f"(success={rpt['success_rate']:.0%})")
+                elif rpt["success_rate"] >= 0.50:
+                    # Ambiguous — keep original but record for hypothesis layer
+                    coerce_reports[col] = rpt
+                    print(f"[analyzer] Partial coercion {col!r}: "
+                          f"{rpt['success_rate']:.0%} success — flagged for hypotheses")
+    except Exception as _ce:
+        print(f"[analyzer] Coercion step failed: {_ce}")
+        coerce_reports = {}
+
+    # ── 2c. Phase 2: Classify every column's semantic role ────────────────
+    try:
+        from classifiers.semantics import classify_dataframe
+        semantics = classify_dataframe(df)
+        print(f"[analyzer] Semantics: "
+              + ", ".join(f"{c}={s.tag}" for c, s in list(semantics.items())[:6])
+              + ("..." if len(semantics) > 6 else ""))
+    except Exception as _se:
+        print(f"[analyzer] Semantics classification failed: {_se}")
+        semantics = {}
 
     # ── 3. Pre-process ────────────────────────────────────────────────────
     context = _build_context(df)
@@ -1716,16 +1852,87 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     except Exception as _rbe:
         print(f"[analyzer] Rule-based domain classification failed: {_rbe}")
 
+    # ── 3e. Phase 2: Attach semantics to context for LLM prompt ──────────
+    if semantics:
+        context["semantics"] = {
+            c: {"tag": s.tag, "confidence": s.confidence, "reasons": s.reasons}
+            for c, s in semantics.items()
+        }
+        context["coerce_reports"] = coerce_reports
+
+    # ── 3f. Phase 2: Run segmentation, hypotheses, unit-of-analysis ──────
+    segmentations = []
+    hypotheses    = []
+    unit_notes    = []
+    try:
+        from analysis.segmentation import auto_segment_all, impact_for
+        segmentations = auto_segment_all(df, semantics)
+        print(f"[analyzer] Segmentations: {len(segmentations)} significant findings")
+        for seg in segmentations[:3]:
+            print(f"  {seg.group_col} × {seg.target_col}: "
+                  f"spread={seg.spread_ratio:.1f}x, impact={impact_for(seg)}")
+    except Exception as _sge:
+        print(f"[analyzer] Segmentation failed: {_sge}")
+
+    try:
+        from analysis.hypotheses import detect_ambiguities
+        hypotheses = detect_ambiguities(df, semantics, coerce_reports)
+        print(f"[analyzer] Hypotheses: {len(hypotheses)} ambiguities detected")
+    except Exception as _hye:
+        print(f"[analyzer] Hypothesis detection failed: {_hye}")
+
+    try:
+        unit_notes = detect_unit_of_analysis(df, semantics)
+        print(f"[analyzer] Unit-of-analysis: {len(unit_notes)} notes")
+    except Exception as _une:
+        print(f"[analyzer] Unit-of-analysis failed: {_une}")
+
     # ── 4. Generate JSON prompt ───────────────────────────────────────────
     domain_risk = _detect_financial_language_risk(df)
     if domain_risk:
         print(f"[analyzer] Financial language risk detected: {domain_risk!r} — adding rule 8")
+
+    # Build semantics block for LLM prompt
+    _semantics_block = ""
+    if semantics:
+        try:
+            from classifiers.policy import SEMANTICS_POLICY
+            _sem_lines = ["\nCOLUMN SEMANTIC ROLES (you MUST respect these):"]
+            for col, sem in semantics.items():
+                policy = SEMANTICS_POLICY.get(sem.tag, {})
+                _sem_lines.append(f"  - {col}: {sem.tag}")
+            _sem_lines.append("")
+            _sem_lines.append("Rules from semantic roles:")
+            _sem_lines.append("  - NEVER report a mean, median, or correlation for any column "
+                               "tagged 'random_token' or 'identifier'.")
+            _sem_lines.append("  - NEVER promote a column tagged 'categorical_degenerate' to "
+                               "an IMPORTANT or CRITICAL finding. It belongs ONLY in the "
+                               "data-quality section as 'no variance'.")
+            _sem_lines.append("  - NEVER include 'cvv', 'card_number', or any random_token "
+                               "column in Key Takeaway, recommendations, or chart titles.")
+            _sem_lines.append("  - Group-by analyses must use columns tagged "
+                               "'categorical_meaningful' as the grouper.")
+            # List degenerate columns explicitly
+            _degen = [c for c, s in semantics.items() if s.tag == "categorical_degenerate"]
+            if _degen:
+                _sem_lines.append(f"  - These columns have NO variance (all values identical): "
+                                   f"{_degen}. Do NOT promote them.")
+            # List random_token columns explicitly
+            _tokens = [c for c, s in semantics.items() if s.tag == "random_token"]
+            if _tokens:
+                _sem_lines.append(f"  - These columns are random tokens (meaningless to analyze): "
+                                   f"{_tokens}. Exclude from all insights, charts, and recommendations.")
+            _semantics_block = "\n".join(_sem_lines)
+        except Exception as _sbe:
+            print(f"[analyzer] Semantics block build failed: {_sbe}")
+
     prompt = _generate_prompt(context, quality, domain_risk=domain_risk,
                               intel_block=intel_block,
                               group_block=group_block,
                               outlier_block=outlier_block,
                               duplicate_block=duplicate_block,
-                              domain=domain_info.get("category", "GENERIC_TABULAR"))
+                              domain=domain_info.get("category", "GENERIC_TABULAR"),
+                              semantics_block=_semantics_block)
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
@@ -1737,7 +1944,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         print("[analyzer] GROQ_API_KEY not set — returning safe fallback")
-        return _safe_fallback(df)
+        result = _safe_fallback(df)
+        result = _attach_phase2_keys(result, semantics, coerce_reports,
+                                     segmentations, hypotheses, unit_notes, df)
+        return result
 
     client = Groq(api_key=api_key)
 
@@ -1789,7 +1999,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
 
     if not raw_response:
         print(f"[analyzer] Groq failed after 2 attempts ({last_error}) — safe fallback")
-        return _safe_fallback(df)
+        result = _safe_fallback(df)
+        result = _attach_phase2_keys(result, semantics, coerce_reports,
+                                     segmentations, hypotheses, unit_notes, df)
+        return result
 
     # ── 6. Parse JSON response ────────────────────────────────────────────
     try:
@@ -1813,7 +2026,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         except Exception as retry_err:
             # ── 9. Both attempts failed → safe fallback ───────────────────
             print(f"[analyzer] JSON retry also failed: {retry_err} — safe fallback")
-            return _safe_fallback(df)
+            result = _safe_fallback(df)
+            result = _attach_phase2_keys(result, semantics, coerce_reports,
+                                         segmentations, hypotheses, unit_notes, df)
+            return result
 
     # ── 7. Render charts from spec (no exec) ─────────────────────────────
     results = _render_from_spec(spec, df)
@@ -1846,6 +2062,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         results.get("recommendations", []), df.columns,
         domain=domain_info.get("category", "GENERIC_TABULAR"),
     )
+
+    # ── 10c-10f. Phase 2: Attach all new keys ────────────────────────────
+    results = _attach_phase2_keys(results, semantics, coerce_reports,
+                                   segmentations, hypotheses, unit_notes, df)
 
     # ── 11. Cache successful result ───────────────────────────────────────
     _cache_set(fp, results)
