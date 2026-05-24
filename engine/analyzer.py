@@ -1855,3 +1855,44 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     results["domain_info"]     = context.get("domain_info", {})
     results["domain_template"] = context.get("domain_template", {})
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TASK 9 — Unit-of-Analysis Check
+# ─────────────────────────────────────────────────────────────────────────────
+def detect_unit_of_analysis(df: pd.DataFrame, semantics: dict) -> list:
+    """
+    Detect when rows are at a finer granularity than the primary entity.
+    For example: 6146 rows / 2000 clients → each client has ~3 cards.
+
+    Returns a list of notes (dicts), one per identifier column that has
+    fewer unique values than rows. Rendered as a leading "Context" note
+    in the report — never promoted to a finding.
+
+    Each note has:
+        id_col          : str   — the identifier column
+        rows            : int   — total row count
+        entities        : int   — unique values of id_col
+        rows_per_entity : float — rows / entities
+        note            : str   — human-readable explanation
+    """
+    n = len(df)
+    notes = []
+    for col, sem in semantics.items():
+        if sem.tag != "identifier":
+            continue
+        nunique = df[col].nunique()
+        if nunique < n * 0.95 and nunique > 1:
+            ratio = n / nunique
+            notes.append({
+                "id_col":          col,
+                "rows":            n,
+                "entities":        nunique,
+                "rows_per_entity": round(ratio, 2),
+                "note": (
+                    f"Rows are at item level. Each '{col}' has on average "
+                    f"{ratio:.1f} rows. Some analyses (e.g., totals, distributions) "
+                    f"may be more meaningful aggregated to the {col} level."
+                ),
+            })
+    return notes
