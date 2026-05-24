@@ -735,6 +735,177 @@ def _build_correlations(df: pd.DataFrame) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Chart summarizer — generates natural-language captions for each chart type
+# ─────────────────────────────────────────────────────────────────────────────
+def _generate_chart_summary(chart_type: str, x_col: Optional[str],
+                             y_col: Optional[str], df: pd.DataFrame) -> str:
+    """
+    Generate a natural-language summary sentence for a rendered chart.
+    Used as the caption/insight text below each chart in the PDF report.
+
+    Supports: histogram, bar, scatter, line, pie.
+    Falls back to a generic description for unknown types.
+    """
+    import numpy as np
+    try:
+        from scipy.stats import skew as _skew
+    except ImportError:
+        _skew = None
+
+    try:
+        # ── Histogram (distribution of a numeric column) ──────────────────
+        if chart_type == "histogram" and x_col and x_col in df.columns:
+            data = df[x_col].dropna()
+            if len(data) == 0:
+                return f"No data available for {x_col}."
+            mean_val   = float(data.mean())
+            median_val = float(data.median())
+            min_val    = float(data.min())
+            max_val    = float(data.max())
+
+            # Skewness
+            if _skew is not None and len(data) >= 3:
+                skewness = float(_skew(data))
+                if skewness > 1:
+                    shape = "right-skewed"
+                elif skewness < -1:
+                    shape = "left-skewed"
+                else:
+                    shape = "approximately symmetric"
+            else:
+                diff = mean_val - median_val
+                if abs(diff) < 0.05 * max(abs(mean_val), 1):
+                    shape = "approximately symmetric"
+                elif diff > 0:
+                    shape = "right-skewed"
+                else:
+                    shape = "left-skewed"
+
+            # Outliers via IQR
+            q1  = float(data.quantile(0.25))
+            q3  = float(data.quantile(0.75))
+            iqr = q3 - q1
+            outlier_count = int(((data < q1 - 1.5 * iqr) | (data > q3 + 1.5 * iqr)).sum())
+            outlier_note  = f" with {outlier_count} outliers beyond the whiskers" if outlier_count > 0 else ""
+
+            label = x_col.replace("_", " ").title()
+            return (
+                f"The distribution of {label} is {shape} "
+                f"(mean = {mean_val:.2f}, median = {median_val:.2f}), "
+                f"ranging from {min_val:.2f} to {max_val:.2f}{outlier_note}."
+            )
+
+        # ── Bar chart (categorical counts or aggregated values) ───────────
+        elif chart_type == "bar" and x_col and x_col in df.columns:
+            if y_col and y_col in df.columns:
+                # Aggregated bar: describe top category by y value
+                grp = df.groupby(x_col)[y_col].sum().sort_values(ascending=False)
+                if len(grp) == 0:
+                    return f"Bar chart of {y_col} by {x_col}."
+                top_cat = str(grp.index[0])
+                top_val = float(grp.iloc[0])
+                total   = float(grp.sum())
+                pct     = top_val / total * 100 if total > 0 else 0
+                x_label = x_col.replace("_", " ").title()
+                y_label = y_col.replace("_", " ").title()
+                if pct > 50:
+                    return (
+                        f"The {x_label} category is dominated by '{top_cat}', "
+                        f"accounting for {pct:.1f}% of total {y_label}."
+                    )
+                else:
+                    return (
+                        f"The most common {x_label} by {y_label} is '{top_cat}' "
+                        f"({pct:.1f}%), with a diverse distribution across categories."
+                    )
+            else:
+                # Count-based bar
+                counts  = df[x_col].value_counts()
+                if len(counts) == 0:
+                    return f"No data for {x_col}."
+                top_cat = str(counts.index[0])
+                top_pct = float(counts.iloc[0]) / len(df) * 100
+                x_label = x_col.replace("_", " ").title()
+                if top_pct > 50:
+                    return (
+                        f"The {x_label} category is dominated by '{top_cat}', "
+                        f"accounting for {top_pct:.1f}% of records."
+                    )
+                else:
+                    return (
+                        f"The most common {x_label} is '{top_cat}' "
+                        f"({top_pct:.1f}% of records), with a diverse distribution."
+                    )
+
+        # ── Scatter plot (correlation between two numeric columns) ─────────
+        elif chart_type == "scatter" and x_col and y_col \
+                and x_col in df.columns and y_col in df.columns:
+            pair = df[[x_col, y_col]].dropna()
+            if len(pair) < 5:
+                return f"Scatter plot of {y_col} vs {x_col}."
+            r_val   = float(pair[x_col].corr(pair[y_col]))
+            abs_r   = abs(r_val)
+            strength  = "strong" if abs_r > 0.7 else "moderate" if abs_r > 0.3 else "weak"
+            direction = "positive" if r_val > 0 else "negative"
+            x_label   = x_col.replace("_", " ").title()
+            y_label   = y_col.replace("_", " ").title()
+            return (
+                f"The scatter plot reveals a {strength} {direction} correlation "
+                f"(r = {r_val:.2f}) between {x_label} and {y_label}."
+            )
+
+        # ── Line chart (time series trend) ────────────────────────────────
+        elif chart_type == "line" and x_col and y_col \
+                and x_col in df.columns and y_col in df.columns:
+            df_sorted = df.sort_values(x_col)
+            y_vals    = df_sorted[y_col].dropna()
+            if len(y_vals) < 2:
+                return f"Line chart of {y_col} over {x_col}."
+            peak_val   = float(y_vals.max())
+            trough_val = float(y_vals.min())
+            first_val  = float(y_vals.iloc[0])
+            last_val   = float(y_vals.iloc[-1])
+            trend = (
+                "increasing" if last_val > first_val * 1.02 else
+                "decreasing" if last_val < first_val * 0.98 else
+                "stable"
+            )
+            y_label = y_col.replace("_", " ").title()
+            x_label = x_col.replace("_", " ").title()
+            return (
+                f"Over time, {y_label} shows a {trend} trend, "
+                f"peaking at {peak_val:.2f} and troughing at {trough_val:.2f} "
+                f"(range: {peak_val - trough_val:.2f})."
+            )
+
+        # ── Pie chart (categorical proportions) ───────────────────────────
+        elif chart_type == "pie" and x_col and x_col in df.columns:
+            counts  = df[x_col].value_counts()
+            if len(counts) == 0:
+                return f"Pie chart of {x_col}."
+            top_cat = str(counts.index[0])
+            top_pct = float(counts.iloc[0]) / len(df) * 100
+            x_label = x_col.replace("_", " ").title()
+            return (
+                f"The pie chart shows {x_label} distribution; "
+                f"'{top_cat}' is the largest segment at {top_pct:.1f}%."
+            )
+
+    except Exception as _e:
+        print(f"[chart_summary] Failed for type={chart_type!r} x={x_col!r} y={y_col!r}: {_e}")
+
+    # ── Fallback ──────────────────────────────────────────────────────────
+    if x_col and y_col:
+        return (
+            f"Chart displays the relationship between "
+            f"{x_col.replace('_', ' ').title()} and {y_col.replace('_', ' ').title()}."
+        )
+    if x_col:
+        return f"Chart shows the distribution of {x_col.replace('_', ' ').title()}."
+    return f"Chart shows {chart_type} of the data."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Context builder (used by analyze_dataset)
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_context(df: pd.DataFrame) -> dict:
@@ -982,10 +1153,26 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
     Render Plotly charts from a JSON spec produced by the LLM.
     No exec(), no code generation, no sandbox needed.
     InsightStream owns all chart-rendering logic — the LLM only supplies data.
+
+    Returns charts as a list of dicts:
+        {"fig": <Plotly Figure>, "summary": <str>, "x_col": <str>, "y_col": <str>,
+         "chart_type": <str>, "title": <str>}
     """
     import plotly.express as px
 
     valid_charts = []
+
+    def _make_chart_dict(fig, chart_type, x, y, title):
+        """Wrap a Plotly figure with its natural-language summary."""
+        summary = _generate_chart_summary(chart_type, x, y, df)
+        return {
+            "fig":        fig,
+            "summary":    summary,
+            "x_col":      x or "",
+            "y_col":      y or "",
+            "chart_type": chart_type,
+            "title":      title,
+        }
 
     for chart_spec in spec.get("charts", []):
         try:
@@ -1045,7 +1232,7 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
                 if all(v == 0 for v in first.y if v is not None):
                     raise ValueError("All y values are zero")
 
-            valid_charts.append(fig)
+            valid_charts.append(_make_chart_dict(fig, chart_type, x, y, title))
 
         except Exception as e:
             print(f"[analyzer] Chart spec failed ({e}), trying fallback")
@@ -1053,12 +1240,9 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
             for col in df.select_dtypes(include="number").columns:
                 if not _is_id_column(df, col):
                     try:
-                        fb = px.histogram(
-                            df, x=col,
-                            title=f"{col.replace('_', ' ').title()} Distribution",
-                            nbins=20,
-                        )
-                        valid_charts.append(fb)
+                        fb_title = f"{col.replace('_', ' ').title()} Distribution"
+                        fb = px.histogram(df, x=col, title=fb_title, nbins=20)
+                        valid_charts.append(_make_chart_dict(fb, "histogram", col, None, fb_title))
                         break
                     except Exception:
                         continue
@@ -1078,10 +1262,10 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
         # Histogram of first meaningful numeric column
         if numeric_cols and len(valid_charts) < 2:
             try:
-                col = numeric_cols[0]
-                fb  = px.histogram(df, x=col, nbins=20,
-                                   title=f"{col.replace('_', ' ').title()} Distribution")
-                valid_charts.append(fb)
+                col      = numeric_cols[0]
+                fb_title = f"{col.replace('_', ' ').title()} Distribution"
+                fb       = px.histogram(df, x=col, nbins=20, title=fb_title)
+                valid_charts.append(_make_chart_dict(fb, "histogram", col, None, fb_title))
                 print(f"[analyzer] Fallback chart added: histogram of {col!r}")
             except Exception as _fe:
                 print(f"[analyzer] Fallback histogram failed: {_fe}")
@@ -1092,9 +1276,9 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
                 col     = cat_cols[0]
                 plot_df = df[col].value_counts().head(15).reset_index()
                 plot_df.columns = [col, "count"]
-                fb = px.bar(plot_df, x=col, y="count",
-                            title=f"{col.replace('_', ' ').title()} Breakdown")
-                valid_charts.append(fb)
+                fb_title = f"{col.replace('_', ' ').title()} Breakdown"
+                fb = px.bar(plot_df, x=col, y="count", title=fb_title)
+                valid_charts.append(_make_chart_dict(fb, "bar", col, None, fb_title))
                 print(f"[analyzer] Fallback chart added: bar of {col!r}")
             except Exception as _fe:
                 print(f"[analyzer] Fallback bar chart failed: {_fe}")
@@ -1102,18 +1286,24 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
         # Second numeric histogram if still short
         if len(numeric_cols) > 1 and len(valid_charts) < 2:
             try:
-                col = numeric_cols[1]
-                fb  = px.histogram(df, x=col, nbins=20,
-                                   title=f"{col.replace('_', ' ').title()} Distribution")
-                valid_charts.append(fb)
+                col      = numeric_cols[1]
+                fb_title = f"{col.replace('_', ' ').title()} Distribution"
+                fb       = px.histogram(df, x=col, nbins=20, title=fb_title)
+                valid_charts.append(_make_chart_dict(fb, "histogram", col, None, fb_title))
                 print(f"[analyzer] Fallback chart added: histogram of {col!r}")
             except Exception:
                 pass
 
     print(f"[analyzer] Final chart count: {len(valid_charts)}")
+
+    # Extract raw Plotly figures for downstream compatibility
+    # (validate_results and the post-render guard expect fig objects)
+    raw_figs = [c["fig"] for c in valid_charts]
+
     return {
         "insights":        spec.get("insights", []),
-        "charts":          valid_charts,
+        "charts":          raw_figs,
+        "chart_metas":     valid_charts,   # full dicts with summary, x_col, y_col, etc.
         "recommendations": spec.get("recommendations", []),
         "domain":          spec.get("domain", "General"),
         "title":           spec.get("title", "Data Analysis Report"),
@@ -1133,6 +1323,7 @@ def _validate_results(results: dict, df: pd.DataFrame) -> dict:
     validated = {
         "insights":        results.get("insights", []),
         "charts":          results.get("charts", []),
+        "chart_metas":     results.get("chart_metas", []),
         "recommendations": results.get("recommendations", []),
         "domain":          results.get("domain", "General"),
         "title":           results.get("title", "Data Analysis Report"),

@@ -889,7 +889,7 @@ async def export_dashboard_pdf(
                                 "id":           _ch.get("id", "llm_chart"),
                                 "title":        _ch.get("title", ""),
                                 "image_base64": _b64,
-                                "insight":      "",
+                                "insight":      _ch.get("insight", ""),  # chart summary from analyzer
                             })
                             print(f"[EXPORT] Converted chart: {_ch.get('title')!r}")
                         else:
