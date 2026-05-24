@@ -38,7 +38,7 @@ def _rule_based_header(title: str, body: str) -> str:
     Always produces a header containing at least one verb.
     """
     # If body mentions a huge spread (segmentation finding)
-    spread_match = re.search(r"(\d+)x\s+spread", body, re.IGNORECASE)
+    spread_match = re.search(r"(\d+\.?\d*)x\s+spread", body, re.IGNORECASE)
     if spread_match:
         vs_match = re.search(
             r"(\w[\w\s]+?)\s+(?:cards?|accounts?|customers?).*?vs\.?\s+(\w[\w\s]+?)\s+(?:cards?|accounts?)",
@@ -48,7 +48,8 @@ def _rule_based_header(title: str, body: str) -> str:
             a = vs_match.group(1).strip().title()
             b = vs_match.group(2).strip().title()
             return f"{a} Cards Look Similar to {b} — Until You Check the Limit"
-        return f"A {spread_match.group(1)}x Spread Reveals Hidden Segmentation"
+        spread_val = spread_match.group(1)
+        return f"A {spread_val}x Spread Reveals Hidden Segmentation"
 
     # If body mentions a dominant pattern
     dominant_match = re.search(
@@ -79,7 +80,7 @@ def _rule_based_header(title: str, body: str) -> str:
 
     # Default: always includes a verb
     clean = title.replace("_", " ").title()
-    return f"{clean} Reveals Patterns Worth Investigating"
+    return f"{clean} Shows a Pattern That Warrants Attention"
 
 
 def generate_narrative_headers(

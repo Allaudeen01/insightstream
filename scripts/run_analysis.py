@@ -20,6 +20,13 @@ from pathlib import Path
 ENGINE_DIR = Path(__file__).parent.parent / "engine"
 sys.path.insert(0, str(ENGINE_DIR))
 
+# Load .env from engine/ directory
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ENGINE_DIR / ".env")
+except Exception:
+    pass
+
 
 def _serialize(obj):
     """JSON serializer that handles non-serializable objects."""

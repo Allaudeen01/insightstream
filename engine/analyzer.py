@@ -2663,7 +2663,7 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         _synthesis = _generate_synthesis(
             results.get("insights", []),
             client,
-            GROQ_MODELS["fast"],
+            GROQ_MODELS["smart"],
         )
         results["synthesis"] = _synthesis
         if _synthesis:

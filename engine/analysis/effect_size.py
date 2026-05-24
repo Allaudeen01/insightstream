@@ -131,7 +131,8 @@ def build_effect_size_block(effect_sizes: list[EffectSize]) -> str:
     for e in top3:
         lines.append(
             f"  {e.group_col} explains {e.eta_squared:.0%} of {e.target_col} variance "
-            f"(η²={e.eta_squared:.2f}, F={e.f_statistic:.1f}, p={e.p_value:.4f})"
+            f"(η²={e.eta_squared:.2f}, F-statistic: {e.f_statistic:.1f}, "
+            f"p-value: {e.p_value:.4f})"
         )
     lines.append(
         "INSTRUCTION: Cite these η² values in findings. "
