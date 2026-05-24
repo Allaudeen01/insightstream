@@ -1015,7 +1015,8 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
                      outlier_block: str = "",
                      duplicate_block: str = "",
                      domain: str = "GENERIC_TABULAR",
-                     semantics_block: str = "") -> str:
+                     semantics_block: str = "",
+                     extremum_block: str = "") -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
@@ -1186,6 +1187,7 @@ Available columns: {context["columns"]}
 {duplicate_block}
 {intel_block}
 {semantics_block}
+{extremum_block}
 Dataset summary:
 {context_str}
 """
@@ -1592,18 +1594,112 @@ def validate_recommendation(rec_text: str, df_columns: list,
     return True
 
 
-def _filter_recommendations(recommendations: list, df_columns,
-                            domain: str = "GENERIC_TABULAR",
-                            computed_stats: dict = None) -> list:
+def _build_extremum_facts(df: pd.DataFrame, semantics: dict, store) -> str:
     """
-    Remove recommendations that:
-    1. Contain forbidden keywords (hallucinated health/pandemic/entertainment content)
-    2. Contain financial keywords when the dataset is non-financial
-    3. Contain domain-specific forbidden concepts (e.g., TV ratings for people datasets)
-    4. Do not reference any column name from the actual dataset
-    5. Cite statistics not computable from the actual data (via validate_recommendation)
+    Return a deterministic facts block the LLM must not contradict.
+    For every (categorical_meaningful × monetary/numeric_meaningful) pair,
+    states which group has the highest and lowest mean.
+    """
+    try:
+        from render.metric_filler import fill_metrics
+    except Exception:
+        fill_metrics = None
+
+    lines = []
+    cats = [c for c, s in semantics.items() if s.tag == "categorical_meaningful"]
+    nums = [c for c, s in semantics.items() if s.tag in ("monetary", "numeric_meaningful")]
+
+    for g in cats:
+        for t in nums:
+            if not pd.api.types.is_numeric_dtype(df[t]):
+                continue
+            means = df.groupby(g, dropna=False)[t].mean().dropna()
+            if len(means) < 2:
+                continue
+            top_grp = str(means.idxmax())
+            bot_grp = str(means.idxmin())
+            top_val = float(means.max())
+            bot_val = float(means.min())
+            fmt = "currency" if semantics[t].tag == "monetary" else "auto"
+
+            # Format values directly (store may not have all scoped keys yet)
+            if fmt == "currency":
+                top_str = f"${top_val:,.0f}"
+                bot_str = f"${bot_val:,.0f}"
+            else:
+                top_str = f"{top_val:,.2f}"
+                bot_str = f"{bot_val:,.2f}"
+
+            lines.append(
+                f"- For {g} × {t}: HIGHEST mean is '{top_grp}' ({top_str}); "
+                f"LOWEST mean is '{bot_grp}' ({bot_str})."
+            )
+
+    if not lines:
+        return ""
+    return (
+        "\n\nCANONICAL EXTREMUMS (you MUST NOT contradict these facts):\n"
+        + "\n".join(lines)
+        + "\n\nRule: if you mention 'highest', 'lowest', 'most', 'largest', 'smallest', "
+        "you MUST reference the group named above as the extremum. "
+        "Do NOT claim a different group is the extremum."
+    )
+
+
+def _drop_degenerate_only_insights(
+    insights: list, semantics: dict, df: pd.DataFrame
+) -> list:
+    """
+    Drop any insight whose only column references are categorical_degenerate
+    columns (e.g., card_on_dark_web with one distinct value).
+    Those belong only in data_quality, not in the insights list.
+    """
+    degenerate_cols = {
+        c for c, s in semantics.items() if s.tag == "categorical_degenerate"
+    }
+    if not degenerate_cols:
+        return insights
+
+    all_cols = set(df.columns)
+    kept = []
+    for ins in insights:
+        text = (ins.get("text", "") + " " + ins.get("title", "")).lower()
+        mentioned = {c for c in all_cols if c.lower() in text}
+        if not mentioned:
+            kept.append(ins)
+            continue
+        if mentioned.issubset(degenerate_cols):
+            print(f"[degenerate_filter] Dropped insight about only degenerate cols "
+                  f"{mentioned}: {ins.get('title')!r}")
+            continue
+        kept.append(ins)
+    return kept
+
+
+def _filter_recommendations(
+    recommendations: list,
+    df,
+    semantics: dict = None,
+    domain: str = "GENERIC_TABULAR",
+    computed_stats: dict = None,
+) -> list:
+    """
+    Keep recommendations that reference either:
+      - a column name from df, OR
+      - a value of a categorical_meaningful column.
+    Drop recommendations with no anchor to the data, or with forbidden keywords.
+
+    Phase 3 change: accepts semantics to build a value→column lookup so that
+    recommendations like "investigate Discover users" are kept even though
+    "Discover" is a value of card_brand, not a column name.
     """
     import re as _re
+
+    # Normalise df to get column list
+    if hasattr(df, "columns"):
+        df_columns = list(df.columns)
+    else:
+        df_columns = list(df)
 
     # Load domain-specific forbidden concepts
     try:
@@ -1625,25 +1721,39 @@ def _filter_recommendations(recommendations: list, df_columns,
         col_variants.add(_re.sub(r'([a-z])([A-Z])', r'\1 \2', col).lower())
         col_variants.add(col_lower.replace("_", "").replace(" ", ""))
 
+    # Build value → column lookup for categorical_meaningful only (Phase 3)
+    value_to_col: dict[str, str] = {}
+    if semantics and hasattr(df, "columns"):
+        for col, sem in semantics.items():
+            if sem.tag != "categorical_meaningful":
+                continue
+            try:
+                for val in df[col].dropna().astype(str).unique():
+                    v = val.strip()
+                    if len(v) < 3 or v.isdigit():
+                        continue
+                    value_to_col[v.lower()] = col
+            except Exception:
+                pass
+
     # Determine if financial language is appropriate for this dataset
-    cols_lower_set = {c.lower().replace("_","").replace(" ","") for c in df_columns}
+    cols_lower_set = {c.lower().replace("_", "").replace(" ", "") for c in df_columns}
     dataset_is_financial = any(sig in cols_lower_set for sig in _FINANCIAL_COL_SIGNALS)
 
     # Build the active forbidden list
     active_forbidden = list(_FORBIDDEN_REC_KEYWORDS)
     if not dataset_is_financial:
-        # Add financial terms only for non-financial datasets
         for kw in _FINANCIAL_KEYWORDS:
             if kw not in active_forbidden:
                 active_forbidden.append(kw)
 
     def is_valid(rec: dict) -> bool:
-        # Support both 'text' (LLM format) and 'action' (engine format)
         text = rec.get("text", "") or rec.get("action", "")
         text_lower = text.lower()
         if not text_lower:
             return False
-        # Reject global forbidden keywords (health/pandemic/entertainment-platform)
+
+        # Reject global forbidden keywords
         for kw in active_forbidden:
             if kw in text_lower:
                 kw_stripped = kw.strip().replace(" ", "")
@@ -1651,20 +1761,31 @@ def _filter_recommendations(recommendations: list, df_columns,
                     continue
                 print(f"[filter_recs] Removed — forbidden keyword {kw!r}: {text_lower[:60]}")
                 return False
+
         # Reject domain-specific forbidden concepts
         for kw in domain_forbidden:
             if kw in text_lower:
                 print(f"[filter_recs] Removed — domain concept {kw!r}: {text_lower[:60]}")
                 return False
-        # Reject if no dataset column variant is mentioned
-        if not any(v in text_lower for v in col_variants if len(v) > 2):
-            print(f"[filter_recs] Removed — no column reference: {text_lower[:60]}")
-            return False
+
         # Reject if cited statistics are not computable from the data
-        if computed_stats and not validate_recommendation(text, list(df_columns), computed_stats):
+        if computed_stats and not validate_recommendation(text, df_columns, computed_stats):
             return False
-        print(f"[filter_recs] KEPT (col ref): {text_lower[:80]}")
-        return True
+
+        # Accept if a column name is referenced
+        if any(v in text_lower for v in col_variants if len(v) > 2):
+            print(f"[filter_recs] KEPT (col ref): {text_lower[:80]}")
+            return True
+
+        # Accept if a categorical value is referenced (Phase 3 addition)
+        val_hit = next((v for v in value_to_col if v in text_lower), None)
+        if val_hit:
+            print(f"[filter_recs] KEPT (value ref: '{val_hit}' → "
+                  f"{value_to_col[val_hit]}): {text_lower[:80]}")
+            return True
+
+        print(f"[filter_recs] Removed — no anchor: {text_lower[:60]}")
+        return False
 
     cleaned = [r for r in recommendations if is_valid(r)]
     removed = len(recommendations) - len(cleaned)
@@ -1963,13 +2084,26 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         except Exception as _sbe:
             print(f"[analyzer] Semantics block build failed: {_sbe}")
 
+    # Build extremum facts block (Task 1A — prevents "two highest" contradiction)
+    _extremum_block = ""
+    if semantics:
+        try:
+            from render.metric_store import build_metric_store
+            _store_for_extremum = build_metric_store(df, semantics)
+            _extremum_block = _build_extremum_facts(df, semantics, _store_for_extremum)
+            if _extremum_block:
+                print(f"[analyzer] Extremum facts injected into prompt")
+        except Exception as _ebe:
+            print(f"[analyzer] Extremum block build failed: {_ebe}")
+
     prompt = _generate_prompt(context, quality, domain_risk=domain_risk,
                               intel_block=intel_block,
                               group_block=group_block,
                               outlier_block=outlier_block,
                               duplicate_block=duplicate_block,
                               domain=domain_info.get("category", "GENERIC_TABULAR"),
-                              semantics_block=_semantics_block)
+                              semantics_block=_semantics_block,
+                              extremum_block=_extremum_block)
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
@@ -2096,9 +2230,29 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
 
     # ── 10b. Filter hallucinated recommendations ──────────────────────────
     results["recommendations"] = _filter_recommendations(
-        results.get("recommendations", []), df.columns,
+        results.get("recommendations", []), df,
+        semantics=semantics,
         domain=domain_info.get("category", "GENERIC_TABULAR"),
     )
+
+    # ── 10b2. Phase 3: Drop insights about degenerate-only columns ────────
+    if semantics:
+        results["insights"] = _drop_degenerate_only_insights(
+            results.get("insights", []), semantics, df
+        )
+
+    # ── 10b3. Phase 3: Drop extremum-contradicting insights ───────────────
+    if semantics:
+        try:
+            from analysis.extremum_validator import validate_extremum_claims
+            _kept, _dropped = validate_extremum_claims(
+                results.get("insights", []), df, semantics
+            )
+            for _r in _dropped:
+                print(f"[extremum_validator] {_r}")
+            results["insights"] = _kept
+        except Exception as _eve:
+            print(f"[analyzer] Extremum validation failed: {_eve}")
 
     # ── 10c-10f. Phase 2: Attach all new keys ────────────────────────────
     results = _attach_phase2_keys(results, semantics, coerce_reports,

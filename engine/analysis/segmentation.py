@@ -8,6 +8,7 @@ a finding, gated by minimum sample size.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import pandas as pd
 
@@ -27,6 +28,7 @@ def segment(
     df: pd.DataFrame,
     group_col: str,
     target_col: str,
+    semantics: Optional[dict] = None,
     min_n: int = 30,
     spread_threshold: float = 2.0,
 ) -> Segmentation:
@@ -42,11 +44,20 @@ def segment(
 
     top = g.index[0]
     bot = g.index[-1]
+
+    # Use currency formatting for monetary targets (D2 fix)
+    is_monetary = (
+        semantics is not None
+        and target_col in semantics
+        and semantics[target_col].tag == "monetary"
+    )
+    fmt = "fmt:currency:" if is_monetary else ""
+
     headline = (
         f"{group_col}={top} has the highest mean {target_col} "
-        f"({{{{metric:{target_col}.mean|scope={group_col}={top}}}}}), "
+        f"({{{{{fmt}metric:{target_col}.mean|scope={group_col}={top}}}}}), "
         f"vs {group_col}={bot} at "
-        f"({{{{metric:{target_col}.mean|scope={group_col}={bot}}}}}) — "
+        f"({{{{{fmt}metric:{target_col}.mean|scope={group_col}={bot}}}}}) — "
         f"a {spread:.1f}x spread."
     )
     return Segmentation(
@@ -82,7 +93,9 @@ def auto_segment_all(
         for t in num_cols:
             if not pd.api.types.is_numeric_dtype(df[t]):
                 continue
-            seg = segment(df, g, t, min_n=min_n, spread_threshold=spread_threshold)
+            # Pass semantics so monetary targets get currency formatting
+            seg = segment(df, g, t, semantics=semantics,
+                          min_n=min_n, spread_threshold=spread_threshold)
             if seg.is_significant:
                 findings.append(seg)
 
