@@ -1145,7 +1145,8 @@ The JSON must have these exact keys:
 Rules:
 - Return 5-7 insights with real statistics derived from the data summary below
 - Return EXACTLY 3-4 charts — this field is REQUIRED and must not be empty
-- You MUST include at least one histogram of a numeric column and one bar chart of a categorical column
+- You MUST include at least one histogram of a CONTINUOUS numeric column (e.g., Weekly_Sales, Temperature, Fuel_Price) and one bar chart of a categorical column
+- Do NOT request a histogram of a low-cardinality integer column (e.g., Store 1-45, Holiday_Flag 0/1) — use a bar chart for those instead
 - Return 3-5 recommendations tied to actual findings
 - x_column and y_column must be exact column names from the list below
 - If a column has >50% missing data, mention it in the insight text
@@ -1297,6 +1298,16 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
             if x and _is_id_column(df, x):
                 print(f"[analyzer] Skipping ID column: {x}")
                 raise ValueError(f"Column {x!r} is an ID column — skipping")
+
+            # ── Redirect: histogram of low-cardinality integer → bar chart ─
+            # Store (1-45), Holiday_Flag (0/1), etc. are categorical IDs.
+            # A histogram of them is meaningless; convert to a bar chart.
+            if chart_type == "histogram" and x and x in df.columns:
+                col_nunique = df[x].nunique()
+                if pd.api.types.is_integer_dtype(df[x]) and col_nunique <= 50:
+                    print(f"[analyzer] Redirecting histogram→bar for low-cardinality int {x!r} ({col_nunique} unique)")
+                    chart_type = "bar"
+                    # y stays None → count-based bar
 
             # ── Fix: categorical y can't be aggregated → count-based bar ──
             if y and df[y].dtype in ["object", "category", "string"]:

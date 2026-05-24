@@ -4604,13 +4604,18 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         month_num=("month_num", "first")
                     ).reset_index().sort_values("month_num")
 
-                    # Guard: require at least 6 distinct calendar months to avoid
-                    # generating a meaningless chart from weekly/daily granularity data
-                    # where every row is already a separate period (e.g. Walmart weekly sales).
+                    # Guard 1: require at least 6 distinct calendar months
                     n_distinct_months = pdf_tmp["month_num"].nunique()
                     if n_distinct_months < 6:
-                        print(f"[temporal_fallback] Suppressed — only {n_distinct_months} distinct months (need ≥6)")
+                        print(f"[temporal_fallback] Suppressed — only {n_distinct_months} distinct calendar months (need ≥6)")
                         date_col = None  # prevent chart generation below
+
+                    # Guard 2: suppress when data spans more than 24 YYYY-MM periods
+                    # (multi-year weekly data produces a jagged unreadable line)
+                    n_periods = pdf_tmp["month_period"].nunique() if date_col else 0
+                    if date_col and n_periods > 24:
+                        print(f"[temporal_fallback] Suppressed — {n_periods} monthly periods spans >2 years; chart would be unreadable")
+                        date_col = None
 
                     if len(monthly) >= 2:
                         # Build monthly_data as (period_string, revenue) tuples

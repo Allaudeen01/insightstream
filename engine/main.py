@@ -919,6 +919,23 @@ async def export_dashboard_pdf(
 
         # ── Sanitize payload ──────────────────────────────────────────────
         clean_ai_summary = sanitize_insight(body.ai_summary, max_length=1000)
+
+        # For LLM sessions, populate ai_summary from the stored Key Takeaway
+        # so the Executive Summary page is not blank.
+        if _llm_override and not clean_ai_summary and _insights_to_use:
+            _kt = next(
+                (i.get("text", "") or i.get("description", "")
+                 for i in _insights_to_use
+                 if "key takeaway" in (i.get("title", "") + i.get("description", "")).lower()),
+                None,
+            )
+            if not _kt and _insights_to_use:
+                # Fall back to the first insight text
+                first = _insights_to_use[0]
+                _kt = first.get("text", "") or first.get("description", "")
+            if _kt:
+                clean_ai_summary = sanitize_insight(_kt, max_length=1000)
+                print(f"[EXPORT] ai_summary populated from Key Takeaway: {clean_ai_summary[:80]!r}")
         clean_insights = [
             ins if isinstance(ins, dict) else sanitize_insight(ins, max_length=500)
             for ins in body.insights
