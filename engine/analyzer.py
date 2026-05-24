@@ -424,12 +424,18 @@ def _statistical_tests(df: pd.DataFrame, target_col: str) -> list:
 
 
 def _feature_importance(df: pd.DataFrame, target_col: str,
-                        numeric_cols: list) -> list:
+                        numeric_cols: list,
+                        semantics: dict = None) -> list:
     """
     Train a shallow Decision Tree to get feature importances for target_col.
     Returns top-5 (feature_name, importance) pairs sorted descending.
     Supports both numeric and string binary target columns.
+
+    When semantics is provided, identifier/random_token/degenerate columns
+    are excluded from the feature set so PassengerId etc. don't dominate.
     """
+    _SKIP_TAGS = {"identifier", "random_token", "categorical_degenerate", "free_text"}
+
     try:
         from sklearn.tree import DecisionTreeClassifier
         from sklearn.preprocessing import LabelEncoder
@@ -445,10 +451,18 @@ def _feature_importance(df: pd.DataFrame, target_col: str,
         # Encode categorical columns
         for col in X.select_dtypes(include=["object", "string"]).columns:
             X[col] = LabelEncoder().fit_transform(X[col].astype(str))
-        # Use all numeric columns except the target
-        feature_cols = [c for c in X.select_dtypes(
-            include=["int64", "float64", "int32", "float32"]
-        ).columns if c != target_col]
+
+        # Use numeric columns passed by caller, minus the target,
+        # minus any identifier/random_token/degenerate columns
+        feature_cols = [
+            c for c in X.select_dtypes(
+                include=["int64", "float64", "int32", "float32"]
+            ).columns
+            if c != target_col
+            and (semantics is None
+                 or c not in semantics
+                 or semantics[c].tag not in _SKIP_TAGS)
+        ]
         if not feature_cols:
             return []
         X_feat = X[feature_cols].fillna(0)
@@ -657,7 +671,7 @@ def _duplicate_insight(df: pd.DataFrame) -> str:
         return ""
 
 
-def _build_intel_block(df: pd.DataFrame) -> str:
+def _build_intel_block(df: pd.DataFrame, semantics: dict = None) -> str:
     """
     Run all intelligence modules and return a formatted string to inject
     into the LLM prompt. Returns empty string if no binary target found.
@@ -696,7 +710,7 @@ def _build_intel_block(df: pd.DataFrame) -> str:
         print(f"[INTELLIGENCE] Significant features: {len(stat_tests)}")
 
     # Feature importance
-    importance = _feature_importance(df, target_col, numeric_cols)
+    importance = _feature_importance(df, target_col, numeric_cols, semantics=semantics)
     if importance:
         lines.append(f"\nTop predictors for {target_col} (Decision Tree importance):")
         for feat, imp in importance:
@@ -1711,10 +1725,14 @@ def _filter_recommendations(
     except Exception:
         domain_forbidden = []
 
-    # Build column variant set
+    # Build column variant set — exclude identifier columns so PassengerId,
+    # card_number, etc. cannot anchor a recommendation
     col_variants: set = set()
     for col in df_columns:
         if len(col) <= 2:
+            continue
+        # Skip identifier columns when semantics is available
+        if semantics and col in semantics and semantics[col].tag == "identifier":
             continue
         col_lower = col.lower()
         col_variants.add(col_lower)
@@ -1923,15 +1941,11 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         coerce_reports: dict = {}
         df = df.copy()  # single copy — mutate in place below
         for col in list(df.columns):
-            col_dtype = df[col].dtype
-            # Check for string-like dtypes: object, str (ArrowStringDtype), StringDtype
-            is_string_like = (
-                col_dtype == object
-                or str(col_dtype) in ("str", "string", "large_string")
-                or hasattr(col_dtype, "name") and col_dtype.name in ("str", "string", "object")
-                or pd.api.types.is_string_dtype(col_dtype)
-            )
-            if is_string_like and not pd.api.types.is_numeric_dtype(col_dtype):
+            # Skip if already numeric — nothing to coerce
+            if pd.api.types.is_numeric_dtype(df[col]):
+                continue
+            # Process only string-like columns
+            if pd.api.types.is_string_dtype(df[col]) or df[col].dtype == object:
                 coerced, rpt = coerce_numeric(df[col])
                 if rpt["success_rate"] >= 0.95:
                     df[col] = coerced
@@ -1967,7 +1981,7 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     print(f"[analyzer] Building context with {n_corr} correlation pairs")
 
     # ── 3b. Intelligence modules (anomaly, stats, feature importance) ─────
-    intel_block = _build_intel_block(df)
+    intel_block = _build_intel_block(df, semantics=semantics)
 
     # ── 3c. Group-by, outlier impact, duplicate detection ─────────────────
     # Pass semantics so random_token/identifier columns are excluded as targets
