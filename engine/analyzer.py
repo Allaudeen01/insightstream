@@ -83,7 +83,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 # Bump this whenever the output schema changes (new keys, different semantics).
 # Any cache entry written with an older version is automatically ignored.
-CACHE_VERSION = "v3"   # v1=original, v2=chart_metas, v3=phase2_keys
+CACHE_VERSION = "v4"   # v1=original, v2=chart_metas, v3=phase2_keys, v4=phase4_reasoning
 
 
 def _fingerprint(df: pd.DataFrame) -> str:
@@ -782,17 +782,37 @@ def _build_correlations(df: pd.DataFrame) -> list:
 # Chart summarizer — Julius-style narrative captions for each chart type
 # ─────────────────────────────────────────────────────────────────────────────
 def _generate_chart_summary(chart_type: str, x_col: Optional[str],
-                             y_col: Optional[str], df: pd.DataFrame) -> str:
+                             y_col: Optional[str], df: pd.DataFrame,
+                             semantics: dict = None,
+                             store=None) -> str:
     """
     Generate a Julius-style narrative summary for a chart.
     Returns a multi-sentence paragraph with interpretation and takeaway.
     Used as the caption/insight text below each chart in the PDF report.
+
+    When semantics and store are provided, monetary columns are formatted
+    using MetricStore.format(fmt="currency") for consistent $ formatting.
     """
     import numpy as np
     from scipy.stats import skew
 
-    def fmt(x):
-        return f"{x:,.2f}" if isinstance(x, float) else str(x)
+    def _is_monetary(col):
+        return (semantics is not None
+                and col is not None
+                and col in semantics
+                and semantics[col].tag == "monetary")
+
+    def fmt(v, col=None):
+        """Format a numeric value, using currency format for monetary columns."""
+        if store is not None and col is not None and _is_monetary(col):
+            try:
+                from render.metric_store import MetricKey
+                key = MetricKey(col, "mean")
+                if key in store:
+                    return store.format(key, fmt="currency")
+            except Exception:
+                pass
+        return f"{v:,.2f}" if isinstance(v, float) else str(v)
 
     try:
         # ── 1. Bar chart — categorical counts (no y_col) ──────────────────
@@ -850,17 +870,17 @@ def _generate_chart_summary(chart_type: str, x_col: Optional[str],
 
             if second_val and top_val > second_val * 1.5:
                 return (
-                    f"'{top_cat}' has the highest average {y_col} ({fmt(top_val)}), "
+                    f"'{top_cat}' has the highest average {y_col} ({fmt(top_val, y_col)}), "
                     f"which is significantly higher than other categories. "
                     f"This suggests that {x_col} is a strong predictor of {y_col}."
                 )
             else:
                 second_clause = (
-                    f", followed closely by '{second}' ({fmt(second_val)})"
+                    f", followed closely by '{second}' ({fmt(second_val, y_col)})"
                     if second else ""
                 )
                 return (
-                    f"'{top_cat}' leads with average {y_col} = {fmt(top_val)}"
+                    f"'{top_cat}' leads with average {y_col} = {fmt(top_val, y_col)}"
                     f"{second_clause}. "
                     f"The differences are modest, indicating that other factors "
                     f"may also influence {y_col}."
@@ -1030,7 +1050,9 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
                      duplicate_block: str = "",
                      domain: str = "GENERIC_TABULAR",
                      semantics_block: str = "",
-                     extremum_block: str = "") -> str:
+                     extremum_block: str = "",
+                     effect_size_block: str = "",
+                     domain_taxonomy_block: str = "") -> str:
     """
     Ask the LLM for a JSON spec, not Python code.
     InsightStream renders the charts itself from the spec — zero exec() risk.
@@ -1168,14 +1190,21 @@ Rules:
   correlation with Temperature (r=0.97)." Do NOT invent correlations — use only the
   exact values from the injected list. If a top pair involves a store/ID column
   (e.g., Store vs Weekly_Sales), still report it.
-- Rule 10 — Recommendations (MANDATORY column references): Generate 3-5 actionable
-  recommendations. Each recommendation MUST contain at least one actual column name
-  from the dataset (e.g., Weekly_Sales, Store, Temperature, Holiday_Flag, Date,
-  Fuel_Price, CPI, Unemployment). Recommendations without any column name will be
-  rejected. Do NOT use generic phrases like "investigate underlying drivers" or
-  "optimise operations". Be specific with concrete numbers from the data.
-  Example: "Increase inventory in May to prepare for the June peak in Weekly_Sales
-  (historical lift 72%)."
+- Rule 10 — Recommendations (MANDATORY structure): Generate 3-5 recommendations.
+  Each MUST follow this exact structure:
+  1. Start with an imperative verb (Audit, Segment, Investigate, Build, Flag, Monitor, etc.)
+  2. Name the specific column(s) involved
+  3. State the specific action with a concrete number from the data
+  4. Assign an owner: "Owner: [Team Name]"
+  5. State a timeframe: "Timeframe: [duration]"
+  Example:
+  "Audit the data pipeline to confirm whether prepaid balances are stored in
+  credit_limit. The 288x spread (prepaid mean=$64 vs debit mean=$18,558) suggests
+  a data-modeling artifact. Owner: Data Engineering. Timeframe: 2 weeks."
+  FORBIDDEN phrases: "investigate underlying drivers", "optimise operations",
+  "consider reviewing", "may want to", "could potentially", "it is recommended",
+  "should be explored", "further analysis".
+  Every recommendation must be actionable by a named team within a named timeframe.
 - Rule 11 — Domain-appropriate recommendations only. Each recommendation must be
   directly derived from the columns and statistics in THIS dataset. Do NOT include
   any recommendation that mentions:
@@ -1195,14 +1224,20 @@ Few-shot examples of correct recommendations (adapt to this dataset's columns):
 Do NOT return insights with empty or missing text fields.
 Do NOT return recommendations that mention topics unrelated to the dataset columns.
 {domain_forbidden_block}
-- Key Takeaway (MANDATORY): The FIRST insight in the list must be titled "Key Takeaway"
-  and answer: "If the user remembers only one thing from this report, what should it be?"
-  It must be a single, striking sentence with the most important finding and a specific number.
-  Example: "93% of records are actors — all popularity trends are actor-driven; small
-  departments like Visual Effects appear popular only due to single outliers."
-  Also ensure that all 3-5 recommendations are strictly about the dataset at hand.
-  Do not import recommendations from other contexts (e.g., do not suggest streaming
-  platform features for a celebrity dataset, or health protocols for a sales dataset).
+- Key Takeaway (MANDATORY): The FIRST insight in the list must be titled "Key Takeaway".
+  It MUST reference at least 2 other findings by their exact title and state the
+  through-line that connects them. Format:
+  "[Finding A title] and [Finding B title] both point to [through-line]:
+  [one striking sentence with a specific number]."
+  Do NOT restate a single finding. Do NOT use generic phrases.
+  FORBIDDEN phrases in Key Takeaway: "these findings reveal", "important patterns",
+  "multiple dimensions", "in conclusion", "overall", "it is worth noting",
+  "the data shows", "analysis reveals".
+  Example: "The 288x spread in credit_limit across card_type and the 96%
+  outlier concentration in Credit cards both point to the same root cause:
+  prepaid cards are stored-value products, not credit lines, and must be
+  segmented before any credit-risk modeling."
+  The Key Takeaway must make the reader say "I didn't know that."
 - Rule 12 — Key Takeaway must be the most surprising or impactful finding.
   Do NOT choose a trivial fact (e.g., "Visa has the highest mean credit limit by a small margin").
   Instead, choose a finding that reveals a LARGE disparity, an outlier-driven pattern,
@@ -1223,6 +1258,8 @@ Available columns: {context["columns"]}
 {intel_block}
 {semantics_block}
 {extremum_block}
+{effect_size_block}
+{domain_taxonomy_block}
 Dataset summary:
 {context_str}
 """
@@ -1251,7 +1288,8 @@ def _is_id_column(df: pd.DataFrame, col: str) -> bool:
     return False
 
 
-def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
+def _render_from_spec(spec: dict, df: pd.DataFrame,
+                      semantics: dict = None, store=None) -> dict:
     """
     Render Plotly charts from a JSON spec produced by the LLM.
     No exec(), no code generation, no sandbox needed.
@@ -1267,7 +1305,8 @@ def _render_from_spec(spec: dict, df: pd.DataFrame) -> dict:
 
     def _make_chart_dict(fig, chart_type, x, y, title):
         """Wrap a Plotly figure with its natural-language summary."""
-        summary = _generate_chart_summary(chart_type, x, y, df)
+        summary = _generate_chart_summary(chart_type, x, y, df,
+                                          semantics=semantics, store=store)
         return {
             "fig":        fig,
             "summary":    summary,
@@ -1691,6 +1730,57 @@ def _build_extremum_facts(df: pd.DataFrame, semantics: dict, store) -> str:
     )
 
 
+# ── Domain taxonomy injection (Task 8.4) ─────────────────────────────────────
+# When the dataset is classified as FINANCE/CREDIT, inject semantic context
+# explaining how credit_limit semantics differ across card types.
+
+_DOMAIN_TAXONOMY: dict[str, str] = {
+    "FINANCE_CREDIT": """
+=== FINANCE/CREDIT DOMAIN TAXONOMY ===
+credit_limit semantics differ by card_type:
+  - Prepaid cards: credit_limit = stored value loaded by cardholder.
+    A low or zero credit_limit is EXPECTED and is NOT a credit-risk signal.
+    Do NOT write "prepaid cards have low credit limits" as a risk finding.
+    Write: "prepaid cards store value differently — credit_limit reflects
+    loaded balance, not a credit line. This is a DATA-MODELING ARTIFACT."
+  - Standard debit cards: credit_limit = overdraft facility or not applicable.
+  - Credit cards: credit_limit = approved revolving credit line.
+Any cross-type comparison of credit_limit means is a DATA-MODELING ARTIFACT,
+not a business finding, unless the report explicitly segments by card_type first.
+=== END TAXONOMY ===
+""",
+}
+
+_FINANCE_TAXONOMY_DOMAINS = frozenset({
+    "FINANCE", "CREDIT", "FINANCE_CREDIT", "ECOMMERCE_TRANSACTIONS",
+    "BANKING", "INSURANCE",
+})
+
+_FINANCE_TAXONOMY_COLS = frozenset({"credit_limit", "card_type", "card_brand"})
+
+
+def _inject_domain_taxonomy(
+    domain_info: dict,
+    df: "pd.DataFrame",
+    semantics: dict,
+) -> str:
+    """
+    Return a domain taxonomy block to inject into the LLM prompt.
+    Returns empty string when the domain or columns don't match.
+    """
+    category = (domain_info.get("category") or "").upper().replace(" ", "_")
+    if category not in _FINANCE_TAXONOMY_DOMAINS:
+        return ""
+
+    # Only inject when at least one credit-related column is present
+    cols_lower = {c.lower() for c in df.columns}
+    has_credit_cols = any(c in cols_lower for c in _FINANCE_TAXONOMY_COLS)
+    if not has_credit_cols:
+        return ""
+
+    return _DOMAIN_TAXONOMY["FINANCE_CREDIT"]
+
+
 def _drop_degenerate_only_insights(
     insights: list, semantics: dict, df: pd.DataFrame
 ) -> list:
@@ -1845,7 +1935,10 @@ def _filter_recommendations(
 
 def _attach_phase2_keys(results: dict, semantics: dict, coerce_reports: dict,
                          segmentations: list, hypotheses: list,
-                         unit_notes: list, df: "pd.DataFrame") -> dict:
+                         unit_notes: list, df: "pd.DataFrame",
+                         limitations: list = None,
+                         effect_sizes: list = None,
+                         outlier_profile=None) -> dict:
     """
     Attach all Phase 2 keys to a results dict (works for both LLM and safe_fallback paths).
     Mutates and returns results.
@@ -1885,6 +1978,37 @@ def _attach_phase2_keys(results: dict, semantics: dict, coerce_reports: dict,
 
     # Unit-of-analysis notes
     results["unit_notes"] = unit_notes
+
+    # Limitations (Phase 4 — Task 8.3)
+    results["limitations"] = [
+        {"concept": l.missing_concept, "impact": l.missing_impact}
+        for l in (limitations or [])
+    ]
+
+    # Effect sizes (Phase 4 — Task 8.1)
+    results["effect_sizes"] = [
+        {
+            "group_col":    e.group_col,
+            "target_col":   e.target_col,
+            "eta_squared":  e.eta_squared,
+            "f_statistic":  e.f_statistic,
+            "p_value":      e.p_value,
+            "is_significant": e.is_significant,
+        }
+        for e in (effect_sizes or [])
+    ]
+
+    # Outlier profile (Phase 4 — Task 8.2)
+    if outlier_profile is not None:
+        results["outlier_profile"] = {
+            "n_outliers":    outlier_profile.n_outliers,
+            "pct_of_total":  outlier_profile.pct_of_total,
+            "modal_profile": outlier_profile.modal_profile,
+            "modal_pct":     outlier_profile.modal_pct,
+            "narrative":     outlier_profile.narrative,
+        }
+    else:
+        results["outlier_profile"] = None
 
     # Promote segmentations to findings (prepend to insights)
     try:
@@ -2141,6 +2265,87 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         except Exception as _ebe:
             print(f"[analyzer] Extremum block build failed: {_ebe}")
 
+    # ── 3g. Phase 4: Effect sizes, outlier profile, limitations, domain taxonomy ──
+
+    # Build MetricStore once — reused by chart summaries and effect size block
+    _metric_store = None
+    if semantics:
+        try:
+            from render.metric_store import build_metric_store as _bms
+            _metric_store = _bms(df, semantics)
+        except Exception as _mse:
+            print(f"[analyzer] MetricStore build failed: {_mse}")
+
+    # Effect sizes (Task 8.1)
+    _effect_sizes = []
+    _effect_size_block = ""
+    if semantics:
+        try:
+            from analysis.effect_size import compute_effect_sizes, build_effect_size_block
+            _effect_sizes = compute_effect_sizes(df, semantics)
+            _effect_size_block = build_effect_size_block(_effect_sizes)
+            if _effect_size_block:
+                print(f"[analyzer] Effect sizes: top η²={_effect_sizes[0].eta_squared:.3f} "
+                      f"({_effect_sizes[0].group_col}×{_effect_sizes[0].target_col})")
+        except Exception as _ese:
+            print(f"[analyzer] Effect size computation failed: {_ese}")
+
+    # Outlier profile (Task 8.2)
+    # _detect_anomalies returns (scores, anomaly_indices) where anomaly_indices
+    # is a list of integer row positions from df.index[preds == -1].
+    _outlier_profile = None
+    _outlier_profile_block = ""
+    if semantics:
+        try:
+            from analysis.outlier_profile import profile_outliers, build_outlier_profile_block
+            # Re-run anomaly detection to get indices (intel_block already ran it,
+            # but didn't expose the indices — run again with same params)
+            _anom_numeric_cols = [
+                c for c in df.select_dtypes(include="number").columns
+                if c not in {"id", "client_id"}
+                and not _is_id_column(df, c)
+                and semantics.get(c) is not None
+                and semantics[c].tag not in {"identifier", "random_token",
+                                              "categorical_degenerate", "free_text"}
+            ]
+            if len(_anom_numeric_cols) >= 2:
+                _, _anom_indices = _detect_anomalies(df, _anom_numeric_cols)
+                if _anom_indices:
+                    _outlier_profile = profile_outliers(df, semantics, _anom_indices)
+                    _outlier_profile_block = build_outlier_profile_block(_outlier_profile)
+                    if _outlier_profile_block:
+                        print(f"[analyzer] Outlier profile: {_outlier_profile.narrative[:80]}")
+        except Exception as _ope:
+            print(f"[analyzer] Outlier profile failed: {_ope}")
+
+    # Limitations (Task 8.3)
+    _limitations = []
+    if semantics:
+        try:
+            from analysis.limitations import detect_limitations
+            _domain_for_lim = domain_info.get("category", "")
+            _limitations = detect_limitations(df, semantics, domain=_domain_for_lim)
+            print(f"[analyzer] Limitations: {len(_limitations)} detected")
+        except Exception as _lme:
+            print(f"[analyzer] Limitations detection failed: {_lme}")
+
+    # Domain taxonomy injection (Task 8.4)
+    _domain_taxonomy_block = ""
+    if semantics:
+        try:
+            _domain_taxonomy_block = _inject_domain_taxonomy(
+                domain_info, df, semantics
+            )
+            if _domain_taxonomy_block:
+                print(f"[analyzer] Domain taxonomy injected for "
+                      f"{domain_info.get('category')!r}")
+        except Exception as _dte:
+            print(f"[analyzer] Domain taxonomy injection failed: {_dte}")
+
+    # Replace generic outlier_block with the richer outlier profile block when available
+    if _outlier_profile_block:
+        outlier_block = _outlier_profile_block
+
     prompt = _generate_prompt(context, quality, domain_risk=domain_risk,
                               intel_block=intel_block,
                               group_block=group_block,
@@ -2148,7 +2353,9 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                               duplicate_block=duplicate_block,
                               domain=domain_info.get("category", "GENERIC_TABULAR"),
                               semantics_block=_semantics_block,
-                              extremum_block=_extremum_block)
+                              extremum_block=_extremum_block,
+                              effect_size_block=_effect_size_block,
+                              domain_taxonomy_block=_domain_taxonomy_block)
 
     # ── 5. Call Groq API ──────────────────────────────────────────────────
     try:
@@ -2162,7 +2369,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         print("[analyzer] GROQ_API_KEY not set — returning safe fallback")
         result = _safe_fallback(df)
         result = _attach_phase2_keys(result, semantics, coerce_reports,
-                                     segmentations, hypotheses, unit_notes, df)
+                                     segmentations, hypotheses, unit_notes, df,
+                                     limitations=_limitations,
+                                     effect_sizes=_effect_sizes,
+                                     outlier_profile=_outlier_profile)
         return result
 
     client = Groq(api_key=api_key)
@@ -2217,7 +2427,10 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         print(f"[analyzer] Groq failed after 2 attempts ({last_error}) — safe fallback")
         result = _safe_fallback(df)
         result = _attach_phase2_keys(result, semantics, coerce_reports,
-                                     segmentations, hypotheses, unit_notes, df)
+                                     segmentations, hypotheses, unit_notes, df,
+                                     limitations=_limitations,
+                                     effect_sizes=_effect_sizes,
+                                     outlier_profile=_outlier_profile)
         return result
 
     # ── 6. Parse JSON response ────────────────────────────────────────────
@@ -2244,11 +2457,14 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
             print(f"[analyzer] JSON retry also failed: {retry_err} — safe fallback")
             result = _safe_fallback(df)
             result = _attach_phase2_keys(result, semantics, coerce_reports,
-                                         segmentations, hypotheses, unit_notes, df)
+                                         segmentations, hypotheses, unit_notes, df,
+                                         limitations=_limitations,
+                                         effect_sizes=_effect_sizes,
+                                         outlier_profile=_outlier_profile)
             return result
 
     # ── 7. Render charts from spec (no exec) ─────────────────────────────
-    results = _render_from_spec(spec, df)
+    results = _render_from_spec(spec, df, semantics=semantics, store=_metric_store)
     print(f"[analyzer] Rendered {len(results['charts'])} charts, "
           f"{len(results['insights'])} insights")
 
@@ -2350,9 +2566,12 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
         except Exception as _kte:
             print(f"[analyzer] Key Takeaway override failed: {_kte}")
 
-    # ── 10c-10f. Phase 2: Attach all new keys ────────────────────────────
+    # ── 10c-10f. Phase 2+4: Attach all new keys ─────────────────────────
     results = _attach_phase2_keys(results, semantics, coerce_reports,
-                                   segmentations, hypotheses, unit_notes, df)
+                                   segmentations, hypotheses, unit_notes, df,
+                                   limitations=_limitations,
+                                   effect_sizes=_effect_sizes,
+                                   outlier_profile=_outlier_profile)
 
     # ── 11. Cache successful result ───────────────────────────────────────
     _cache_set(fp, results)
