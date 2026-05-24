@@ -735,25 +735,94 @@ def _build_correlations(df: pd.DataFrame) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Chart summarizer — generates natural-language captions for each chart type
+# Chart summarizer — Julius-style narrative captions for each chart type
 # ─────────────────────────────────────────────────────────────────────────────
 def _generate_chart_summary(chart_type: str, x_col: Optional[str],
                              y_col: Optional[str], df: pd.DataFrame) -> str:
     """
-    Generate a natural-language summary sentence for a rendered chart.
+    Generate a Julius-style narrative summary for a chart.
+    Returns a multi-sentence paragraph with interpretation and takeaway.
     Used as the caption/insight text below each chart in the PDF report.
-
-    Supports: histogram, bar, scatter, line, pie.
-    Falls back to a generic description for unknown types.
     """
     import numpy as np
-    try:
-        from scipy.stats import skew as _skew
-    except ImportError:
-        _skew = None
+    from scipy.stats import skew
+
+    def fmt(x):
+        return f"{x:,.2f}" if isinstance(x, float) else str(x)
 
     try:
-        # ── Histogram (distribution of a numeric column) ──────────────────
+        # ── 1. Bar chart — categorical counts (no y_col) ──────────────────
+        if chart_type == "bar" and x_col and not y_col and x_col in df.columns:
+            counts    = df[x_col].value_counts()
+            total     = len(df)
+            top_cat   = str(counts.index[0])
+            top_pct   = float(counts.iloc[0]) / total * 100
+            top_count = int(counts.iloc[0])
+
+            if top_pct > 80:
+                # Dominant category — list next few
+                other_counts = counts.iloc[1:6]
+                other_parts  = [
+                    f"{cat} ({cnt:,}, {cnt/total*100:.1f}%)"
+                    for cat, cnt in other_counts.items()
+                ]
+                others_text = ", ".join(other_parts[:3])
+                if len(other_counts) > 3:
+                    others_text += f", and {len(other_counts) - 3} more"
+
+                if len(counts) <= 6:
+                    dist_text = "The remaining categories are: " + ", ".join(
+                        f"{c} ({v:,}, {v/total*100:.1f}%)"
+                        for c, v in counts.iloc[1:].items()
+                    )
+                else:
+                    dist_text = f"There are {len(counts)} distinct categories in total."
+
+                takeaway = (
+                    f"Any analysis of {x_col} will be dominated by '{top_cat}' "
+                    f"– conclusions about the whole dataset largely reflect this segment."
+                )
+                return (
+                    f"**{top_cat} dominates {x_col}** – {top_cat} accounts for "
+                    f"{top_pct:.1f}% of records ({top_count:,} out of {total:,}). "
+                    f"{others_text}. {dist_text} {takeaway}"
+                )
+            else:
+                top5_pct = float(counts.iloc[:5].sum()) / total * 100
+                return (
+                    f"The most common {x_col} is '{top_cat}' with {top_count:,} records "
+                    f"({top_pct:.1f}%). The distribution is relatively balanced, with the "
+                    f"top 5 categories making up {top5_pct:.1f}% of the data."
+                )
+
+        # ── 2. Bar chart — aggregated numeric (y_col present) ─────────────
+        if chart_type == "bar" and x_col and y_col \
+                and x_col in df.columns and y_col in df.columns:
+            agg        = df.groupby(x_col)[y_col].mean().sort_values(ascending=False)
+            top_cat    = str(agg.index[0])
+            top_val    = float(agg.iloc[0])
+            second     = str(agg.index[1])   if len(agg) > 1 else None
+            second_val = float(agg.iloc[1])  if len(agg) > 1 else None
+
+            if second_val and top_val > second_val * 1.5:
+                return (
+                    f"'{top_cat}' has the highest average {y_col} ({fmt(top_val)}), "
+                    f"which is significantly higher than other categories. "
+                    f"This suggests that {x_col} is a strong predictor of {y_col}."
+                )
+            else:
+                second_clause = (
+                    f", followed closely by '{second}' ({fmt(second_val)})"
+                    if second else ""
+                )
+                return (
+                    f"'{top_cat}' leads with average {y_col} = {fmt(top_val)}"
+                    f"{second_clause}. "
+                    f"The differences are modest, indicating that other factors "
+                    f"may also influence {y_col}."
+                )
+
+        # ── 3. Histogram — distribution ───────────────────────────────────
         if chart_type == "histogram" and x_col and x_col in df.columns:
             data = df[x_col].dropna()
             if len(data) == 0:
@@ -763,146 +832,111 @@ def _generate_chart_summary(chart_type: str, x_col: Optional[str],
             min_val    = float(data.min())
             max_val    = float(data.max())
 
-            # Skewness
-            if _skew is not None and len(data) >= 3:
-                skewness = float(_skew(data))
-                if skewness > 1:
-                    shape = "right-skewed"
-                elif skewness < -1:
-                    shape = "left-skewed"
-                else:
-                    shape = "approximately symmetric"
+            skewness = float(skew(data)) if len(data) >= 3 else 0.0
+            if skewness > 1:
+                shape          = "right-skewed"
+                interpretation = "Most values are concentrated on the lower end, with a long tail of high values."
+            elif skewness < -1:
+                shape          = "left-skewed"
+                interpretation = "Most values are concentrated on the higher end, with a long tail of low values."
             else:
-                diff = mean_val - median_val
-                if abs(diff) < 0.05 * max(abs(mean_val), 1):
-                    shape = "approximately symmetric"
-                elif diff > 0:
-                    shape = "right-skewed"
-                else:
-                    shape = "left-skewed"
+                shape          = "approximately symmetric"
+                interpretation = "The data is evenly spread around the centre."
 
-            # Outliers via IQR
             q1  = float(data.quantile(0.25))
             q3  = float(data.quantile(0.75))
             iqr = q3 - q1
             outlier_count = int(((data < q1 - 1.5 * iqr) | (data > q3 + 1.5 * iqr)).sum())
-            outlier_note  = f" with {outlier_count} outliers beyond the whiskers" if outlier_count > 0 else ""
-
-            label = x_col.replace("_", " ").title()
+            outlier_note  = (
+                f" There are {outlier_count} potential outliers beyond the whiskers."
+                if outlier_count > 0 else ""
+            )
             return (
-                f"The distribution of {label} is {shape} "
+                f"The distribution of {x_col} is {shape} "
                 f"(mean = {mean_val:.2f}, median = {median_val:.2f}), "
-                f"ranging from {min_val:.2f} to {max_val:.2f}{outlier_note}."
+                f"ranging from {min_val:.2f} to {max_val:.2f}. "
+                f"{interpretation}{outlier_note}"
             )
 
-        # ── Bar chart (categorical counts or aggregated values) ───────────
-        elif chart_type == "bar" and x_col and x_col in df.columns:
-            if y_col and y_col in df.columns:
-                # Aggregated bar: describe top category by y value
-                grp = df.groupby(x_col)[y_col].sum().sort_values(ascending=False)
-                if len(grp) == 0:
-                    return f"Bar chart of {y_col} by {x_col}."
-                top_cat = str(grp.index[0])
-                top_val = float(grp.iloc[0])
-                total   = float(grp.sum())
-                pct     = top_val / total * 100 if total > 0 else 0
-                x_label = x_col.replace("_", " ").title()
-                y_label = y_col.replace("_", " ").title()
-                if pct > 50:
-                    return (
-                        f"The {x_label} category is dominated by '{top_cat}', "
-                        f"accounting for {pct:.1f}% of total {y_label}."
-                    )
-                else:
-                    return (
-                        f"The most common {x_label} by {y_label} is '{top_cat}' "
-                        f"({pct:.1f}%), with a diverse distribution across categories."
-                    )
-            else:
-                # Count-based bar
-                counts  = df[x_col].value_counts()
-                if len(counts) == 0:
-                    return f"No data for {x_col}."
-                top_cat = str(counts.index[0])
-                top_pct = float(counts.iloc[0]) / len(df) * 100
-                x_label = x_col.replace("_", " ").title()
-                if top_pct > 50:
-                    return (
-                        f"The {x_label} category is dominated by '{top_cat}', "
-                        f"accounting for {top_pct:.1f}% of records."
-                    )
-                else:
-                    return (
-                        f"The most common {x_label} is '{top_cat}' "
-                        f"({top_pct:.1f}% of records), with a diverse distribution."
-                    )
-
-        # ── Scatter plot (correlation between two numeric columns) ─────────
-        elif chart_type == "scatter" and x_col and y_col \
+        # ── 4. Scatter plot — correlation ─────────────────────────────────
+        if chart_type == "scatter" and x_col and y_col \
                 and x_col in df.columns and y_col in df.columns:
             pair = df[[x_col, y_col]].dropna()
             if len(pair) < 5:
                 return f"Scatter plot of {y_col} vs {x_col}."
-            r_val   = float(pair[x_col].corr(pair[y_col]))
-            abs_r   = abs(r_val)
-            strength  = "strong" if abs_r > 0.7 else "moderate" if abs_r > 0.3 else "weak"
-            direction = "positive" if r_val > 0 else "negative"
-            x_label   = x_col.replace("_", " ").title()
-            y_label   = y_col.replace("_", " ").title()
+            corr     = float(pair[x_col].corr(pair[y_col]))
+            abs_corr = abs(corr)
+            if abs_corr > 0.7:
+                strength    = "strong"
+                implication = "This suggests a reliable predictive relationship."
+            elif abs_corr > 0.3:
+                strength    = "moderate"
+                implication = "There is a meaningful but not deterministic association."
+            else:
+                strength    = "weak"
+                implication = "The two variables move largely independently."
+            direction = "positive" if corr > 0 else "negative"
             return (
                 f"The scatter plot reveals a {strength} {direction} correlation "
-                f"(r = {r_val:.2f}) between {x_label} and {y_label}."
+                f"(r = {corr:.2f}) between {x_col} and {y_col}. {implication}"
             )
 
-        # ── Line chart (time series trend) ────────────────────────────────
-        elif chart_type == "line" and x_col and y_col \
+        # ── 5. Line chart — time series trend ─────────────────────────────
+        if chart_type == "line" and x_col and y_col \
                 and x_col in df.columns and y_col in df.columns:
             df_sorted = df.sort_values(x_col)
             y_vals    = df_sorted[y_col].dropna()
             if len(y_vals) < 2:
-                return f"Line chart of {y_col} over {x_col}."
-            peak_val   = float(y_vals.max())
-            trough_val = float(y_vals.min())
+                return f"No data for time series of {y_col} over {x_col}."
             first_val  = float(y_vals.iloc[0])
             last_val   = float(y_vals.iloc[-1])
-            trend = (
-                "increasing" if last_val > first_val * 1.02 else
-                "decreasing" if last_val < first_val * 0.98 else
-                "stable"
-            )
-            y_label = y_col.replace("_", " ").title()
-            x_label = x_col.replace("_", " ").title()
+            peak_val   = float(y_vals.max())
+            trough_val = float(y_vals.min())
+            if last_val > first_val:
+                trend      = "increasing"
+                trend_pct  = (last_val - first_val) / first_val * 100 if first_val != 0 else 0
+                takeaway   = f"This indicates growth over the period ({trend_pct:.1f}% change)."
+            elif last_val < first_val:
+                trend      = "decreasing"
+                trend_pct  = (first_val - last_val) / first_val * 100 if first_val != 0 else 0
+                takeaway   = f"This indicates a decline over the period ({trend_pct:.1f}% change)."
+            else:
+                trend    = "stable"
+                takeaway = "The series shows no clear directional movement."
             return (
-                f"Over time, {y_label} shows a {trend} trend, "
-                f"peaking at {peak_val:.2f} and troughing at {trough_val:.2f} "
-                f"(range: {peak_val - trough_val:.2f})."
+                f"Over time, {y_col} has a {trend} trend, "
+                f"peaking at {peak_val:.2f} and troughing at {trough_val:.2f}. "
+                f"{takeaway}"
             )
 
-        # ── Pie chart (categorical proportions) ───────────────────────────
-        elif chart_type == "pie" and x_col and x_col in df.columns:
+        # ── 6. Pie chart ──────────────────────────────────────────────────
+        if chart_type == "pie" and x_col and x_col in df.columns:
             counts  = df[x_col].value_counts()
+            total   = len(df)
             if len(counts) == 0:
                 return f"Pie chart of {x_col}."
             top_cat = str(counts.index[0])
-            top_pct = float(counts.iloc[0]) / len(df) * 100
-            x_label = x_col.replace("_", " ").title()
-            return (
-                f"The pie chart shows {x_label} distribution; "
-                f"'{top_cat}' is the largest segment at {top_pct:.1f}%."
-            )
+            top_pct = float(counts.iloc[0]) / total * 100
+            if top_pct > 80:
+                return (
+                    f"**{top_cat} overwhelmingly dominates** – {top_pct:.1f}% of records. "
+                    f"All other categories combined represent less than {100 - top_pct:.1f}%."
+                )
+            else:
+                return (
+                    f"The distribution of {x_col} is led by '{top_cat}' ({top_pct:.1f}%), "
+                    f"but other categories also hold substantial shares."
+                )
 
     except Exception as _e:
         print(f"[chart_summary] Failed for type={chart_type!r} x={x_col!r} y={y_col!r}: {_e}")
 
-    # ── Fallback ──────────────────────────────────────────────────────────
+    # ── 7. Generic fallback ───────────────────────────────────────────────
     if x_col and y_col:
-        return (
-            f"Chart displays the relationship between "
-            f"{x_col.replace('_', ' ').title()} and {y_col.replace('_', ' ').title()}."
-        )
+        return f"Relationship between {x_col} and {y_col}."
     if x_col:
-        return f"Chart shows the distribution of {x_col.replace('_', ' ').title()}."
-    return f"Chart shows {chart_type} of the data."
+        return f"Distribution of {x_col}."
+    return f"Chart showing {chart_type} of the data."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
