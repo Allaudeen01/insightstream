@@ -1781,6 +1781,73 @@ def _inject_domain_taxonomy(
     return _DOMAIN_TAXONOMY["FINANCE_CREDIT"]
 
 
+def _generate_synthesis(findings: list, client, model: str) -> str:
+    """
+    Make a second Groq LLM call to produce a cross-finding synthesis paragraph.
+
+    Uses the top-8 findings as input and asks the LLM to identify the through-line
+    connecting them. Returns empty string on any failure — never raises.
+
+    Parameters
+    ----------
+    findings : list[dict]
+        List of insight dicts with 'title' and 'text' keys.
+    client : Groq
+        Initialized Groq client.
+    model : str
+        Model name to use (should be GROQ_MODELS["fast"] to preserve rate limits).
+
+    Returns
+    -------
+    str
+        Plain prose paragraph (no headers, bullets, or JSON).
+        Empty string when len(findings) < 2 or on any API/parse error.
+    """
+    if len(findings) < 2:
+        return ""
+
+    top_findings = findings[:8]
+    n = len(top_findings)
+    findings_text = "\n\n".join(
+        f"Finding {i + 1}: {f.get('title', '')}\n{f.get('text', '')}"
+        for i, f in enumerate(top_findings)
+    )
+
+    prompt = (
+        f"You are a senior data analyst writing the synthesis section of a report.\n"
+        f"Below are {n} findings from a dataset analysis.\n\n"
+        f"{findings_text}\n\n"
+        f"Write a 3-5 sentence synthesis paragraph. Rules:\n"
+        f"- Name specific columns, values, and statistics "
+        f"(use the effect size rankings if present)\n"
+        f"- Lead with the highest η² pair or the finding with the largest spread ratio\n"
+        f"- Contrast the top finding against a weaker one explicitly\n"
+        f"- End with one implication for analysis approach (e.g., "
+        f"\"segment before modeling\", \"exclude outliers before computing means\")\n"
+        f"- FORBIDDEN phrases: \"these findings reveal\", \"important patterns\", "
+        f"\"multiple dimensions\", \"in conclusion\", \"overall\", "
+        f"\"it is worth noting\"\n\n"
+        f"Return ONLY the paragraph text — no headers, no bullet points, no JSON."
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        text = resp.choices[0].message.content.strip()
+        # Sanity check: must be plain prose (no JSON braces, no bullet markers)
+        if text.startswith("{") or text.startswith("["):
+            print("[synthesis] Response looks like JSON — discarding")
+            return ""
+        return text
+    except Exception as e:
+        print(f"[analyzer] Synthesis pass failed: {e}")
+        return ""
+
+
 def _drop_degenerate_only_insights(
     insights: list, semantics: dict, df: pd.DataFrame
 ) -> list:
@@ -2015,6 +2082,7 @@ def _attach_phase2_keys(results: dict, semantics: dict, coerce_reports: dict,
         from analysis.segmentation import impact_for
         from render.metric_store import build_metric_store
         from render.metric_filler import fill_metrics
+        from render.prose_cleaner import clean_prose_artifacts  # Task 8.7
 
         _store = build_metric_store(df, semantics) if semantics else None
         seg_findings = []
@@ -2025,6 +2093,8 @@ def _attach_phase2_keys(results: dict, semantics: dict, coerce_reports: dict,
                     headline = fill_metrics(headline, _store)
                 except Exception:
                     pass
+            # Task 8.7: clean COLUMN=VALUE artifacts from segmentation headlines
+            headline = clean_prose_artifacts(headline)
             seg_findings.append({
                 "title":           f"{seg.group_col} × {seg.target_col}",
                 "text":            headline,
@@ -2036,6 +2106,15 @@ def _attach_phase2_keys(results: dict, semantics: dict, coerce_reports: dict,
             results["insights"] = seg_findings + results.get("insights", [])
     except Exception as _e:
         print(f"[analyzer] _attach_phase2_keys segmentation failed: {_e}")
+
+    # Task 8.7: clean COLUMN=VALUE artifacts from all insight text fields
+    try:
+        from render.prose_cleaner import clean_prose_artifacts as _clean
+        for ins in results.get("insights", []):
+            if ins.get("text"):
+                ins["text"] = _clean(ins["text"])
+    except Exception as _ce:
+        print(f"[analyzer] Prose cleaning failed: {_ce}")
 
     # Narrative headers
     try:
@@ -2373,6 +2452,7 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                                      limitations=_limitations,
                                      effect_sizes=_effect_sizes,
                                      outlier_profile=_outlier_profile)
+        result["synthesis"] = ""
         return result
 
     client = Groq(api_key=api_key)
@@ -2431,6 +2511,7 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                                      limitations=_limitations,
                                      effect_sizes=_effect_sizes,
                                      outlier_profile=_outlier_profile)
+        result["synthesis"] = ""
         return result
 
     # ── 6. Parse JSON response ────────────────────────────────────────────
@@ -2461,6 +2542,7 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                                          limitations=_limitations,
                                          effect_sizes=_effect_sizes,
                                          outlier_profile=_outlier_profile)
+            result["synthesis"] = ""
             return result
 
     # ── 7. Render charts from spec (no exec) ─────────────────────────────
@@ -2572,6 +2654,22 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                                    limitations=_limitations,
                                    effect_sizes=_effect_sizes,
                                    outlier_profile=_outlier_profile)
+
+    # ── 10g. Phase 4: Cross-finding synthesis pass (Task 8.5) ────────────
+    # Second Groq call using the fast model — adds ~1-3s but produces the
+    # through-line paragraph that ties all findings together.
+    results["synthesis"] = ""
+    try:
+        _synthesis = _generate_synthesis(
+            results.get("insights", []),
+            client,
+            GROQ_MODELS["fast"],
+        )
+        results["synthesis"] = _synthesis
+        if _synthesis:
+            print(f"[analyzer] Synthesis generated: {_synthesis[:80]}...")
+    except Exception as _syn_e:
+        print(f"[analyzer] Synthesis wiring failed: {_syn_e}")
 
     # ── 11. Cache successful result ───────────────────────────────────────
     _cache_set(fp, results)
