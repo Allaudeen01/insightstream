@@ -1191,6 +1191,15 @@ Do NOT return recommendations that mention topics unrelated to the dataset colum
   Also ensure that all 3-5 recommendations are strictly about the dataset at hand.
   Do not import recommendations from other contexts (e.g., do not suggest streaming
   platform features for a celebrity dataset, or health protocols for a sales dataset).
+- Rule 12 — Key Takeaway must be the most surprising or impactful finding.
+  Do NOT choose a trivial fact (e.g., "Visa has the highest mean credit limit by a small margin").
+  Instead, choose a finding that reveals a LARGE disparity, an outlier-driven pattern,
+  or a counter-intuitive relationship. If the CANONICAL EXTREMUMS block above shows a
+  spread ratio > 10x between groups, that IS the Key Takeaway.
+  Example of a good Key Takeaway: "Prepaid cards carry a mean credit limit of just $64 —
+  less than 0.4% of the $18,558 average for standard debit cards — revealing that card_type
+  is the single most important segmentation variable in this dataset."
+  The Key Takeaway must make the reader say "I didn't know that."
 {missing_note}
 {financial_ban}
 Available columns: {context["columns"]}
@@ -2267,6 +2276,57 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
             results["insights"] = _kept
         except Exception as _eve:
             print(f"[analyzer] Extremum validation failed: {_eve}")
+
+    # ── 10b4. Override Key Takeaway with highest-spread segmentation ──────
+    # When a segmentation finding has spread_ratio >= 10 and is CRITICAL,
+    # it is almost certainly the most important story in the data.
+    # Replace whatever the LLM wrote as Key Takeaway with the filled headline.
+    if segmentations:
+        try:
+            from render.metric_store import build_metric_store
+            from render.metric_filler import fill_metrics
+            from analysis.segmentation import impact_for
+
+            _best_seg = max(segmentations, key=lambda s: s.spread_ratio)
+            if _best_seg.spread_ratio >= 10 and _best_seg.is_significant:
+                _store = build_metric_store(df, semantics)
+                try:
+                    _filled = fill_metrics(_best_seg.headline, _store)
+                except Exception:
+                    _filled = _best_seg.headline  # use raw if fill fails
+
+                # Build a richer Key Takeaway sentence
+                _kt_text = (
+                    f"{_filled} "
+                    f"This {_best_seg.spread_ratio:.0f}x spread makes "
+                    f"{_best_seg.group_col} the single most important "
+                    f"segmentation variable in this dataset."
+                )
+
+                # Replace or prepend the Key Takeaway insight
+                _insights = results.get("insights", [])
+                _kt_idx = next(
+                    (i for i, ins in enumerate(_insights)
+                     if "key takeaway" in ins.get("title", "").lower()),
+                    None,
+                )
+                _kt_insight = {
+                    "title":     "Key Takeaway",
+                    "text":      _kt_text,
+                    "impact":    impact_for(_best_seg),
+                    "confidence": "HIGH",
+                    "is_segmentation": True,
+                }
+                if _kt_idx is not None:
+                    _insights[_kt_idx] = _kt_insight
+                else:
+                    _insights.insert(0, _kt_insight)
+                results["insights"] = _insights
+                print(f"[analyzer] Key Takeaway overridden with "
+                      f"{_best_seg.spread_ratio:.0f}x segmentation: "
+                      f"{_kt_text[:100]}...")
+        except Exception as _kte:
+            print(f"[analyzer] Key Takeaway override failed: {_kte}")
 
     # ── 10c-10f. Phase 2: Attach all new keys ────────────────────────────
     results = _attach_phase2_keys(results, semantics, coerce_reports,

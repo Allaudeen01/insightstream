@@ -977,8 +977,8 @@ async def export_dashboard_pdf(
                     for r in insight_result.get("recommendations", [])
                     if isinstance(r, dict)
                 ]
-            # Fix 2: if no rule-engine recs, try stored LLM recs before
-            # falling back to the frontend payload (which may be stale)
+            # Always prefer stored LLM recs over the frontend payload —
+            # stored recs have already been filtered and validated.
             if not final_recs:
                 try:
                     import sqlite3 as _sq2, json as _jmod2
@@ -1023,7 +1023,7 @@ async def export_dashboard_pdf(
                 _df_pd = df.to_pandas() if hasattr(df, "to_pandas") else df
                 _before = len(final_recs)
                 final_recs = _filter_recommendations(
-                    final_recs, _df_pd.columns.tolist(),
+                    final_recs, _df_pd,
                     domain=domain_id.upper() if domain_id else "GENERIC_TABULAR",
                 )
                 if len(final_recs) < _before:
