@@ -81,10 +81,15 @@ SAFE_BUILTINS = {
 CACHE_DIR = Path(__file__).parent / ".analyzer_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
+# Bump this whenever the output schema changes (new keys, different semantics).
+# Any cache entry written with an older version is automatically ignored.
+CACHE_VERSION = "v3"   # v1=original, v2=chart_metas, v3=phase2_keys
+
 
 def _fingerprint(df: pd.DataFrame) -> str:
-    """Stable hash of dataset schema and sample. Ignores row order."""
+    """Stable hash of dataset schema, sample, and cache version. Ignores row order."""
     meta = {
+        "cache_version": CACHE_VERSION,
         "columns": sorted(df.columns.tolist()),
         "dtypes":  df.dtypes.astype(str).to_dict(),
         "shape":   list(df.shape),
@@ -460,17 +465,33 @@ def _feature_importance(df: pd.DataFrame, target_col: str,
 
 
 def _categorical_group_analysis(df: pd.DataFrame,
-                                numeric_target_col: str = None) -> str:
+                                numeric_target_col: str = None,
+                                semantics: dict = None) -> str:
     """
     For every categorical column (≤20 unique values), compute group-by stats
     against the best numeric target column. Returns a formatted text block.
+
+    semantics: optional {col: ColumnSemantics} — when provided, random_token
+    and identifier columns are excluded from the target candidate list so the
+    group-by never runs against CVV, card_number, etc.
     """
+    # Columns that must never be used as a numeric target
+    _SKIP_TAGS = {"random_token", "identifier", "categorical_degenerate", "free_text"}
+
+    def _is_skip_target(col: str) -> bool:
+        if _is_id_column(df, col):
+            return True
+        if semantics and col in semantics:
+            return semantics[col].tag in _SKIP_TAGS
+        return False
+
     # Pick numeric target: prefer named columns, else highest-variance numeric
     if numeric_target_col and numeric_target_col in df.columns:
         target = numeric_target_col
     else:
         preferred = ["popularity", "score", "sales", "price", "value",
-                     "rating", "revenue", "salary", "weekly_sales"]
+                     "rating", "revenue", "salary", "weekly_sales",
+                     "credit_limit"]
         target = next(
             (c for c in preferred if c.lower() in
              [x.lower() for x in df.columns]),
@@ -478,12 +499,21 @@ def _categorical_group_analysis(df: pd.DataFrame,
         )
         if not target:
             num_cols = [c for c in df.select_dtypes(include="number").columns
-                        if not _is_id_column(df, c)]
+                        if not _is_skip_target(c)]
             if num_cols:
                 target = max(num_cols, key=lambda c: df[c].std() / max(df[c].mean(), 1e-9)
                              if df[c].mean() != 0 else 0)
     if not target:
         return ""
+
+    # Double-check the chosen target isn't a random token
+    if _is_skip_target(target):
+        # Fall back to first non-skip numeric column
+        num_cols = [c for c in df.select_dtypes(include="number").columns
+                    if not _is_skip_target(c)]
+        if not num_cols:
+            return ""
+        target = num_cols[0]
 
     cat_cols = [c for c in df.select_dtypes(include=["object", "string"]).columns
                 if df[c].nunique() <= 20 and not _is_id_column(df, c)]
@@ -1819,14 +1849,21 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
     intel_block = _build_intel_block(df)
 
     # ── 3c. Group-by, outlier impact, duplicate detection ─────────────────
-    group_block    = _categorical_group_analysis(df)
-    # Pick best numeric col for outlier impact (same logic as group analysis)
-    _num_cols = [c for c in df.select_dtypes(include="number").columns
-                 if not _is_id_column(df, c)]
-    _preferred = ["popularity", "score", "sales", "price", "value",
+    # Pass semantics so random_token/identifier columns are excluded as targets
+    group_block    = _categorical_group_analysis(df, semantics=semantics)
+    # Pick best numeric col for outlier impact — exclude random_token/identifier
+    _SKIP_TAGS_OI = {"random_token", "identifier", "categorical_degenerate", "free_text"}
+    _num_cols = [
+        c for c in df.select_dtypes(include="number").columns
+        if not _is_id_column(df, c)
+        and (not semantics or semantics.get(c) is None
+             or semantics[c].tag not in _SKIP_TAGS_OI)
+    ]
+    _preferred = ["credit_limit", "popularity", "score", "sales", "price", "value",
                   "rating", "revenue", "salary", "weekly_sales"]
     _oc = next((c for c in _preferred
-                if c.lower() in [x.lower() for x in df.columns]), None)
+                if c.lower() in [x.lower() for x in df.columns]
+                and c in _num_cols), None)
     if not _oc and _num_cols:
         _oc = max(_num_cols, key=lambda c: df[c].std() / max(abs(df[c].mean()), 1e-9))
     _cat_cols = [c for c in df.select_dtypes(include=["object", "string"]).columns
