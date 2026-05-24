@@ -68,13 +68,16 @@ def classify_column(col_name: str, series: pd.Series) -> ColumnSemantics:
             reasons=[f"only {nunique} unique value(s)"],
         )
 
-    # 2) Identifier — name match OR uniqueness ratio near 1.0
+    # 2) Identifier — name match OR integer column with near-100% uniqueness
+    #    NOTE: continuous floats (Weekly_Sales, Temperature) can have high uniqueness
+    #    but are NOT identifiers — only apply the uniqueness check to integer columns.
     uniq_ratio = nunique / n if n else 0
-    if _name_hit(col_name, _IDENTIFIER_PATTERNS) or uniq_ratio >= 0.98:
+    is_integer_col = pd.api.types.is_integer_dtype(series)
+    if _name_hit(col_name, _IDENTIFIER_PATTERNS) or (is_integer_col and uniq_ratio >= 0.98):
         reason = (
             "name matches id pattern"
             if _name_hit(col_name, _IDENTIFIER_PATTERNS)
-            else f"uniqueness ratio {uniq_ratio:.2f}"
+            else f"integer column with uniqueness ratio {uniq_ratio:.2f}"
         )
         return ColumnSemantics(col_name, "identifier", 0.95, reasons=[reason])
 

@@ -4588,14 +4588,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
                 # Find date and revenue columns
                 date_col = next((c for c in df.columns if any(k in c.lower() for k in ["date", "time", "day"])), None)
                 rev_col = next((c for c in df.columns if any(k in c.lower() for k in ["sales", "amount", "revenue"])), None)
-                
+
                 if date_col and rev_col:
                     print(f"[temporal_fallback] Generating from df: date={date_col}, rev={rev_col}")
                     # df is already pandas at this point (converted at top of build_from_assets)
                     pdf_tmp = df.copy()
                     pdf_tmp[date_col] = pd.to_datetime(pdf_tmp[date_col], errors="coerce", dayfirst=True)
                     pdf_tmp = pdf_tmp.dropna(subset=[date_col])
-                    
+
                     pdf_tmp["month_period"] = pdf_tmp[date_col].dt.strftime("%Y-%m")  # "2026-01"
                     pdf_tmp["month_num"] = pdf_tmp[date_col].dt.month
 
@@ -4603,6 +4603,14 @@ class UnifiedReportGenerator(PDFReportGenerator):
                         revenue=(rev_col, "sum"),
                         month_num=("month_num", "first")
                     ).reset_index().sort_values("month_num")
+
+                    # Guard: require at least 6 distinct calendar months to avoid
+                    # generating a meaningless chart from weekly/daily granularity data
+                    # where every row is already a separate period (e.g. Walmart weekly sales).
+                    n_distinct_months = pdf_tmp["month_num"].nunique()
+                    if n_distinct_months < 6:
+                        print(f"[temporal_fallback] Suppressed — only {n_distinct_months} distinct months (need ≥6)")
+                        date_col = None  # prevent chart generation below
 
                     if len(monthly) >= 2:
                         # Build monthly_data as (period_string, revenue) tuples

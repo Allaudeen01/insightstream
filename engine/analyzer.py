@@ -1091,12 +1091,23 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
     corr_block = ""
     if correlations:
         corr_lines = []
-        for p in correlations[:5]:  # top 5 pairs in prompt
+        for p in correlations[:8]:  # inject up to 8 pairs
             corr_lines.append(
                 f"  {p['col_a']} vs {p['col_b']}: r={p['r']} ({p['strength']})"
             )
-        corr_block = "Pre-computed Pearson correlations (use these exact values):\n" + "\n".join(corr_lines)
-        print(f"[analyzer] Injected top {len(correlations[:5])} correlation pairs into prompt")
+        # Highlight the single strongest pair so the LLM cannot miss it
+        top = correlations[0]
+        top_note = (
+            f"\nSTRONGEST PAIR: {top['col_a']} vs {top['col_b']} "
+            f"r={top['r']} ({top['strength']}) — this MUST appear in the Key Takeaway "
+            f"if no segmentation finding with spread > 10x is present."
+        )
+        corr_block = (
+            "Pre-computed Pearson correlations (use these exact values):\n"
+            + "\n".join(corr_lines)
+            + top_note
+        )
+        print(f"[analyzer] Injected top {len(correlations[:8])} correlation pairs into prompt")
 
     return f"""You are a senior data analyst. Analyze this dataset and return ONLY a valid JSON object — no markdown, no code, no explanation.
 
