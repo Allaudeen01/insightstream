@@ -868,19 +868,26 @@ def _generate_chart_summary(chart_type: str, x_col: Optional[str],
             second     = str(agg.index[1])   if len(agg) > 1 else None
             second_val = float(agg.iloc[1])  if len(agg) > 1 else None
 
+            # Format group-level values directly (not via store, which holds global mean)
+            def _fmt_group(v):
+                if _is_monetary(y_col) and v is not None:
+                    # Currency format: use $ with comma-separated integer
+                    return f"${v:,.0f}"
+                return f"{v:,.2f}" if v is not None else "—"
+
             if second_val and top_val > second_val * 1.5:
                 return (
-                    f"'{top_cat}' has the highest average {y_col} ({fmt(top_val, y_col)}), "
+                    f"'{top_cat}' has the highest average {y_col} ({_fmt_group(top_val)}), "
                     f"which is significantly higher than other categories. "
                     f"This suggests that {x_col} is a strong predictor of {y_col}."
                 )
             else:
                 second_clause = (
-                    f", followed closely by '{second}' ({fmt(second_val, y_col)})"
+                    f", followed closely by '{second}' ({_fmt_group(second_val)})"
                     if second else ""
                 )
                 return (
-                    f"'{top_cat}' leads with average {y_col} = {fmt(top_val, y_col)}"
+                    f"'{top_cat}' leads with average {y_col} = {_fmt_group(top_val)}"
                     f"{second_clause}. "
                     f"The differences are modest, indicating that other factors "
                     f"may also influence {y_col}."
@@ -1115,13 +1122,13 @@ def _generate_prompt(context: dict, quality: dict, domain_risk: str = None,
         corr_lines = []
         for p in correlations[:8]:  # inject up to 8 pairs
             corr_lines.append(
-                f"  {p['col_a']} vs {p['col_b']}: r={p['r']} ({p['strength']})"
+                f"  {p['col_a']} vs {p['col_b']}: Pearson r = {p['r']} ({p['strength']})"
             )
         # Highlight the single strongest pair so the LLM cannot miss it
         top = correlations[0]
         top_note = (
             f"\nSTRONGEST PAIR: {top['col_a']} vs {top['col_b']} "
-            f"r={top['r']} ({top['strength']}) — this MUST appear in the Key Takeaway "
+            f"Pearson r = {top['r']} ({top['strength']}) — this MUST appear in the Key Takeaway "
             f"if no segmentation finding with spread > 10x is present."
         )
         corr_block = (
@@ -1185,11 +1192,12 @@ Rules:
   Fewer relevant recommendations are better than irrelevant ones.
 - Rule 9 — Correlations (MANDATORY): You are provided with pre-computed Pearson
   correlation pairs below. You MUST include at least 3 insights that reference the
-  top 3 absolute correlation pairs. For each, report the exact r value (rounded to
-  2 decimals) and the strength label. Example: "Weekly_Sales shows a strong positive
-  correlation with Temperature (r=0.97)." Do NOT invent correlations — use only the
-  exact values from the injected list. If a top pair involves a store/ID column
-  (e.g., Store vs Weekly_Sales), still report it.
+  top 3 absolute correlation pairs. For each, report the exact value using the format
+  "Pearson r = X.XX" (e.g., "Pearson r = -0.08"). Do NOT write "r.08" or "-0 r.08" —
+  always write the full decimal number after "Pearson r = ".
+  Example: "num_cards_issued shows a weak negative correlation with credit_limit
+  (Pearson r = -0.08)." Do NOT invent correlations — use only the exact values from
+  the injected list. If a top pair involves a store/ID column, still report it.
 - Rule 10 — Recommendations (MANDATORY structure): Generate 3-5 recommendations.
   Each MUST follow this exact structure:
   1. Start with an imperative verb (Audit, Segment, Investigate, Build, Flag, Monitor, etc.)
@@ -1337,6 +1345,15 @@ def _render_from_spec(spec: dict, df: pd.DataFrame,
             if x and _is_id_column(df, x):
                 print(f"[analyzer] Skipping ID column: {x}")
                 raise ValueError(f"Column {x!r} is an ID column — skipping")
+
+            # ── Skip identifier/random_token Y columns ────────────────────
+            # Prevents bar charts like "average id by card_type" when the
+            # LLM picks an identifier column as the Y-axis metric.
+            if y and semantics and y in semantics:
+                _y_tag = semantics[y].tag
+                if _y_tag in {"identifier", "random_token", "categorical_degenerate", "free_text"}:
+                    print(f"[analyzer] Skipping {_y_tag} Y column: {y!r}")
+                    y = None  # fall through to count-based bar
 
             # ── Redirect: histogram of low-cardinality integer → bar chart ─
             # Store (1-45), Holiday_Flag (0/1), etc. are categorical IDs.

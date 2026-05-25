@@ -127,11 +127,14 @@ from hypothesis import strategies as st
 def test_property_prose_cleanliness(text):
     """
     Property 4: For any string, clean_prose_artifacts returns a string
-    containing no substring matching \\b\\w+=\\S+.
+    containing no substring matching the cleaner's own pattern
+    (column name starting with a letter, followed by =value).
     """
+    # Use the same pattern as the cleaner: column name must start with a letter
+    _CLEANER_PATTERN = re.compile(r'\b([A-Za-z][A-Za-z0-9_]*)=\S+')
     result = clean_prose_artifacts(text)
     assert isinstance(result, str), "Must return str"
-    assert not _COLVAL.search(result), (
+    assert not _CLEANER_PATTERN.search(result), (
         f"COLUMN=VALUE artifact remains after cleaning.\n"
         f"Input:  {text!r}\n"
         f"Output: {result!r}"

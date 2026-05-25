@@ -3040,11 +3040,22 @@ class PDFReportGenerator:
             impact_clean = self._strip_emoji(impact)
             meta_line = f"Timeframe: {timeframe}  |  Owner: {owner}  |  Impact: {impact_clean}"
 
+            # Bug 4 fix: suppress the structured meta line when the action body
+            # already embeds "Owner:" and "Timeframe:" (new imperative format).
+            # Rendering both produces visible duplication in the PDF.
+            action_lower = action.lower()
+            _body_has_meta = "owner:" in action_lower and "timeframe:" in action_lower
+            if _body_has_meta:
+                meta_line = ""  # body already contains the metadata
+
             row = [
                 Paragraph(priority_str, num_style),
                 [
                     Paragraph(self._md_to_rl(action), action_style),
-                    Paragraph(meta_line, meta_style),
+                    *(
+                        [Paragraph(meta_line, meta_style)]
+                        if meta_line else []
+                    ),
                 ],
             ]
             tbl = Table([row], colWidths=[0.7 * inch, 5.5 * inch])
