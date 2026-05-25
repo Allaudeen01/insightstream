@@ -3565,7 +3565,11 @@ class UnifiedReportGenerator(PDFReportGenerator):
                           df: Optional[pd.DataFrame | pl.DataFrame] = None,
                           domain_id: str = "general",
                           currency_override: Optional[str] = None,
-                          sports_meta: Optional[dict] = None) -> str:
+                          sports_meta: Optional[dict] = None,
+                          hypotheses: list = [],
+                          unit_notes: list = [],
+                          synthesis: str = "",
+                          limitations: list = []) -> str:
         """Construct a structured multi-page PDF with domain-aware visuals and narratives."""
         self._current_domain_id = domain_id  # Store for nested use
         self._sports_meta = sports_meta or {}  # Available to all section builders
@@ -4006,6 +4010,47 @@ class UnifiedReportGenerator(PDFReportGenerator):
             elements.append(Paragraph("AI Intelligence Brief", self.S["ChartTitle"]))
             elements.append(Paragraph(self._md_to_rl(ai_summary), self.S["Insight"]))
             elements.append(Spacer(1, 20))
+
+        # ── Context callout (unit_notes — Task 10.1) ──────────────────────
+        # Rendered after Executive Summary, before charts/regional analysis.
+        # Shows unit-of-analysis notes (e.g. "rows are at card level, 3.1 cards/client").
+        if unit_notes:
+            try:
+                from xml.sax.saxutils import escape as _xe_ctx
+                _ctx_bg = colors.HexColor("#EFF6FF")   # light blue
+                _ctx_border = colors.HexColor("#3B82F6")  # blue accent
+                _ctx_style = ParagraphStyle(
+                    "CtxNote",
+                    parent=self.S["Insight"],
+                    leftIndent=12,
+                    rightIndent=12,
+                    spaceBefore=4,
+                    spaceAfter=4,
+                )
+                ctx_paras = []
+                for note in unit_notes:
+                    note_text = note.get("note", "") if isinstance(note, dict) else str(note)
+                    if note_text:
+                        ctx_paras.append(
+                            Paragraph(f"<b>Context:</b> {_xe_ctx(note_text)}", _ctx_style)
+                        )
+                if ctx_paras:
+                    ctx_table = Table(
+                        [[para] for para in ctx_paras],
+                        colWidths=[C.PAGE_W - 2 * C.MARGIN - 24],
+                    )
+                    ctx_table.setStyle(TableStyle([
+                        ("BACKGROUND",    (0, 0), (-1, -1), _ctx_bg),
+                        ("LEFTPADDING",   (0, 0), (-1, -1), 12),
+                        ("RIGHTPADDING",  (0, 0), (-1, -1), 12),
+                        ("TOPPADDING",    (0, 0), (-1, -1), 8),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                        ("LINEBEFORE",    (0, 0), (0, -1), 3, _ctx_border),
+                    ]))
+                    elements.append(ctx_table)
+                    elements.append(Spacer(1, 12))
+            except Exception as _ctx_e:
+                log.warning(f"[Context callout] Failed: {_ctx_e}")
 
         # 3. PAGE 3: REGIONAL ANALYSIS (Rendered if DF provided, suppressed if low-variance)
         _regional_page_added = False
@@ -4812,6 +4857,107 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.extend(self._build_section_6_deep_insights(
             insights, metrics=kpis, domain=domain_id, df=df
         ))
+
+        # ── Synthesis box (Task 10.4) — after Deep Insights ───────────────
+        if synthesis:
+            try:
+                from xml.sax.saxutils import escape as _xe_syn
+                _syn_bg = colors.HexColor("#FEF3C7")      # light amber
+                _syn_border = colors.HexColor("#F59E0B")  # amber accent
+                _syn_style = ParagraphStyle(
+                    "SynthText",
+                    parent=self.S["Insight"],
+                    leftIndent=12,
+                    rightIndent=12,
+                    spaceBefore=4,
+                    spaceAfter=4,
+                )
+                syn_para = Paragraph(self._md_to_rl(synthesis), _syn_style)
+                syn_table = Table(
+                    [[syn_para]],
+                    colWidths=[C.PAGE_W - 2 * C.MARGIN - 24],
+                )
+                syn_table.setStyle(TableStyle([
+                    ("BACKGROUND",    (0, 0), (-1, -1), _syn_bg),
+                    ("LEFTPADDING",   (0, 0), (-1, -1), 12),
+                    ("RIGHTPADDING",  (0, 0), (-1, -1), 12),
+                    ("TOPPADDING",    (0, 0), (-1, -1), 10),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                    ("LINEBEFORE",    (0, 0), (0, -1), 3, _syn_border),
+                ]))
+                elements.append(Spacer(1, 16))
+                elements.append(Paragraph("Synthesis", self.S["Section"]))
+                elements.append(HRFlowable(
+                    width="100%", thickness=1,
+                    color=colors.HexColor(C.RULE_LIGHT)
+                ))
+                elements.append(Spacer(1, 8))
+                elements.append(syn_table)
+                elements.append(Spacer(1, 16))
+            except Exception as _syn_e:
+                log.warning(f"[Synthesis box] Failed: {_syn_e}")
+
+        # ── Open Questions section (hypotheses — Task 10.1) ───────────────
+        # Rendered after Deep Insights, before Recommendations.
+        if hypotheses:
+            try:
+                from xml.sax.saxutils import escape as _xe_hyp
+                elements.append(Spacer(1, 8))
+                elements.append(Paragraph("Open Questions", self.S["Section"]))
+                elements.append(HRFlowable(
+                    width="100%", thickness=1.5,
+                    color=colors.HexColor(C.RULE_GREY)
+                ))
+                elements.append(Spacer(1, 8))
+                elements.append(Paragraph(
+                    "The following questions cannot be resolved from the available data alone.",
+                    self.S["Insight"],
+                ))
+                elements.append(Spacer(1, 8))
+
+                _obs_style = ParagraphStyle(
+                    "HypObs",
+                    parent=self.S["ChartTitle"],
+                    fontSize=10,
+                    spaceBefore=10,
+                    spaceAfter=4,
+                )
+                _bullet_style = ParagraphStyle(
+                    "HypBullet",
+                    parent=self.S["Insight"],
+                    leftIndent=16,
+                    spaceBefore=2,
+                )
+                _resolve_style = ParagraphStyle(
+                    "HypResolve",
+                    parent=self.S["Insight"],
+                    leftIndent=16,
+                    fontName=PDF_FONT_OBLIQUE,
+                    spaceBefore=4,
+                    spaceAfter=8,
+                )
+
+                for hyp in hypotheses:
+                    obs = hyp.get("observation", "") if isinstance(hyp, dict) else str(hyp)
+                    candidates = hyp.get("candidates", []) if isinstance(hyp, dict) else []
+                    disambig = hyp.get("disambiguating_info", "") if isinstance(hyp, dict) else ""
+
+                    if obs:
+                        elements.append(Paragraph(
+                            f"<b>{_xe_hyp(obs)}</b>", _obs_style
+                        ))
+                    for cand in candidates:
+                        elements.append(Paragraph(
+                            f"• {_xe_hyp(str(cand))}", _bullet_style
+                        ))
+                    if disambig:
+                        elements.append(Paragraph(
+                            f"<i>To resolve: {_xe_hyp(str(disambig))}</i>",
+                            _resolve_style,
+                        ))
+            except Exception as _hyp_e:
+                log.warning(f"[Open Questions] Failed: {_hyp_e}")
+
         recs = recommendations or [
             b.get("content") for b in text_blocks
             if "recommendation" in b.get("content", "").lower()
@@ -4819,6 +4965,44 @@ class UnifiedReportGenerator(PDFReportGenerator):
         elements.extend(self._build_section_7_recommendations(
             recs, insights=insights, domain_id=domain_id, df=df
         ))
+
+        # ── What We Don't Know section (limitations — Task 10.5) ──────────
+        # Rendered after Recommendations.
+        if limitations:
+            try:
+                from xml.sax.saxutils import escape as _xe_lim
+                elements.append(PageBreak())
+                elements.append(Paragraph("What We Don't Know", self.S["Section"]))
+                elements.append(HRFlowable(
+                    width="100%", thickness=1.5,
+                    color=colors.HexColor(C.RULE_GREY)
+                ))
+                elements.append(Spacer(1, 8))
+                elements.append(Paragraph(
+                    "The following analytical questions cannot be answered "
+                    "with the available data:",
+                    self.S["Insight"],
+                ))
+                elements.append(Spacer(1, 8))
+                _lim_style = ParagraphStyle(
+                    "LimBullet",
+                    parent=self.S["Insight"],
+                    leftIndent=8,
+                    spaceBefore=4,
+                )
+                for lim in limitations:
+                    concept = lim.get("concept", "") if isinstance(lim, dict) else str(lim)
+                    impact  = lim.get("impact", "")  if isinstance(lim, dict) else ""
+                    concept_label = concept.replace("_", " ").title()
+                    bullet_text = (
+                        f"• <b>{_xe_lim(concept_label)}:</b> {_xe_lim(impact)}"
+                        if impact else
+                        f"• <b>{_xe_lim(concept_label)}</b>"
+                    )
+                    elements.append(Paragraph(bullet_text, _lim_style))
+                elements.append(Spacer(1, 16))
+            except Exception as _lim_e:
+                log.warning(f"[What We Don't Know] Failed: {_lim_e}")
 
         # ── Final safety pass: strip any raw-numeric Paragraph elements ──
         elements = [el for el in elements if self._is_safe_element(el)]

@@ -146,6 +146,11 @@ async def analyze(
                 "domain":          llm_results.get("domain", "general").lower(),
                 "title":           llm_results.get("title", "Data Analysis Report"),
                 "charts":          chart_jsons,
+                # Phase 4: new keys for PDF rendering
+                "hypotheses":      llm_results.get("hypotheses", []),
+                "unit_notes":      llm_results.get("unit_notes", []),
+                "synthesis":       llm_results.get("synthesis", ""),
+                "limitations":     llm_results.get("limitations", []),
             }
             db.add(session_record)
 

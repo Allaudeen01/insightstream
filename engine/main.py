@@ -863,6 +863,11 @@ async def export_dashboard_pdf(
         _insights_to_use = None
         _structured_recs = None
         _llm_domain_id = None
+        # Phase 4: new PDF section data (defaults for non-LLM path)
+        _llm_hypotheses  = []
+        _llm_unit_notes  = []
+        _llm_synthesis   = ""
+        _llm_limitations = []
 
         try:
             import sqlite3 as _sq
@@ -910,6 +915,11 @@ async def export_dashboard_pdf(
                         ]
                         _llm_domain_id = _llm_data.get("domain", "general").lower()
                         domain_id = _llm_domain_id
+                        # Phase 4: extract new keys for PDF rendering
+                        _llm_hypotheses  = _llm_data.get("hypotheses", [])
+                        _llm_unit_notes  = _llm_data.get("unit_notes", [])
+                        _llm_synthesis   = _llm_data.get("synthesis", "")
+                        _llm_limitations = _llm_data.get("limitations", [])
                         print(f"[EXPORT] _llm_override=True, {len(_converted)} LLM charts ready")
         except Exception as _oe:
             print(f"[EXPORT] LLM override check failed: {_oe}")
@@ -1082,6 +1092,10 @@ async def export_dashboard_pdf(
             domain_id=domain_id,
             currency_override=_currency_code,
             sports_meta=sports_meta,
+            hypotheses=_llm_hypotheses,
+            unit_notes=_llm_unit_notes,
+            synthesis=_llm_synthesis,
+            limitations=_llm_limitations,
         )
         logger.info(f"✅ [SUCCESS] PDF generated at: {out_path}")
 
