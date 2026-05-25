@@ -68,10 +68,37 @@ def classify_column(col_name: str, series: pd.Series) -> ColumnSemantics:
             reasons=[f"only {nunique} unique value(s)"],
         )
 
-    # 2) Identifier — name match OR integer column with near-100% uniqueness
+    uniq_ratio = nunique / n if n else 0
+
+    # 2) Random token — name-based (before identifier so cvv/pin are never misclassified)
+    if _name_hit(col_name, _RANDOM_TOKEN_PATTERNS):
+        return ColumnSemantics(
+            col_name, "random_token", 0.95,
+            reasons=["name matches random-token pattern"],
+        )
+
+    # 3) Monetary — name-based check runs BEFORE identifier uniqueness check.
+    #    A column named credit_limit, price, salary, etc. must never be classified
+    #    as an identifier even if all values happen to be unique (e.g. synthetic data).
+    if _name_hit(col_name, _MONETARY_PATTERNS) and pd.api.types.is_numeric_dtype(series):
+        return ColumnSemantics(
+            col_name, "monetary", 0.9,
+            reasons=["name matches monetary pattern"],
+            extras={"currency": "USD"},
+        )
+
+    # 3b) Monetary by name alone (string column not yet coerced — still tag it)
+    if _name_hit(col_name, _MONETARY_PATTERNS):
+        return ColumnSemantics(
+            col_name, "monetary", 0.75,
+            reasons=["name matches monetary pattern (not yet numeric)"],
+            extras={"currency": "USD"},
+        )
+
+    # 4) Identifier — name match OR integer column with near-100% uniqueness.
     #    NOTE: continuous floats (Weekly_Sales, Temperature) can have high uniqueness
     #    but are NOT identifiers — only apply the uniqueness check to integer columns.
-    uniq_ratio = nunique / n if n else 0
+    #    Monetary columns are already handled above and will never reach this check.
     is_integer_col = pd.api.types.is_integer_dtype(series)
     if _name_hit(col_name, _IDENTIFIER_PATTERNS) or (is_integer_col and uniq_ratio >= 0.98):
         reason = (
@@ -81,36 +108,11 @@ def classify_column(col_name: str, series: pd.Series) -> ColumnSemantics:
         )
         return ColumnSemantics(col_name, "identifier", 0.95, reasons=[reason])
 
-    # 3) Random token — name-based
-    if _name_hit(col_name, _RANDOM_TOKEN_PATTERNS):
-        return ColumnSemantics(
-            col_name, "random_token", 0.95,
-            reasons=["name matches random-token pattern"],
-        )
-
-    # 4) Temporal — name or dtype
+    # 5) Temporal — name or dtype
     if _name_hit(col_name, _TEMPORAL_PATTERNS) or pd.api.types.is_datetime64_any_dtype(series):
         return ColumnSemantics(
             col_name, "temporal", 0.9,
             reasons=["name or dtype indicates temporal"],
-        )
-
-    # 5) Monetary — name-based, but only when column is numeric (or will be after coercion)
-    #    We check name first; if the series is still object dtype here, the caller
-    #    should have applied coerce_numeric before classify_column.
-    if _name_hit(col_name, _MONETARY_PATTERNS) and pd.api.types.is_numeric_dtype(series):
-        return ColumnSemantics(
-            col_name, "monetary", 0.9,
-            reasons=["name matches monetary pattern"],
-            extras={"currency": "USD"},
-        )
-
-    # 5b) Monetary by name alone (string column not yet coerced — still tag it)
-    if _name_hit(col_name, _MONETARY_PATTERNS):
-        return ColumnSemantics(
-            col_name, "monetary", 0.75,
-            reasons=["name matches monetary pattern (not yet numeric)"],
-            extras={"currency": "USD"},
         )
 
     # 6) Numeric meaningful — numeric dtype, not flagged above
