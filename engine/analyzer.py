@@ -822,41 +822,44 @@ def _generate_chart_summary(chart_type: str, x_col: Optional[str],
             top_cat   = str(counts.index[0])
             top_pct   = float(counts.iloc[0]) / total * 100
             top_count = int(counts.iloc[0])
+            n_cats    = len(counts)
 
-            if top_pct > 80:
-                # Dominant category — list next few
-                other_counts = counts.iloc[1:6]
+            # Use template_guards for accurate balance description
+            try:
+                from render.template_guards import balance_descriptor, safe_top_n
+                desc = balance_descriptor(counts)
+                actual_top_n = min(5, n_cats)  # never claim more than exist
+            except Exception:
+                desc = "dominated" if top_pct >= 50 else "balanced"
+                actual_top_n = min(5, n_cats)
+
+            if desc in ("dominated", "single-valued") or top_pct >= 50:
+                # Dominant category — list the actual categories (not "top 5" if fewer exist)
+                other_counts = counts.iloc[1:min(4, n_cats)]
                 other_parts  = [
                     f"{cat} ({cnt:,}, {cnt/total*100:.1f}%)"
                     for cat, cnt in other_counts.items()
                 ]
-                others_text = ", ".join(other_parts[:3])
-                if len(other_counts) > 3:
-                    others_text += f", and {len(other_counts) - 3} more"
-
-                if len(counts) <= 6:
-                    dist_text = "The remaining categories are: " + ", ".join(
-                        f"{c} ({v:,}, {v/total*100:.1f}%)"
-                        for c, v in counts.iloc[1:].items()
-                    )
-                else:
-                    dist_text = f"There are {len(counts)} distinct categories in total."
-
+                others_text = ", ".join(other_parts) if other_parts else ""
                 takeaway = (
-                    f"Any analysis of {x_col} will be dominated by '{top_cat}' "
-                    f"– conclusions about the whole dataset largely reflect this segment."
+                    f"Any analysis of {x_col} will largely reflect the '{top_cat}' segment."
                 )
                 return (
-                    f"**{top_cat} dominates {x_col}** – {top_cat} accounts for "
+                    f"**{top_cat} dominates {x_col}** — {top_cat} accounts for "
                     f"{top_pct:.1f}% of records ({top_count:,} out of {total:,}). "
-                    f"{others_text}. {dist_text} {takeaway}"
+                    + (f"Other categories: {others_text}. " if others_text else "")
+                    + takeaway
                 )
             else:
-                top5_pct = float(counts.iloc[:5].sum()) / total * 100
+                # Balanced/uneven — use actual category count, not hardcoded "5"
+                top_n_pct = float(counts.iloc[:actual_top_n].sum()) / total * 100
+                top_n_label = f"top {actual_top_n}" if actual_top_n > 1 else "top"
                 return (
                     f"The most common {x_col} is '{top_cat}' with {top_count:,} records "
-                    f"({top_pct:.1f}%). The distribution is relatively balanced, with the "
-                    f"top 5 categories making up {top5_pct:.1f}% of the data."
+                    f"({top_pct:.1f}%). The {top_n_label} "
+                    f"{'categories' if actual_top_n > 1 else 'category'} "
+                    f"make up {top_n_pct:.1f}% of the data across "
+                    f"{n_cats} distinct values."
                 )
 
         # ── 2. Bar chart — aggregated numeric (y_col present) ─────────────
@@ -2421,7 +2424,8 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
             from analysis.limitations import detect_limitations
             _domain_for_lim = domain_info.get("category", "")
             _limitations = detect_limitations(df, semantics, domain=_domain_for_lim)
-            print(f"[analyzer] Limitations: {len(_limitations)} detected")
+            print(f"[analyzer] Limitations: {len(_limitations)} detected "
+                  f"(domain={_domain_for_lim!r})")
         except Exception as _lme:
             print(f"[analyzer] Limitations detection failed: {_lme}")
 
@@ -2486,6 +2490,22 @@ def analyze_dataset(df: pd.DataFrame, force_refresh: bool = False) -> dict:
                   f"(confidence={domain_info.get('confidence', '?'):.2f})")
         except Exception as _de:
             print(f"[analyzer] LLM domain classification failed: {_de}")
+
+    # ── 5c. Re-run limitations with the now-final domain ─────────────────
+    # Step 3g ran limitations with the rule-based domain (GENERIC_TABULAR).
+    # Now that the LLM has refined the domain, re-run so finance-bucket
+    # concepts are included for FINANCE/CREDIT/ECOMMERCE datasets.
+    if semantics:
+        try:
+            from analysis.limitations import detect_limitations as _dl
+            _final_domain = domain_info.get("category", "")
+            _limitations_refined = _dl(df, semantics, domain=_final_domain)
+            if len(_limitations_refined) != len(_limitations):
+                print(f"[analyzer] Limitations re-run: {len(_limitations)} → "
+                      f"{len(_limitations_refined)} (domain={_final_domain!r})")
+                _limitations = _limitations_refined
+        except Exception as _lre:
+            print(f"[analyzer] Limitations re-run failed: {_lre}")
 
     def _call_groq(messages: list) -> str:
         resp = client.chat.completions.create(
