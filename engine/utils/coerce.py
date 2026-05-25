@@ -60,6 +60,8 @@ def coerce_numeric(series: pd.Series) -> Tuple[pd.Series, dict]:
 
     # Scale suffix
     def _apply_scale(val: str) -> str:
+        if not isinstance(val, str):
+            return val  # guard: skip floats/NaN that slipped through
         if not val:
             return val
         last = val[-1].upper()

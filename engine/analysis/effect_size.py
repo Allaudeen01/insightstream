@@ -68,6 +68,12 @@ def compute_effect_sizes(
             if not pd.api.types.is_numeric_dtype(df[target_col]):
                 continue
 
+            # Cardinality guard: skip pairs where average group size < 10
+            # (e.g. original_name×gender where each name appears ~1 time)
+            n_unique = df[group_col].nunique(dropna=True)
+            if n_unique > 0 and len(df) / n_unique < 10:
+                continue
+
             # Build per-group arrays; require ≥ 2 observations per group
             groups = []
             for val in df[group_col].dropna().unique():

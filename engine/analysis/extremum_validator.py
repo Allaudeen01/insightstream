@@ -95,7 +95,7 @@ def validate_extremum_claims(
                 }
 
     for ins in insights:
-        text = (ins.get("text", "") + " " + ins.get("title", "")).lower()
+        text = ((ins.get("text") or "") + " " + (ins.get("title") or "")).lower()
 
         # Fast path: no extremum word → keep unconditionally
         if not any(w in text for w in EXTREMUM_WORDS):
